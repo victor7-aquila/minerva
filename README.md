@@ -108,12 +108,6 @@ minerva/
 
 ---
 
-## 문서
-
-- [문서 처리 설계](./docs/document-pipeline.md) — 원본 보관, 표·이미지 처리, 검색 결과 복원
-
----
-
 ## License
 
 [MIT](./LICENSE)
