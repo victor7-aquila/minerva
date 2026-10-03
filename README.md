@@ -1,0 +1,2 @@
+# minerva
+Personal RAG server
