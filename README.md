@@ -15,7 +15,7 @@ Markdown 문서를 **Agentic Chunking**으로 의미 단위로 나누고, **Hybr
 - **Hybrid Search + Reranker** — Dense 벡터 검색과 BM25를 RRF로 결합하고 Cross-Encoder로 재정렬
 - **표·이미지 처리** — 표 요약·이미지 캡션 기반 색인, 검색 결과에서는 원본 표·이미지로 복원
 - **검색 API** — AI 에이전트와 개발 도구를 위한 REST API
-- **Console** — 문서 관리, 청크·요약·캡션 확인, 검색 테스트, 로그 조회
+- **Console** — 문서 관리, 청크·요약·캡션 확인, 골든셋 평가, 로그 조회
 
 ---
 
@@ -53,7 +53,7 @@ Markdown 문서를 **Agentic Chunking**으로 의미 단위로 나누고, **Hybr
 | Backend | NestJS |
 | RAG Server | Python |
 | Console | Next.js |
-| Database | MongoDB, Qdrant |
+| Database | MongoDB, Qdrant, SQLite (RAG Server 작업 목록) |
 | 청킹·표 요약 LLM | Qwen3-14B (4bit) |
 | 이미지 캡션 VLM | Qwen3-VL-8B (4bit) |
 | Embedding | Qwen3-Embedding-4B |
@@ -88,7 +88,7 @@ MD 문서 → 전처리 (표·이미지 분리) → 요약·캡션 생성 → Ag
 | **Phase 1** | MD 문서 기준 [주요 기능](#주요-기능) 구현 |
 | **Phase 2** | PDF → MD 변환 |
 | **Phase 3** | 형태소 분석 적용, 한/영 혼용 문서 처리 개선 |
-| **이후** | IAM 도입과 MCP 지원, 검색 품질 평가, 이미지 저장소 S3 전환 |
+| **이후** | IAM 도입과 MCP 지원, 이미지 저장소 S3 전환 |
 
 ---
 
@@ -100,11 +100,15 @@ minerva/
 │   ├── backend/            # NestJS — 문서 관리·검색 API
 │   ├── rag-server/         # Python — RAG 파이프라인
 │   └── console/            # Next.js — 관리용 웹 UI
-├── docs/                   # 설계 문서
-├── docker-compose.yml      # 로컬 개발용 인프라
+├── data/                   # 앱이 쓰는 로컬 데이터 — 이미지 파일, 작업 목록, 모델 파일 (git 제외)
+├── docker-compose.yml      # 로컬 개발용 인프라 — MongoDB, Qdrant, Ollama (named volume)
+├── INTERFACES.md           # 앱 사이 계약
+├── AGENTS.md               # AI 에이전트 작업 규칙
 ├── LICENSE
 └── README.md
 ```
+
+앱마다 요구사항(`REQUIREMENTS.md`), 구조(`ARCHITECT.md`), 계약·API 명세(`INTERFACES.md`, `API.md`)를 그 앱 폴더에 둔다.
 
 ---
 
