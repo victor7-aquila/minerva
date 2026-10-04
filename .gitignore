@@ -1,2 +1,11 @@
 # Claude Code: 상위 폴더(.claude)와 연결된 정션, 프로젝트별 설정·실행 기록
 .claude/
+
+# 에이전트 임시 초안·실험 코드
+.sandbox/
+
+# 환경 변수 실값 (.env.example만 커밋)
+.env
+
+# 앱이 쓰는 로컬 데이터: 이미지 파일, 작업 목록 SQLite, 모델 파일
+data/
