@@ -32,6 +32,20 @@
 
 ```text
 src/assets/
+├── index.ts
+├── assets.module.ts
+├── controllers/
+│   └── assets.controller.ts
+├── helpers/
+│   ├── image-files.ts
+│   ├── markdown-assets.ts
+│   └── placeholder.ts
+├── interfaces/
+│   ├── asset-params.dto.ts
+│   └── assets.types.ts
+├── services/
+│   ├── assets-crud.service.ts
+│   └── assets.service.ts
 └── MODULE.md
 
 src/assets/**/*.spec.ts
@@ -55,7 +69,7 @@ flowchart LR
     Assets --> Files[/"FileStore"/]
 ```
 
-common 의존은 생략했다.
+common·라이브러리 의존은 생략했다.
 
 ## 의존성과 공개 표면
 
@@ -66,7 +80,8 @@ common 의존은 생략했다.
 | rag | DI | `RagClient.summarizeTable`, `captionImage`, `RagUnavailableError`, `RagRequestError` | rag `MODULE.md` | `REQ-BE-2.3` |
 | logs | DI | `LogsService.record`(`captioning`) | logs `MODULE.md` | `REQ-BE-6.1.1` |
 | storage | DI | `MONGO_DB`(컬렉션 `assets`), `FILE_STORE` | storage `MODULE.md` | `REQ-BE-2`, `REQ-BE-9.1.2` |
-| common | DI·import | `PinoLogger`, `AssetNotFoundError`, `InvalidRequestError` | common `MODULE.md` | `REQ-BE-2.4.1` |
+| common | import | `AssetNotFoundError`, `InvalidRequestError` | common `MODULE.md` | `REQ-BE-2.4.1` |
+| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
 
 **금지 의존** — documents·indexing을 import하지 않는다. 문서 데이터는 documents가 인자로 넘긴다(`ARCHITECT.md` 「의존 규칙」).
 
@@ -104,8 +119,8 @@ common 의존은 생략했다.
 
 ### 변환·저장 경계
 
-- **원본 MD → 색인용 MD** (`REQ-BE-2.2`) — 보존: 표·이미지 밖의 모든 글자와 순서. 파생: 표·이미지 자리마다 자리표시 한 줄, 자리표시 모양 문자열은 `[[` 뒤에 U+200B를 넣어 깨뜨린다. 형식: 루트 `IF-1`
-- **청크 본문 → 복원 본문** (`REQ-BE-2.5`) — 표 자리표시는 `tableMarkdown`으로, 이미지 자리표시는 `![{hint}]({이미지 주소})`로(`API.md`의 `SearchResult`), 짝이 없는 이미지는 `{hint}` 문장만으로 바꾼다. `hint` 안의 `[`·`]`는 `\[`·`\]`로 바꿔 넣는다. U+200B로 깨뜨린 `[[`는 되돌린다
+- **원본 MD → 색인용 MD** (`REQ-BE-2.2`) — 보존: 표·이미지 밖의 모든 글자와 순서. 파생: 표·이미지 자리마다 자리표시 한 줄, 자리표시 모양 문자열은 `REQ-BE-2.2.2`대로 깨뜨린다. 형식: 루트 `IF-1`
+- **청크 본문 → 복원 본문** (`REQ-BE-2.5`) — 표 자리표시는 `tableMarkdown`으로, 이미지 자리표시는 `![{hint}]({이미지 주소})`로(`API.md`의 `SearchResult`), 짝이 없는 이미지는 `{hint}` 문장만으로 바꾼다. 이미지 대체 텍스트로 넣는 `hint`는 `\`를 `\\`로, `[`·`]`를 `\[`·`\]`로, 줄바꿈을 공백으로 바꾼다. 그 버전에 레코드가 없거나 종류가 다른 자리표시는 그대로 둔다. `REQ-BE-2.2.2`로 넣은 U+200B는 하나 뺀다
 
 ## 기능 그룹별 요구사항
 
@@ -152,13 +167,23 @@ export interface HintContext {
   editionLabel: string | null;
   shouldContinue(): Promise<boolean>;
 }
+
+/** 표·이미지 하나의 조회용 모양이다. API.md AssetView의 원천이다. */
+export interface AssetViewData {
+  placeholderId: string;
+  kind: 'table' | 'image';
+  tableMarkdown: string | null;
+  imageUrl: string | null;
+  text: string;
+  isTemporary: boolean;
+}
 ```
 
 ### 추출 — `REQ-BE-2.1`
 
 **`REQ-BE-2.1.1`** 버전마다 표·이미지 등록
 
-- 처리 계약: `prepareVersion`은 원본 MD를 CommonMark·GFM으로 읽어, GFM 표와 HTML `<table>` 블록을 표로, Markdown 이미지(인라인·참조형)와 HTML `<img>`를 이미지로 등록한다. 이미지 경로의 파일 이름이 `images`의 `fileName`과 같으면 짝으로 보고 파일을 저장한다(`REQ-BE-1.1.3`). 짝이 없으면 `unmatchedImages`에 경로를 담는다(`REQ-BE-1.1.4`)
+- 처리 계약: `prepareVersion`은 원본 MD를 CommonMark·GFM으로 읽어, GFM 표와 HTML `<table>` 블록을 표로, Markdown 이미지(인라인·참조형)와 HTML `<img>`를 이미지로 등록한다. 표(GFM 표의 칸, HTML `<table>` 안) 안의 이미지는 표의 일부로 보고 따로 등록하지 않는다. 이미지 경로의 파일 이름이 `images`의 `fileName`과 같으면 짝으로 보고 파일을 저장한다(`REQ-BE-1.1.3`). 이미지 경로의 파일 이름은 `?`·`#` 뒤를 뗀 경로의 마지막 `/`·`\` 뒤이며, 그 값이나 퍼센트 디코딩한 값이 업로드 파일 이름(마지막 `/`·`\` 뒤)과 NFC로 맞춰 같으면 짝이다(대소문자 구분). 짝이 있는 이미지는 자리표시마다 파일을 저장한다. 짝이 없으면 `unmatchedImages`에 경로를 담는다(`REQ-BE-1.1.4`). `unmatchedImages`는 경로 중복을 빼고 처음 나온 순서다
 - 실패: `images`에 같은 `fileName`이 둘 이상이면 짝을 정할 수 없으므로 `InvalidRequestError`를 내고 아무것도 저장하지 않는다
 - 충족 기준: 표 둘·이미지 셋(그중 하나는 짝 없음)이 든 MD에서 표·이미지 레코드가 다섯 개, 저장한 파일이 둘, `unmatchedImages`가 하나다
 
@@ -179,7 +204,7 @@ export interface HintContext {
 
 **`REQ-BE-2.2.2`** 자리표시 모양 문자열 깨뜨리기
 
-- 처리 계약: 원본에 `[[minerva:`로 시작하는 문자열이 있으면 `[[` 뒤에 U+200B를 넣는다. 복원(`REQ-BE-2.5`)이 되돌린다
+- 처리 계약: 원본에서 `[[` 뒤에 U+200B가 0개 이상 이어지고 `minerva:`가 오면 `[[` 뒤에 U+200B를 하나 더 넣는다(코드 블록 안 포함). 자리표시 설명에도 같은 규칙을 쓴다. 복원(`REQ-BE-2.5`)이 되돌린다
 - 충족 기준: 원본에 `[[minerva:table:x | y]]`가 있으면 색인용 MD에서 루트 `IF-1` 형식으로 읽히지 않고, 그 부분을 복원하면 원본 문자열이 된다
 
 **`REQ-BE-2.2.3`** 자리표시 설명
@@ -217,7 +242,7 @@ export interface HintContext {
 - 처리 계약: 표·이미지 하나의 결과를 받을 때마다 저장한다. `inheritVersion`은 이전 버전의 레코드를 새 버전으로 복사하되 `changedHints`의 것만 새 값(`isTemporary` 거짓)으로 바꾸고, 모두 `done`으로 둔다. `markTemporaryForRegeneration`은 `isTemporary`가 참이고 `fileKey`가 있거나 표인 것만 `pending`으로 바꾸고 그 수를 돌려준다(`REQ-BE-1.7.1`)
 - 충족 기준: 둘째 호출 뒤 멈춘 버전으로 다시 `generateHints`하면 셋째부터만 요청하고, 이어받은 버전은 `changedHints`의 것만 바뀌며, 재색인 표시는 짝 없는 이미지를 빼고 임시 설명만 `pending`으로 만든다
 
-`generateHints`가 끝나면 `captioning` 기록을 남긴다(개수와 임시 설명 수, `REQ-BE-6.1.1`).
+`generateHints`가 `stopped: false`로 끝나고 이번 실행에서 하나 이상 저장했으면 `captioning` 기록을 남긴다(`count`는 이번에 저장한 수 `generated`, `failedCount`는 그중 임시 설명 수 `temporary`, `REQ-BE-6.1.1`). `shouldContinue`는 `pending` 항목마다 처리 전에 묻는다. 요청 실패 외에 저장소에 이미지 파일이 없거나 응답이 비어도 임시 설명으로 저장한다.
 
 ### 이미지 제공 — `REQ-BE-2.4`
 
