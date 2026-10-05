@@ -26,6 +26,14 @@ MongoDB 연결과 이미지 파일 저장 인터페이스를 제공한다. 컬�
 
 ```text
 src/storage/
+├── index.ts
+├── storage.module.ts
+├── interfaces/
+│   ├── file-store.ts
+│   └── storage.tokens.ts
+├── services/
+│   ├── local-file-store.ts
+│   └── mongo-connection.ts
 └── MODULE.md
 
 src/storage/**/*.spec.ts
@@ -38,7 +46,8 @@ test/                         # 실제 MongoDB·임시 폴더로 하는 e2e
 
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| common | DI | `ConfigService`(`MONGODB_URI`, `FILE_STORAGE_DIR`), `PinoLogger`, `InvalidRequestError` | common `MODULE.md` | `REQ-BE-9.1` |
+| common | DI | `ConfigService`(`MONGODB_URI`, `FILE_STORAGE_DIR`), `InvalidRequestError` | common `MODULE.md` | `REQ-BE-9.1` |
+| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
 | MongoDB | 네트워크 (공식 드라이버 `mongodb`) | 연결, `Db` | MongoDB | `REQ-BE-9.1.1` |
 | 파일 시스템 | 파일 | `FILE_STORAGE_DIR` 아래 | 이 문서 | `REQ-BE-9.1.2` |
 
