@@ -10,10 +10,11 @@ Backend가 Console과 AI 에이전트·개발 도구에 제공하는 HTTP API다
 - **오류 응답** — 모든 실패 응답은 아래 본문을 갖는다. `message`는 한국어이고, 스택 트레이스·쿼리·파일 경로를 담지 않는다 (`REQ-BE-8.3`)
 - **null과 빠진 필드** — 응답의 선택 필드는 값이 없으면 빠뜨리지 않고 `null`로 내보낸다. 요청의 선택 필드는 빠뜨리면 기본값을 쓴다. `PATCH`에서는 빠진 필드는 바꾸지 않고, `null`은 값을 지운다
 - **시각·날짜** — 시각은 UTC의 ISO 8601 문자열(예: `2026-10-04T05:05:31Z`)이다 (`REQ-BE-8.4`). 날짜로 거르는 파라미터는 날짜 문자열(예: `2026-10-04`)이며 한국 표준시(KST) 하루로 해석한다 (`REQ-BE-1.3.4`, `REQ-BE-6.2.2`)
-- **ID** — `doc_id`, `golden_set_id`, `log_id`는 Backend가 정한 문자열이다
+- **ID** — `doc_id`, `golden_set_id`, `log_id`는 Backend가 정한 문자열이다. `doc_id`는 소문자 UUID다. 경로의 `{doc_id}`와 `exclude_doc_id`가 이 형식이 아니면 `400 INVALID_REQUEST`다
+- **이미지 주소** — 표·이미지의 이미지 주소(`AssetView.image_url`, `GET /v1/documents/{doc_id}/original`의 `images` 값, 복원한 본문의 `![캡션](주소)`)는 호스트 없이 `/v1/`로 시작하는 Backend 기준 경로다
 - **페이지네이션** — 목록 요청은 `page`(1부터, 기본 1)와 `page_size`(20·50·100, 기본 20)를 받고, 응답은 `{"items": [...], "total": 정수, "page": 정수, "page_size": 정수}`다 (`REQ-BE-7.1.3`)
 - **정렬** — 목록 요청은 `sort`(열 이름)와 `order`(`asc`·`desc`, 기본 `desc`)를 받는다. 한 번에 한 열만 정렬한다
-- **공통 오류** — 형식이 잘못된 요청은 `400 INVALID_REQUEST` (`REQ-BE-7.1.2`), RAG Server가 응답하지 않거나 준비 중이면 `503 RAG_UNAVAILABLE` (`REQ-BE-10.1.2`), 예상하지 못한 서버 오류는 `500 INTERNAL_ERROR`다
+- **공통 오류** — 형식이 잘못된 요청은 `400 INVALID_REQUEST` (`REQ-BE-7.1.2`), 없는 경로는 `404 NOT_FOUND`, RAG Server가 응답하지 않거나 준비 중이면 `503 RAG_UNAVAILABLE` (`REQ-BE-10.1.2`), 예상하지 못한 서버 오류는 `500 INTERNAL_ERROR`다
 
 ```json
 {
@@ -71,7 +72,7 @@ MD 파일 여러 개와 이미지 파일들을 받아 MD 하나마다 문서를 
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
-| `400` | `UNSUPPORTED_FILE` | 받지 않는 형식의 파일이 있다. `message`에 파일 이름을 담는다 (`REQ-BE-1.1.2`) |
+| `400` | `UNSUPPORTED_FILE` | 받지 않는 형식의 파일이 있다. `message`에 파일 이름을 담는다. UTF-8로 읽을 수 없는 MD도 같다 (`REQ-BE-1.1.2`) |
 | `413` | `PAYLOAD_TOO_LARGE` | 업로드 한도(MD 하나 10MB, 이미지 하나 20MB, 파일 200개, 요청 전체 200MB 기본)를 넘는다. `message`에 넘은 파일 이름이나 한도를 담는다 (`REQ-BE-1.1.10`) |
 | `400` | `INVALID_REQUEST` | 이름이 비었거나 판 표기·판 날짜 중 하나만 있다 (`REQ-BE-1.1.6`) |
 
@@ -235,7 +236,8 @@ MD 하나와 이미지들로 그 문서의 새 버전을 만든다. (`REQ-BE-1.6
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
-| `400` | `UNSUPPORTED_FILE` | 받지 않는 형식의 파일이 있다 |
+| `400` | `UNSUPPORTED_FILE` | 받지 않는 형식의 파일이 있다. UTF-8로 읽을 수 없는 MD도 같다 |
+| `400` | `INVALID_REQUEST` | MD가 정확히 하나가 아니다 (`REQ-BE-1.6.1`) |
 | `404` | `DOCUMENT_NOT_FOUND` | 그 ID의 문서가 없거나 삭제됐다 |
 | `409` | `DOCUMENT_LOCKED` | 처리 중이거나 교체됨이다 |
 | `413` | `PAYLOAD_TOO_LARGE` | 업로드 한도를 넘는다 (`REQ-BE-1.6.1`, `REQ-BE-1.1.10`) |
@@ -282,11 +284,11 @@ MD 하나와 이미지들로 그 문서의 새 버전을 만든다. (`REQ-BE-1.6
 
 | 위치 | 이름 | 타입 | 필수 | 제약 |
 | :--- | :--- | :--- | :--- | :--- |
-| body | `query` | `string` | 필수 | |
+| body | `query` | `string` | 필수 | 공백만은 안 된다 |
 | body | `top_n` | `integer` | 선택 | 1~50. 빠지면 RAG Server 기본값 |
 | body | `names` | `string[]` | 선택 | 이 이름의 문서들 안에서만 검색한다 |
 | body | `edition_scope` | `string` | 선택 | `all`, `latest`, `specific`. 기본 `all` |
-| body | `edition` | `EditionRef` | 조건부 | `edition_scope`가 `specific`이면 필수 |
+| body | `edition` | `EditionRef` | 조건부 | `edition_scope`가 `specific`이면 필수. 그 밖에는 쓰지 않는다 |
 | body | `expand_neighbors` | `boolean` | 선택 | 기본 `false` |
 
 **응답**
@@ -309,6 +311,10 @@ MD 하나와 이미지들로 그 문서의 새 버전을 만든다. (`REQ-BE-1.6
 
 - `200` — `GoldenSet`의 페이지
 
+**동작**
+
+- 정렬 값은 `outcome`(적중이 놓침보다 크다), `rank`(`latest.expanded.rank`), `coverage`(`latest.expanded.coverage`), `evaluated_at`(`latest.evaluated_at`), `created_at`이다. 그 값이 없는 행(평가 중·평가 실패, 정답 순위가 없는 놓침, 평가 중의 평가 시각)은 `order`와 관계없이 맨 뒤에 둔다. 같은 값끼리는 추가 늦은 순이다 (`REQ-BE-5.3.1`)
+
 ### `POST /v1/golden-sets`
 
 골든셋을 추가하고 바로 평가를 시작한다. (`REQ-BE-5.1.1`, `REQ-BE-5.1.2`, `REQ-BE-5.1.5`, `REQ-BE-5.2.1`)
@@ -330,6 +336,7 @@ MD 하나와 이미지들로 그 문서의 새 버전을 만든다. (`REQ-BE-1.6
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
+| `400` | `INVALID_REQUEST` | `query`·`doc_id`·`answer_span`이 없거나 공백뿐이다, `edition_only`가 `true`인데 정답 문서에 판 정보가 없다 (`REQ-BE-5.1.1`) |
 | `400` | `ANSWER_SPAN_NOT_FOUND` | 정답 구간이 정답 문서의 지금 검색되는 버전 색인용 MD에 없다. 공백·줄바꿈 차이는 무시하고, 표·이미지 안의 글자는 찾지 않는다 (`REQ-BE-5.1.5`) |
 | `409` | `DOCUMENT_NOT_SEARCHABLE` | 정답 문서의 검색 상태가 검색 가능이 아니다 (`REQ-BE-5.1.2`) |
 | `404` | `DOCUMENT_NOT_FOUND` | 정답 문서가 없거나 삭제됐다 |
@@ -597,8 +604,8 @@ RAG Server `POST /v1/evaluations` 응답의 `EvaluationMetrics`와 같은 모양
 | :--- | :--- | :--- | :--- |
 | `golden_set_count` | `integer` | 필수 | |
 | `evaluating_count` | `integer` | 필수 | 평가 중인 골든셋 수 |
-| `last_evaluated_at` | `string` | 선택 | 없으면 `null` |
-| `n` | `integer` | 필수 | Hit@N의 N (RAG Server 기본 결과 개수) |
+| `last_evaluated_at` | `string` | 선택 | 적중·놓침인 최근 기록 중 가장 늦은 평가 시각. 없으면 `null` |
+| `n` | `integer` | 필수 | Hit@N의 N (RAG Server 기본 결과 개수). `last_evaluated_at` 기록의 값이며, 없으면 0 |
 | `base` | `SummaryMetrics` | 필수 | 연관 청크 확장 전 |
 | `expanded` | `SummaryMetrics` | 필수 | 연관 청크 확장 뒤 |
 
@@ -616,10 +623,18 @@ RAG Server `POST /v1/evaluations` 응답의 `EvaluationMetrics`와 같은 모양
 | `log_id` | `string` | 필수 | |
 | `occurred_at` | `string` | 필수 | |
 | `kind` | `string` | 필수 | `GET /v1/logs`의 `kind` 값 중 하나 |
-| `document` | `DocumentRef` | 필수 | 삭제된 문서면 이름·판만 남는다 |
+| `document` | `LogDocumentRef` | 필수 | 문서가 삭제되거나 이름이 바뀌어도 기록 시점의 이름·판 표기가 남는다 (`REQ-BE-6.1.2`, `REQ-BE-1.8.6`) |
 | `document_deleted` | `boolean` | 필수 | 문서가 삭제됐는가 |
 | `outcome` | `string` | 필수 | `success` 또는 `failure` |
 | `description` | `string` | 필수 | 한 줄 설명 |
+
+### `LogDocumentRef`
+
+| 필드 | 타입 | 필수 | 설명·제약 |
+| :--- | :--- | :--- | :--- |
+| `doc_id` | `string` | 필수 | |
+| `name` | `string` | 필수 | 기록 시점의 문서 이름 |
+| `edition_label` | `string` | 선택 | 기록 시점의 판 표기. 판 정보가 없었으면 `null` |
 
 ## 오류 코드
 
@@ -632,6 +647,7 @@ RAG Server `POST /v1/evaluations` 응답의 `EvaluationMetrics`와 같은 모양
 | `DOCUMENT_NOT_FOUND` | `404` | 문서가 없거나 삭제됐다 |
 | `ASSET_NOT_FOUND` | `404` | 그 이미지가 없다 |
 | `GOLDEN_SET_NOT_FOUND` | `404` | 골든셋이 없다 |
+| `NOT_FOUND` | `404` | 요청한 경로가 없다 |
 | `DOCUMENT_LOCKED` | `409` | 처리 중이거나 교체된 문서라 바꿀 수 없다 |
 | `DOCUMENT_NOT_SEARCHABLE` | `409` | 검색 가능이 아닌 문서를 정답 문서로 고를 수 없다 |
 | `EVALUATION_IN_PROGRESS` | `409` | 평가 중인 골든셋이 있어 전체 다시 평가를 할 수 없다 |
