@@ -28,10 +28,28 @@
 
 ```text
 src/evaluation/
+├── index.ts
+├── evaluation.module.ts
+├── controllers/
+│   └── evaluation.controller.ts
+├── helpers/
+│   ├── answer-span.ts
+│   ├── evaluation-outcome.ts
+│   ├── evaluation-summary.ts
+│   ├── evaluation-views.ts
+│   └── golden-set-list.ts
+├── interfaces/
+│   ├── evaluation.dto.ts
+│   └── evaluation.types.ts
+├── services/
+│   ├── evaluation.service.ts
+│   ├── evaluation-crud.service.ts
+│   ├── evaluation-tasks.ts
+│   └── evaluation-clock.ts
 └── MODULE.md
 
 src/evaluation/**/*.spec.ts
-test/
+test/evaluation.e2e-spec.ts
 ```
 
 ## 의존성과 공개 표면
@@ -43,7 +61,8 @@ test/
 | documents | DI | `getRef`, `getEvaluationTarget` | documents `MODULE.md` | `REQ-BE-5.1.2`, `REQ-BE-5.1.5`, `REQ-BE-5.2.7` |
 | rag | DI | `RagClient.evaluate`, `RagUnavailableError`, `RagRequestError` | rag `MODULE.md` | `REQ-BE-5.2` |
 | storage | DI | `MONGO_DB`(컬렉션 `golden_sets`, `evaluation_records`) | storage `MODULE.md` | `REQ-BE-5` |
-| common | DI | `PinoLogger`, 오류 클래스 | common `MODULE.md` | `REQ-BE-5` |
+| common | DI | 오류 클래스 | common `MODULE.md` | `REQ-BE-5` |
+| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
 
 ### 공개 표면
 
@@ -71,15 +90,16 @@ test/
 
 | 필드 | 타입 | 필수 | 불변 조건 |
 | :--- | :--- | :--- | :--- |
+| `recordId` | `string` | 필수 | 고유. Backend가 정한 소문자 UUID |
 | `goldenSetId` | `string` | 필수 | |
 | `outcome` | `'evaluating' \| 'hit' \| 'miss' \| 'error'` | 필수 | `evaluating`에서 다른 값으로 한 번만 바뀐다 |
 | `n` | `number \| null` | 조건부 | `hit`·`miss`면 RAG Server가 준 N |
-| `base`, `expanded` | 지표 \| `null` | 조건부 | `hit`·`miss`면 RAG Server 응답 그대로 |
+| `base`, `expanded` | 지표 \| `null` | 조건부 | `hit`·`miss`면 RAG Server 응답 그대로(rag의 `RagEvaluationMetrics` 모양으로 저장하고 응답에서 `EvaluationMetrics`로 바꾼다) |
 | `errorMessage` | `string \| null` | 조건부 | `error`면 한국어 사유 |
-| `startedAt` | `Date` | 필수 | |
+| `startedAt` | `Date` | 필수 | 앞서 만든 기록보다 늦다(같은 밀리초에 만들어도 1ms 이상 늘린다) |
 | `evaluatedAt` | `Date \| null` | 조건부 | `evaluating`이 아니면 값이 있다 |
 
-응답 형식(`GoldenSet`, `EvaluationRecord`, `EvaluationSummary`)은 `API.md`가 소유한다. `GoldenSet.answer`의 이름·판은 `documents.getRef`로 채우며, 삭제된 문서도 이름·판이 나온다.
+골든셋의 가장 최근 기록은 그 골든셋 기록 중 `startedAt`이 가장 늦은 기록이다. 응답 형식(`GoldenSet`, `EvaluationRecord`, `EvaluationSummary`)은 `API.md`가 소유한다. `GoldenSet.answer`의 이름·판은 `documents.getRef`로 채우며, 삭제된 문서도 이름·판이 나온다.
 
 ## 기능 그룹별 요구사항
 
@@ -87,8 +107,8 @@ test/
 
 **`REQ-BE-5.1.1`** 골든셋 추가
 
-- 처리 계약: 아래 검증을 모두 통과하면 골든셋과 `evaluating` 기록을 만들고 응답한 뒤 평가를 시작한다(`REQ-BE-5.2.1`). `edition_only`가 참인데 정답 문서에 판 정보가 없으면 `400`이다
-- 실패: 정답 문서가 없거나 삭제됐으면 `DocumentNotFoundError`
+- 처리 계약: `query`·`answer_span`·`doc_id`가 없거나 공백뿐이면 `400 INVALID_REQUEST`다. 그다음 정답 문서가 없거나 삭제됨(`404`), 검색 가능이 아님(`REQ-BE-5.1.2`, `409`), `edition_only`가 참인데 정답 문서에 판 정보가 없음(`400 INVALID_REQUEST`), 정답 구간 없음(`REQ-BE-5.1.5`, `400`) 순서로 보고, 모두 통과하면 `evaluating` 기록과 골든셋을 이 순서로 저장하고 응답한 뒤 평가를 시작한다(`REQ-BE-5.2.1`). `doc_id`의 형식은 따로 검사하지 않는다(형식이 다르면 문서가 없다). `query`·`answer_span`은 다듬지 않고 저장하며, `edition_only`가 빠지거나 `null`이면 `false`다
+- 실패: 정답 문서가 없거나 삭제됐으면 `DocumentNotFoundError`, 판 정보 없는 문서에 `edition_only`가 참이면 `InvalidRequestError`
 - 충족 기준: 올바른 요청이 `201`과 `latest.outcome: evaluating`을 받고, 없는 문서는 `404`, 판 정보 없는 문서에 `edition_only: true`는 `400`이다
 
 **`REQ-BE-5.1.2`** 검색 가능이 아닌 정답 문서 거부
@@ -98,7 +118,7 @@ test/
 
 **`REQ-BE-5.1.5`** 정답 구간이 색인용 MD에 있어야 함
 
-- 처리 계약: `getEvaluationTarget`의 색인용 MD에서 자리표시(루트 `IF-1`)를 모두 지우고 그 자리를 구간이 넘을 수 없는 경계로 둔 뒤, 공백 문자를 모두 지운 정답 구간이 같은 방식으로 공백을 지운 본문의 한 경계 구역 안에 들어 있는지 본다
+- 처리 계약: `getEvaluationTarget`의 색인용 MD에서 자리표시(루트 `IF-1`)를 모두 지우고 그 자리를 구간이 넘을 수 없는 경계로 둔 뒤, 공백 문자를 모두 지운 정답 구간이 같은 방식으로 공백을 지운 본문의 한 경계 구역 안에 들어 있는지 본다. 자리표시는 루트 `IF-1` 형식(`[[minerva:{kind}:{placeholder_id} | {description}]]`)과 정확히 맞는 문자열이다. 공백 문자는 유니코드 공백(줄바꿈·탭·NBSP 포함)이고, 자리표시 모양 문자열을 깨뜨린 U+200B(`REQ-BE-2.2.2`)는 공백이 아니라 지우지 않는다. 검색되는 버전의 색인용 MD가 없으면 구간이 없는 것으로 본다
 - 실패: `AnswerSpanNotFoundError`
 - 충족 기준: 줄바꿈 위치만 다른 구간은 받고, 본문에 없는 구간과 표 자리표시의 설명 글자로 된 구간과 자리표시를 가로지르는 구간은 `400 ANSWER_SPAN_NOT_FOUND`다
 
@@ -108,6 +128,7 @@ test/
 
 **`REQ-BE-5.1.4`** 지우면 기록도 지움
 
+- 처리 계약: 골든셋을 먼저 지우고 그 기록을 지운다. 진행 중이던 평가는 끝나도 지운 기록을 되살리지 않는다
 - 실패: 없는 골든셋이면 `GoldenSetNotFoundError`
 - 충족 기준: 지운 뒤 그 골든셋과 기록이 모두 없고, 요약에서 빠진다
 
@@ -124,17 +145,19 @@ test/
 
 **`REQ-BE-5.2.3`** 평가하지 못하면 평가 실패
 
-- 처리 계약: `RagUnavailableError`는 "RAG Server에 연결할 수 없습니다", `RagRequestError`는 코드에 맞는 한국어 사유로 `error` 기록을 남긴다
+- 처리 계약: `RagUnavailableError`는 "RAG Server에 연결할 수 없습니다", `RagRequestError`는 코드 `DOCUMENT_NOT_SEARCHABLE`이면 "정답 문서가 검색되지 않습니다", `VECTOR_DIMENSION_MISMATCH`면 "저장된 벡터와 임베딩 모델의 차원이 달라 평가하지 못했습니다", 그 밖의 4xx면 "RAG Server가 평가 요청을 받지 않았습니다", 그 밖의 5xx면 "RAG Server가 평가 중 오류를 냈습니다", 그 밖의 예외(정답 문서 조회 실패 포함)는 "평가 중 예상하지 못한 오류가 발생했습니다"로 `error` 기록을 남긴다. 사유에 RAG Server의 오류 코드·메시지를 넣지 않는다
 - 충족 기준: RAG Server가 닿지 않거나 `409`를 주면 기록이 `error`와 사유를 갖는다
 
 **`REQ-BE-5.2.4`** 한 건·전체 다시 평가
 
-- 처리 계약: 다시 평가할 때마다 새 `evaluating` 기록을 만든다. 전체 다시 평가는 골든셋을 하나씩 차례로 평가한다
+- 처리 계약: 다시 평가할 때마다 새 `evaluating` 기록을 만든다. 평가 중인 골든셋의 한 건 다시 평가도 받는다. 전체 다시 평가는 응답 전에 모든 골든셋의 `evaluating` 기록을 만들고, 응답 뒤 골든셋을 추가 이른 순으로 하나씩 차례로 평가한다. 한 건이 실패해도 다음 건으로 가며, 서버가 종료 중이면 남은 건을 평가하지 않는다(`REQ-BE-5.2.8`이 정리한다)
+- 평가 실행 단계: 평가를 시작할 때 그 기록이 아직 `evaluating`인지 확인하고(아니면 RAG Server를 부르지 않고 끝낸다), 이어서 골든셋이 지워졌는지 확인한다. 골든셋이 지워졌으면 RAG Server를 부르지 않고 그 골든셋의 기록을 모두 지운 뒤 `evaluation.orphan_cleaned`만 남기고 끝낸다(`evaluation.done` 없음). 골든셋 삭제와 겹쳐 뒤늦게 만들어진 기록이 남지 않게 하기 위해서다
 - 실패: 한 건 다시 평가에서 없는 골든셋이면 `GoldenSetNotFoundError`
 - 충족 기준: 한 건 다시 평가가 그 골든셋에 새 기록을, 전체 다시 평가가 모든 골든셋에 새 기록을 하나씩 남긴다
 
 **`REQ-BE-5.2.5`** 평가 중이면 전체 다시 평가 거부
 
+- 처리 계약: 다른 전체 다시 평가 요청이 기록을 만드는 중이어도 거부한다
 - 실패: `EvaluationInProgressError`
 - 충족 기준: 최근 기록이 `evaluating`인 골든셋이 하나라도 있으면 `409 EVALUATION_IN_PROGRESS`이고 새 기록이 생기지 않는다
 
@@ -149,14 +172,14 @@ test/
 
 **`REQ-BE-5.2.8`** 기동 때 남은 평가 중 기록 정리
 
-- 처리 계약: 기동할 때 `evaluating` 기록을 모두 "서버가 다시 시작해 평가하지 못했습니다"로 `error`로 바꾼다
+- 처리 계약: 기동할 때(요청을 받기 전) `evaluating` 기록을 모두 "서버가 다시 시작해 평가하지 못했습니다"로 `error`로 바꾸고 평가 시각을 기동 시각으로 둔다
 - 충족 기준: `evaluating` 기록이 남은 채 기동하면 모두 `error`가 되고, 그 뒤 전체 다시 평가가 거부되지 않는다
 
 ### 조회 — `REQ-BE-5.3`
 
 **`REQ-BE-5.3.1`** 골든셋 목록
 
-- 처리 계약: 결과(`hit`·`miss`, 빠지면 전체)로 거르고, 결과·정답 순위(`expanded.rank`)·포함 비율(`expanded.coverage`)·평가 시각·추가 시각 중 한 열로 정렬해 페이지로 준다. 값이 없는 행(평가 중·실패)은 정렬에서 맨 뒤에 둔다
+- 처리 계약: 결과(`hit`·`miss`, 빠지면 전체)로 거르고, 결과·정답 순위(`expanded.rank`)·포함 비율(`expanded.coverage`)·평가 시각·추가 시각 중 한 열로 정렬해 페이지로 준다. 정렬 값은 결과(적중 > 놓침, 평가 중·실패는 값 없음), 정답 순위(`expanded.rank`), 포함 비율(`expanded.coverage`), 평가 시각(평가 중은 값 없음), 추가 시각이다. 값이 없는 행은 `order`와 관계없이 맨 뒤에 두고, 같은 값끼리는 추가 늦은 순이다
 - 충족 기준: 적중만 거르면 최근 기록이 `hit`인 골든셋만 나오고, 정답 순위로 정렬하면 평가 중 행이 뒤에 온다
 
 **`REQ-BE-5.3.2`** 골든셋마다 최근 결과
@@ -165,7 +188,7 @@ test/
 
 **`REQ-BE-5.3.3`** 요약 지표
 
-- 처리 계약: 골든셋마다 최근 기록 중 `hit`·`miss`인 것만으로 확장 전·후 각각 Hit@1·3·5·N 비율과 MRR(역순위 평균)을 계산한다. `n`은 그 기록들 중 가장 최근 기록의 값이다. 골든셋 수, 평가 중 건수, 마지막 평가 시각을 함께 준다. 셀 기록이 없으면 비율과 MRR은 0이다
+- 처리 계약: 골든셋마다 최근 기록 중 `hit`·`miss`인 것만으로 확장 전·후 각각 Hit@1·3·5·N 비율과 MRR(역순위 평균)을 계산한다. `n`과 마지막 평가 시각은 그 기록들 중 평가 시각이 가장 늦은 기록의 값이다. 골든셋 수와 평가 중 건수를 함께 준다. 계산할 기록이 없으면 비율·MRR·`n`은 0이고 마지막 평가 시각은 `null`이다
 - 충족 기준: 최근 결과가 적중(순위 1)·놓침·평가 실패인 골든셋 셋이면 `hit_at_1`이 0.5, `mrr`이 0.5이고 평가 실패는 분모에서 빠진다
 
 ## 실행 계약
@@ -174,6 +197,7 @@ test/
 
 | 예외 | 발생 조건 | 코드 | 처리 책임 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
+| `InvalidRequestError` | 판 정보가 없는 정답 문서에 `edition_only`가 참이다 | `INVALID_REQUEST` | 발생: evaluation | `REQ-BE-5.1.1` |
 | `DocumentNotFoundError` | 정답 문서가 없거나 삭제됐다 | `DOCUMENT_NOT_FOUND` | 발생: evaluation | `REQ-BE-5.1.1` |
 | `DocumentNotSearchableError` | 정답 문서가 검색 가능이 아니다 | `DOCUMENT_NOT_SEARCHABLE` | 발생: evaluation | `REQ-BE-5.1.2` |
 | `AnswerSpanNotFoundError` | 정답 구간이 색인용 MD에 없다 | `ANSWER_SPAN_NOT_FOUND` | 발생: evaluation | `REQ-BE-5.1.5` |
@@ -188,8 +212,10 @@ test/
 | :--- | :--- | :--- | :--- | :--- |
 | `evaluation.done` | 평가 한 건 끝 | info | `goldenSetId`, `outcome`, `rank`, `elapsedMs` | `REQ-BE-5.2` |
 | `evaluation.restart_cleanup` | 기동 때 정리 | warning | `count` | `REQ-BE-5.2.8` |
+| `evaluation.orphan_cleaned` | 골든셋이 지워진 평가 중 기록을 정리 | info | `goldenSetId`, `removed` | `REQ-BE-5.2.4` |
+| `evaluation.task_failed` | 평가 백그라운드 작업 실패(기록 저장 실패 등) | warning | `task`, `goldenSetId`, `errorName` | `REQ-BE-5.2` |
 
-질의와 정답 구간은 로그에 넣지 않는다.
+`evaluation.done`은 기록을 실제로 끝냈을 때만 남기고, `rank`는 `expanded.rank`(평가 실패면 `null`)다. `evaluation.restart_cleanup`은 바꾼 기록이 있을 때만 남긴다. `evaluation.orphan_cleaned`는 `removed`가 지운 기록 건수이며 정리 분기를 탈 때마다 남긴다. 질의와 정답 구간은 로그에 넣지 않는다.
 
 ## 테스트와 추적성
 
