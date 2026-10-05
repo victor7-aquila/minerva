@@ -1,0 +1,11 @@
+# 로컬 개발용 인프라. 앱 프로세스는 각 앱 폴더에서 따로 띄운다
+services:
+  mongo:
+    image: mongo:8
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:
