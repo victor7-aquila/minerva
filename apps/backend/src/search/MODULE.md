@@ -23,10 +23,21 @@ AI 에이전트·개발 도구의 검색 요청을 RAG Server에 넘기고, 결�
 
 ```text
 src/search/
+├── index.ts
+├── search.module.ts
+├── controllers/
+│   └── search.controller.ts
+├── helpers/
+│   └── search-results.ts
+├── interfaces/
+│   ├── search.dto.ts
+│   └── search.types.ts
+├── services/
+│   └── search.service.ts
 └── MODULE.md
 
 src/search/**/*.spec.ts
-test/
+test/search.e2e-spec.ts
 ```
 
 ## 의존성과 공개 표면
@@ -38,7 +49,8 @@ test/
 | documents | DI | `resolveNames`, `visibleDocIds` | documents `MODULE.md` | `REQ-BE-4.1.2`, `REQ-BE-4.2.2` |
 | assets | DI | `restore` | assets `MODULE.md` | `REQ-BE-4.2.1` |
 | rag | DI | `RagClient.search` | rag `MODULE.md` | `REQ-BE-4.1.2` |
-| common | DI | `PinoLogger`, `RagUnavailableError` | common `MODULE.md` | `REQ-BE-4` |
+| common | import | `RagUnavailableError` | common `MODULE.md` | `REQ-BE-4` |
+| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
 
 ### 공개 표면
 
@@ -54,12 +66,12 @@ test/
 
 **`REQ-BE-4.1.1`** 검색 조건
 
-- 처리 계약: 질의, 결과 개수(1~50, 빠지면 RAG Server 기본값), 문서 이름 범위, 판 범위, 앞뒤 청크 포함을 받는다. `edition_scope`가 `specific`인데 `edition`이 없으면 `400`이다
+- 처리 계약: 질의, 결과 개수(1~50, 빠지면 RAG Server 기본값), 문서 이름 범위, 판 범위, 앞뒤 청크 포함을 받는다. `edition_scope`가 `specific`인데 `edition`이 없으면 `400`이다. `query`가 공백뿐이면 `400`이다. `edition_scope`·`expand_neighbors`가 빠지거나 `null`이면 Backend 기본값(`all`·`false`)을 채워 보내고, `top_n`이 빠지거나 `null`이면 보내지 않는다. `edition`은 `edition_scope`가 `specific`일 때만 보낸다(그 밖에는 형식만 검증한다). `names`의 각 이름과 `edition`의 `name`·`label`은 앞뒤 공백을 뗀 값으로 넘기며, 공백뿐이면 `400`이다
 - 충족 기준: 각 조건이 RAG Server 요청의 대응 필드로 넘어가고, `top_n`이 51이면 `400`이다
 
 **`REQ-BE-4.1.2`** 이름 범위를 문서 ID로
 
-- 처리 계약: `names`가 있으면 `resolveNames`로 바꾼 문서 ID를 `doc_ids`로 넘긴다. 바꾼 결과가 비면 RAG Server를 부르지 않고 빈 결과를 준다
+- 처리 계약: `names`가 있으면 `resolveNames`로 바꾼 문서 ID를 `doc_ids`로 넘긴다. 바꾼 결과가 비면 RAG Server를 부르지 않고 빈 결과를 준다. `names`가 `null`이면 빠진 것과 같다. `names`가 빈 배열이면 바꾼 결과가 비므로 빈 결과다
 - 충족 기준: 판이 둘인 이름을 주면 두 문서 ID가 넘어가고, 없는 이름만 주면 RAG Server 호출 없이 빈 결과다
 
 **`REQ-BE-4.1.3`** 답변 문장 없음
@@ -75,11 +87,12 @@ test/
 
 **`REQ-BE-4.2.2`** 삭제됨·교체됨 결과 빼기
 
-- 처리 계약: 결과의 문서 ID를 `visibleDocIds`로 걸러 빠진 문서의 결과를 지우고, 남은 결과의 순위를 1부터 다시 매긴다
+- 처리 계약: 결과의 문서 ID를 `visibleDocIds`로 걸러 빠진 문서의 결과를 지우고, 남은 결과의 순위를 1부터 다시 매긴다. 순위는 RAG Server의 `rank` 순서로 다시 매긴다. `top_n`은 그대로 넘기므로 뺀 만큼 결과가 적다
 - 충족 기준: RAG Server가 교체됨 문서의 결과를 2위로 주면 응답에 없고, 3위였던 결과가 2위가 된다
 
 **`REQ-BE-4.2.3`** 결과 필드
 
+- 처리 계약: `other_editions_in_results`는 RAG Server 값이 참이고, 남은 결과 중 이름이 같고 같은 판이 아닌(판 표기가 다르거나 판 정보가 없는) 다른 결과가 있을 때만 참이다. `is_latest`는 RAG Server 값을 그대로 쓴다 — 삭제됨·교체됨 문서의 청크가 RAG Server에서 지워지기 전에는 그 문서를 센 값일 수 있다
 - 충족 기준: 결과마다 순위, 점수, 문서 이름, 판 표기, 최신판 여부, 다른 판 표시, 헤딩 경로가 `API.md`의 `SearchResult` 형식으로 있다
 
 ## 실행 계약
@@ -89,12 +102,15 @@ test/
 | 예외 | 발생 조건 | 코드 | 처리 책임 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | `RagUnavailableError` | RAG Server가 응답하지 않거나 준비 중 | `RAG_UNAVAILABLE` | 발생: rag. 전파: search | `REQ-BE-10.1.2` |
+| `RagRequestError` | RAG Server가 그 밖의 오류로 응답 | `RAG_UNAVAILABLE` | 발생: rag. search가 `RagUnavailableError`로 바꿔 던진다 | `REQ-BE-10.1.2` |
 
 ### 로그
 
 | 이벤트 | 발생 시점 | 레벨 | 허용 필드 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | `search.done` | 검색 끝 | info | `queryChars`, `names`, `ragResults`, `removed`, `elapsedMs` | `REQ-BE-4` |
+
+`queryChars`는 질의의 글자(코드 포인트) 수, `names`는 요청한 이름 개수(없으면 `null`), `ragResults`는 RAG Server가 준 결과 수(부르지 않았으면 0), `removed`는 뺀 결과 수다. 이름 목록은 넣지 않는다
 
 질의 원문과 결과 본문은 로그에 넣지 않는다.
 
