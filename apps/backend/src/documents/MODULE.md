@@ -37,6 +37,24 @@
 
 ```text
 src/documents/
+├── index.ts
+├── documents.module.ts
+├── controllers/
+│   └── documents.controller.ts
+├── helpers/
+│   ├── document-state.ts
+│   ├── document-views.ts
+│   └── upload-files.ts
+├── interfaces/
+│   ├── documents.dto.ts
+│   └── documents.types.ts
+├── services/
+│   ├── documents.service.ts
+│   ├── document-lifecycle.service.ts
+│   ├── documents.scheduler.ts
+│   ├── documents-crud.service.ts
+│   ├── document-tasks.ts
+│   └── document-clock.ts
 └── MODULE.md
 
 src/documents/**/*.spec.ts
@@ -63,7 +81,7 @@ flowchart LR
     Indexing -.->|IF-BE-1 이벤트| Svc
 ```
 
-점선은 NestJS 이벤트다. common·storage 의존은 생략했다.
+점선은 NestJS 이벤트다. common·storage·라이브러리 의존은 생략했다.
 
 ## 의존성과 공개 표면
 
@@ -76,7 +94,9 @@ flowchart LR
 | logs | DI | `LogsService.record` | logs `MODULE.md` | `REQ-BE-6.1.1` |
 | rag | DI | `RagClient.getDocumentChunks` | rag `MODULE.md` | `REQ-BE-1.4.5` |
 | storage | DI | `MONGO_DB`(컬렉션 `documents`, `document_versions`) | storage `MODULE.md` | `REQ-BE-1` |
-| common | DI·import | `ConfigService`, `PinoLogger`, 오류 클래스, `kstDayRange`, `toIsoUtc`, `ProcessingState`, `SearchState` | common `MODULE.md` | `REQ-BE-1` |
+| common | DI·import | `ConfigService`, 오류 클래스, `parseKstDayRange`, `ProcessingState`, `SearchState` | common `MODULE.md` | `REQ-BE-1` |
+| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
+| libs/utils | import | `kstDayRange`, `toIsoUtc`, 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | utils `MODULE.md` | `REQ-BE-1.3`, `REQ-BE-8.4.1`, `REQ-BE-7.1.3` |
 
 ### 공개 표면
 
@@ -135,6 +155,9 @@ classDiagram
 | `purged` | `boolean` | 필수 | 삭제된 문서의 데이터를 다 지웠는가 |
 | `uploadedAt`, `updatedAt` | `Date` | 필수 | `updatedAt`은 마지막으로 내용을 다시 올리거나 편집한 시각 |
 
+- `docId`는 `randomUUID()`(소문자 UUID v4)다. `name`과 `edition.label`은 앞뒤 공백을 뗀 값이다. `uploadedAt`·`editionEnteredAt`·`updatedAt`은 프로세스 안에서 단조 증가하는 시계로 쓴다(같은 판 동점이 없다)
+- 인덱스: `documents_doc_id` — `{ docId: 1 }` unique, `documents_name` — `{ name: 1 }`, `document_versions_doc_version` — `{ docId: 1, version: 1 }` unique
+
 **`DocumentVersion`** (MongoDB `document_versions`) — 정의: documents, 값 생산: documents
 
 | 필드 | 타입 | 필수 | 불변 조건 |
@@ -160,7 +183,7 @@ classDiagram
 
 **`REQ-BE-1.1.2`** 받지 않는 형식이면 요청 전체 거부
 
-- 실패: `UnsupportedFileError`, `message`에 그 파일 이름. 아무 문서도 만들지 않는다
+- 실패: `UnsupportedFileError`, `message`에 그 파일 이름. 아무 문서도 만들지 않는다. UTF-8로 읽을 수 없는 MD도 같다
 - 충족 기준: `.pdf`가 섞인 요청은 `400 UNSUPPORTED_FILE`이고 문서가 하나도 생기지 않는다
 
 **`REQ-BE-1.1.3`** 이미지 경로의 파일 이름으로 짝 맞추기
@@ -196,7 +219,7 @@ classDiagram
 
 **`REQ-BE-1.1.10`** 업로드 한도
 
-- 처리 계약: 파일 하나(MD는 `UPLOAD_MAX_MD_BYTES`, 이미지는 `UPLOAD_MAX_IMAGE_BYTES`), 파일 수(`UPLOAD_MAX_FILES`), 요청 전체(`UPLOAD_MAX_TOTAL_BYTES`)를 검사한다. 파일 수와 요청 전체 한도는 api의 multipart 설정이 본문을 끝까지 읽기 전에 막는다(api `MODULE.md`)
+- 처리 계약: 파일 하나(MD는 `UPLOAD_MAX_MD_BYTES`, 이미지는 `UPLOAD_MAX_IMAGE_BYTES`), 파일 수(`UPLOAD_MAX_FILES`), 요청 전체(`UPLOAD_MAX_TOTAL_BYTES`)를 검사한다. 파일 수와 요청 전체 한도는 api의 multipart 설정이 본문을 끝까지 읽기 전에 막는다(api `MODULE.md`). 업로드 파일은 api의 전역 업로드 인터셉터가 읽어 두므로 컨트롤러는 `@UploadedFiles()`·`@Body()`로 받고 파일 인터셉터를 따로 달지 않는다
 - 실패: `PayloadTooLargeError`, `message`에 넘은 파일 이름이나 한도. 아무 문서도 만들지 않는다
 - 충족 기준: 한도보다 1바이트 큰 MD가 섞인 요청은 `413`이고 문서가 생기지 않으며, 한도와 같은 크기는 받는다
 
@@ -236,7 +259,7 @@ classDiagram
 
 **`REQ-BE-1.2.8`** 교체됨이 된 문서 정리
 
-- 처리 계약: 교체됨이 된 문서의 처리 상태가 `uploaded`·`captioning`·`queued`·`indexing`이면 `failed`(코드 `REPLACED`)로 바꾸고, 진행 중인 표·이미지 처리가 다음 단계로 가지 않게 한다. `indexing.deleteChunks`를 부르고, 거짓이면 `pendingRag.deleteChunks`를 남겨 주기 작업이 다시 부른다
+- 처리 계약: 교체됨이 된 문서의 처리 상태가 `uploaded`·`captioning`·`queued`·`indexing`이면 `failed`(코드 `REPLACED`)로 바꾸고, 진행 중인 표·이미지 처리가 다음 단계로 가지 않게 한다. 교체됨으로 바꾸는 갱신에서 `pendingRag.deleteChunks`를 참으로 두고, 백그라운드로 `indexing.deleteChunks`를 불러 참이면 지운다. 거짓이면 주기 작업이 다시 부른다
 - 충족 기준: 색인 중에 교체된 문서가 `failed`(`REPLACED`)가 되고 RAG Server에 삭제 요청이 가며, RAG Server가 닿지 않으면 다음 주기에 다시 간다
 
 ### 목록 조회 — `REQ-BE-1.3`
@@ -249,6 +272,7 @@ classDiagram
 
 **`REQ-BE-1.3.2`** 정렬
 
+- 처리 계약: 이름은 코드 포인트 순, 검색 상태는 `searchable`·`not_searchable`·`replaced` 순, 처리 상태는 `uploaded`·`captioning`·`queued`·`indexing`·`completed`·`failed` 순, 시각 열은 시각 순이다. 같은 값은 수정 시각 최근순, 그다음 `doc_id` 순이다
 - 충족 기준: 다섯 열 각각으로 오름·내림차순이 되고, 지정하지 않으면 수정 시각 최근순이다
 
 **`REQ-BE-1.3.3`** 거르기
@@ -262,6 +286,7 @@ classDiagram
 
 **`REQ-BE-1.3.5`** 판 칸
 
+- 처리 계약: 자기 판에 같은 이름의 다른 검색 가능 문서들의 판을 더하고, 판 표기·판 날짜가 같은 판은 하나로 합친다. 판 날짜 늦은 순이고, 같으면 판 표기의 코드 포인트 순이다
 - 충족 기준: 문서마다 자기 판과 같은 이름의 검색 가능인 다른 문서들의 판이 판 날짜 늦은 순으로 나오고, 자기 판 정보가 없으면 빈 배열이다
 
 **`REQ-BE-1.3.6`** 색인 중 단계
@@ -300,19 +325,19 @@ classDiagram
 
 **`REQ-BE-1.4.5`** 검색에 쓰이는 청크
 
-- 처리 계약: 검색 상태가 `searchable`이 아니면 빈 배열이다. 맞으면 `RagClient.getDocumentChunks`의 청크를 순서대로, 본문을 그 응답의 `version`으로 `AssetsService.restore`해 준다. RAG Server가 닿지 않으면 `RagUnavailableError`
+- 처리 계약: 검색 상태가 `searchable`이 아니면 빈 배열이다. 맞으면 `RagClient.getDocumentChunks`의 청크를 순서대로, 본문을 그 응답의 `version`으로 `AssetsService.restore`해 준다. 응답의 `version`이 `null`이면 빈 배열이다. RAG Server가 닿지 않거나 오류 응답(`RagRequestError`)이면 `RagUnavailableError`
 - 충족 기준: 자리표시가 원래 표·이미지로 바뀐 청크가 문서 순서대로 나오고, 새 버전 처리 중에도 RAG Server가 알려 준 이전 버전의 표·이미지로 복원된다
 
 ### 편집 — `REQ-BE-1.5`
 
 **`REQ-BE-1.5.1`** 바뀐 것만 보내 고치기
 
-- 처리 계약: 보낸 필드만 바꾸고, 바꾼 필드를 `edit` 기록에 남긴다. `updatedAt`을 갱신한다
+- 처리 계약: 보낸 필드만 바꾸고, 바꾼 필드를 `edit` 기록에 남긴다. `updatedAt`을 갱신한다. 잠금 검사(`REQ-BE-1.5.5`)는 먼저 하고, 실제로 바뀐 값이 없으면(빈 본문, 같은 값) 기록·`updatedAt` 갱신·새 버전 없이 지금 문서를 준다
 - 충족 기준: 이름만 보내면 판 정보와 요약·캡션이 그대로다
 
 **`REQ-BE-1.5.2`** 이름·판 정보만 바뀌면 재색인 없음
 
-- 처리 계약: 새 버전을 만들지 않고 처리 상태를 바꾸지 않는다. `indexing.updateMetadata`를 부르고, 거짓이면 `pendingRag.metadata`를 남긴다
+- 처리 계약: 새 버전을 만들지 않고 처리 상태를 바꾸지 않는다. 검색되는 버전이 있으면 편집 갱신에서 `pendingRag.metadata`를 참으로 두고, 백그라운드로 `indexing.updateMetadata`를 불러 참이고 그사이 `updatedAt`이 그대로면 지운다. 검색되는 버전이 없으면 보내지 않는다(다음 색인 요청이 새 값을 싣는다)
 - 충족 기준: 이름만 바꾸면 색인 요청이 없고 이름·판 정보 변경 요청이 가며, 실패하면 다음 주기에 다시 간다
 
 **`REQ-BE-1.5.3`** 편집으로 같은 판이 되면 편집한 문서가 남음
@@ -326,6 +351,7 @@ classDiagram
 
 **`REQ-BE-1.5.5`** 처리 중 문서의 변경 거부
 
+- 처리 계약: 편집·재색인·내용 다시 올리기의 갱신은 읽은 `processingState`·`updatedAt`을 조건으로 한다. 조건이 어긋나면 `DocumentLockedError`다(다른 편집이 먼저 반영된 경우 포함)
 - 실패: `DocumentLockedError`
 - 충족 기준: `uploaded`·`captioning`·`queued`·`indexing` 문서의 편집·재색인·내용 다시 올리기가 `409 DOCUMENT_LOCKED`이고, 같은 문서에 두 편집이 동시에 와도 하나만 받아들여진다
 
@@ -366,6 +392,7 @@ classDiagram
 
 **`REQ-BE-1.8.1`** 바로 삭제됨 표시
 
+- 처리 계약: 조건부 갱신 하나로 `deleted`를 참으로, `pendingRag.deleteChunks`를 참으로 두고 `delete` 기록(`success`)을 남긴 뒤 응답한다. logs의 `document_deleted` 판정이 이 기록에 기댄다(`REQ-BE-6.1.1`, logs `MODULE.md` 「조회」). 청크 삭제는 응답 뒤 백그라운드로 한다(`REQ-BE-1.8.4`)
 - 충족 기준: 삭제 요청이 RAG Server 응답을 기다리지 않고 `204`이며 `deleted`가 참이다
 
 **`REQ-BE-1.8.2`** 목록·조회·검색에서 빠짐
@@ -379,7 +406,7 @@ classDiagram
 
 **`REQ-BE-1.8.4`** RAG Server 청크 삭제와 재요청
 
-- 처리 계약: `indexing.deleteChunks`를 부르고, 거짓이면 `pendingRag.deleteChunks`를 남겨 `RAG_RETRY_INTERVAL_MS`마다 다시 부른다
+- 처리 계약: 삭제 표시와 함께 남긴 `pendingRag.deleteChunks`를 보고 응답 뒤 `indexing.deleteChunks`를 부르고, 참이면 지운다. 거짓이면 `RAG_RETRY_INTERVAL_MS`마다 다시 부른다. 색인 요청 도중 삭제·교체됐으면 요청이 끝난 뒤 다시 표시하고 부른다. 같은 문서의 삭제 요청이 진행 중일 때 새 삭제 요청이 오면, 진행 중인 요청이 끝난 뒤 표시를 다시 켜고 한 번 더 부른다(앞선 요청의 성공이 새 요청을 지우지 않는다)
 - 충족 기준: RAG Server가 닿지 않으면 주기마다 다시 요청하고, 닿으면 멈춘다
 
 **`REQ-BE-1.8.5`** 청크를 지운 뒤 데이터 삭제
@@ -410,11 +437,12 @@ classDiagram
 
 **`REQ-BE-1.9.4`** 이미 같은 색인 → 완료, 요청 실패 → 실패
 
-- 처리 계약: `reused`면 `completed`로 두고 `searchableVersion`은 그대로 둔다. `unreachable`이면 `failed`(코드 `RAG_UNREACHABLE`)다. `accepted`면 `jobId`를 버전에 남긴다(`REQ-BE-3.1.2`)
+- 처리 계약: `reused`면 `completed`로 두고 `searchableVersion`은 그대로 둔다. `unreachable`이면 `failed`(코드 `RAG_UNREACHABLE`)다. `accepted`면 `jobId`를 버전에 남긴다(`REQ-BE-3.1.2`). `reused`면 `jobId`를 남기고 결과는 `searchableVersion` 버전의 결과를 복사한다. 요청 결과는 처리 상태가 아직 `queued`일 때만 반영한다 — 그사이 작업 상태 이벤트(`REQ-BE-1.9.5`)나 삭제·교체가 상태를 바꿨으면 그 상태를 둔다
 - 충족 기준: 세 결과마다 처리 상태와 버전의 `jobId`가 위와 같다
 
 **`REQ-BE-1.9.5`** 작업 상태 → 처리 상태
 
+- 처리 계약: 마지막 버전의 이벤트만 반영하며, 바꿀 수 있는 출발 상태는 `indexing`←`queued`, `completed`·`failed`←`queued`·`indexing`이다. 실패 코드가 `RAG_UNREACHABLE`인 `failed`는 그 버전의 어떤 이벤트로도 바뀐다. 그 밖의 경우(같은 버전의 `completed`·`failed` 뒤에 늦게 온 `queued`·`running`)는 처리 상태를 바꾸지 않는다. `searchableVersion`은 이벤트 값이 지금 값보다 클 때만 쓴다(이벤트로 지우지 않는다)
 - 충족 기준: 마지막 버전의 `queued`·`running`·`succeeded`·`failed` 이벤트가 각각 `queued`·`indexing`·`completed`·`failed`를 만들고, `failed`면 실패 사유가 버전에 남는다
 
 **`REQ-BE-1.9.6`** 반영하지 않는 이벤트
@@ -500,11 +528,13 @@ stateDiagram-v2
 
 ### 버전 처리
 
-1. **표·이미지 처리** — 처리 상태를 `captioning`으로 바꾸고(`REQ-BE-1.9.2`), 처음 처리하는 버전이면 `prepareVersion`으로 색인용 MD를 만들어 버전에 쓴 뒤, `generateHints`를 부른다. `shouldContinue`는 문서가 삭제됨·교체됨이 아니고 마지막 버전이 이 버전인지를 본다. `stopped`면 여기서 끝낸다. (`REQ-BE-2`, `REQ-BE-1.8.3`)
+1. **표·이미지 처리** — 업로드·내용 다시 올리기는 요청 안에서(응답 전에) `prepareVersion`으로 색인용 MD를 만들어 버전에 쓴다(응답의 `unmatched_images`가 그 결과다. 업로드 이미지는 요청이 끝나면 남지 않는다). 백그라운드 처리는 처리 상태를 `captioning`으로 바꾸고(`REQ-BE-1.9.2`), `generateHints`를 부른다. `shouldContinue`는 문서가 삭제됨·교체됨이 아니고 마지막 버전이 이 버전인지를 본다. `stopped`면 여기서 끝낸다. (`REQ-BE-2`, `REQ-BE-1.8.3`)
 2. **색인 요청** — 다시 삭제됨·교체됨을 확인한 뒤 처리 상태를 `queued`로 바꾸고(`REQ-BE-1.9.3`), `hintsFor`와 색인용 MD, 이름·판 정보로 `requestIndex`를 부른다. 결과를 `REQ-BE-1.9.4`대로 반영한다.
 3. **작업 상태** — 이벤트(`IF-BE-1`)로 `REQ-BE-1.9.5`~`REQ-BE-1.9.7`을 반영한다. 처리 상태가 실제로 바뀌면 `processing_state` 기록을 남긴다.
 
 2에서 `queued`를 색인 요청보다 먼저 써야, 요청 도중 Backend가 멈췄을 때 기동 처리(`REQ-BE-1.9.10`)가 작업 ID 없는 색인 대기를 찾아 다시 요청할 수 있다.
+
+내용 다시 올리기·요약·캡션 변경·재색인은 먼저 조건부 갱신 하나로 문서를 선점한다(처리 상태가 `completed`·`failed`이고 `latestVersion`·`updatedAt`이 읽은 값일 때만 처리 상태와 `latestVersion`을 바꾼다). 그다음 `prepareVersion` 또는 `inheritVersion`으로 새 버전의 표·이미지를 만들고 버전 레코드를 쓴다. 그 사이 실패하면 선점을 되돌린다. 재색인은 `queued`로 선점하고 임시 설명이 있으면 `captioning`으로 바꾼다. 기동 처리는 처리 중인데 마지막 버전 레코드가 없는 문서를 이전 버전으로 되돌린다(이전 버전에 결과가 있으면 `completed`, 아니면 `failed`).
 
 ### 교체
 
@@ -514,7 +544,7 @@ stateDiagram-v2
 
 ### 기동 처리와 주기 작업
 
-1. **기동** — storage 연결 뒤 `captioning`·`uploaded` 문서의 표·이미지 처리를 잇고, `jobId` 없는 `queued` 문서의 색인을 다시 요청하고, `queued`·`indexing` 문서로 `reconcile`을 부른다. 교체됨·삭제됨은 뺀다. (`REQ-BE-1.9.9`~`REQ-BE-1.9.11`, `REQ-BE-3.3.1`)
+1. **기동** — 기동 처리는 이벤트 구독이 준비된 뒤(`EventEmitterReadinessWatcher.waitUntilReady()`, `onApplicationBootstrap` 이후) 한다. storage 연결 뒤 `captioning`·`uploaded` 문서의 표·이미지 처리를 잇고, `jobId` 없는 `queued` 문서의 색인을 다시 요청하고, `queued`·`indexing` 문서로 `reconcile`을 부른다. 교체됨·삭제됨은 뺀다. (`REQ-BE-1.9.9`~`REQ-BE-1.9.11`, `REQ-BE-3.3.1`)
 2. **상태 맞추기** — `RECONCILE_INTERVAL_MS`마다 `queued`·`indexing` 문서로 `reconcile`. (`REQ-BE-3.3.1`)
 3. **재요청** — `RAG_RETRY_INTERVAL_MS`마다 `pendingRag`가 남은 문서의 청크 삭제·이름·판 정보 변경을 다시 부르고, 성공하면 표시를 지운다. 청크 삭제가 성공한 삭제됨 문서는 데이터를 지운다. (`REQ-BE-1.8.4`, `REQ-BE-1.8.5`, `REQ-BE-3.4.2`)
 
@@ -543,14 +573,15 @@ stateDiagram-v2
 | :--- | :--- | :--- | :--- | :--- |
 | `documents.state_changed` | 처리·검색 상태 변경 | info | `docId`, `version`, `from`, `to`, `searchState` | `REQ-BE-1.9` |
 | `documents.replaced` | 교체 | info | `docId`, `replacedBy` | `REQ-BE-1.2.5` |
-| `documents.processing_stopped` | 삭제·교체로 처리를 멈춤 | info | `docId`, `version`, `reason` | `REQ-BE-1.8.3` |
-| `documents.resume` | 기동 처리 | info | `captioning`, `requeued`, `reconciled` | `REQ-BE-1.9.9` |
+| `documents.processing_stopped` | 삭제·교체·새 버전·종료·상태 변경으로 처리를 멈춤 | info | `docId`, `version`, `reason`(`deleted`·`replaced`·`superseded`·`shutdown`·`state_changed`) | `REQ-BE-1.8.3` |
+| `documents.resume` | 기동 처리 | info | `captioning`, `requeued`, `reconciled`, `recovered`(마지막 버전 레코드가 없어 이전 버전으로 되돌린 문서 수) | `REQ-BE-1.9.9` |
+| `documents.task_failed` | 백그라운드 작업 실패 | warning | `task`(`process`·`index`·`delete_chunks`·`metadata`·`resume`·`reconcile`·`rag_retry`), `docId`(문서와 무관하면 `null`), `errorName` | `REQ-BE-1.1.9` |
 
 원본 MD, 색인용 MD, 요약·캡션은 로그에 넣지 않는다.
 
 ### 런타임·보안
 
-- **실행 형태** — 표·이미지 처리와 색인 요청은 요청에 응답한 뒤 백그라운드로 한다. 주기 작업은 앞 실행이 끝나기 전에 겹쳐 돌지 않는다
+- **실행 형태** — 표·이미지 처리와 색인 요청은 요청에 응답한 뒤 백그라운드로 한다. 주기 작업은 앞 실행이 끝나기 전에 겹쳐 돌지 않는다. 백그라운드 작업은 응답 뒤(다음 이벤트 루프 차례)에 시작하고, 실패는 `documents.task_failed`로 남긴다. 종료할 때는 새 작업을 받지 않고 진행 중인 작업을 기다린 뒤 저장소를 닫는다(멈춘 표·이미지 처리는 다음 기동 처리가 잇는다).
 - **동시성** — 상태를 바꾸는 쓰기는 기대하는 현재 상태를 조건으로 한 원자적 갱신이다. 조건이 맞지 않으면 바꾸지 않는다
 
 ## 테스트와 추적성
