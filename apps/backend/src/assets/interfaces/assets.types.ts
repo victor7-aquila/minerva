@@ -47,6 +47,12 @@ export const ASSETS_COLLECTION = 'assets';
 /** 요약·캡션 상태다. */
 export type HintStatus = 'pending' | 'done';
 
+/** 글자 위치 범위다. UTF-16 오프셋이고 end는 제외한다. */
+export interface TextRange {
+  start: number;
+  end: number;
+}
+
 /** MongoDB assets에 저장하는 표·이미지 하나다. MODULE.md 「데이터 계약」과 같다. */
 export interface AssetRecord {
   docId: string;
@@ -64,4 +70,8 @@ export interface AssetRecord {
   hint: string | null;
   hintStatus: HintStatus;
   isTemporary: boolean;
+  /** 표 안 이미지면 그 표의 placeholderId, 아니면 null이다. ★ 저장된 옛 레코드에는 없다 — null로 읽는다 */
+  tableId: string | null;
+  /** 표 안 이미지 경로 글자의 그 표 tableMarkdown 기준 위치다. 모르거나 표 밖이면 null이다 */
+  pathInTable: TextRange | null;
 }

@@ -140,4 +140,44 @@ describe('REQ-BE-2.1.1', () => {
       ]),
     );
   });
+
+  // ★ contract 도구가 없어 공개 메서드가 몰래 사라지거나 함수가 아니게 되지 않는지 여기서 보완 검증한다.
+  // 공개 메서드 11개만 본다 — private 내부 메서드 이름은 구현 자유라 고정하지 않는다
+  it('T-PR3-SURF-1 AssetsService 프로토타입에 계획한 공개 메서드 11개가 모두 함수로 있다', () => {
+    const publicMethods = [
+      'prepareVersion',
+      'generateHints',
+      'inheritVersion',
+      'markTemporaryForRegeneration',
+      'hintsFor',
+      'listViews',
+      'imageUrls',
+      'readImage',
+      'restore',
+      'deleteDocument',
+      'onModuleInit',
+    ];
+    const proto = AssetsService.prototype as unknown as Record<string, unknown>;
+    const missing = publicMethods.filter((name) => typeof proto[name] !== 'function');
+    expect(missing).toEqual([]);
+  });
+});
+
+describe('REQ-BE-1.4.4', () => {
+  it('T-PR3-SURF-2 AssetViewData와 PreparedVersion의 키 집합이 그대로다', () => {
+    // 타입 단언은 컴파일 단계에서 검증된다 — 키가 늘거나 줄면 컴파일 오류다
+    expect(
+      assertType<
+        Equals<
+          keyof AssetViewData,
+          'placeholderId' | 'kind' | 'tableMarkdown' | 'imageUrl' | 'text' | 'isTemporary'
+        >
+      >(),
+    ).toBe(true);
+    expect(
+      assertType<
+        Equals<keyof PreparedVersion, 'indexingMarkdown' | 'unmatchedImages' | 'assetCount'>
+      >(),
+    ).toBe(true);
+  });
 });

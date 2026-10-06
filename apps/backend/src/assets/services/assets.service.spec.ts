@@ -163,6 +163,46 @@ function imageSrcs(markdown: string): string[] {
   return srcs;
 }
 
+/** 표 안 이미지 문서: 칸에 짝 있는 z.png가 든 GFM 표 하나다. ID는 t1, i1이다. */
+const NEST_MD = '| 키 | 값 |\n| --- | --- |\n| ![i](z.png) | b |';
+/**
+ * 인용문 안 GFM 표: 칸에 짝 있는 z.png, 짝 없는 w.png, 참조형 r.png가 든다. ID는 t1, i1(z), i2(w), i3(r)이다.
+ * ★ r.png는 업로드가 있어도 경로가 표 밖 정의에 있어 바꾸지 않는다
+ */
+const QUOTE_MD = [
+  '> | 키 | 값 | 참조 |',
+  '> | --- | --- | --- |',
+  '> | ![i](z.png) | ![w](w.png) | ![r][ref] |',
+  '',
+  '[ref]: r.png',
+].join('\n');
+const QUOTE_TABLE_DISPLAY = [
+  '| 키 | 값 | 참조 |',
+  '| --- | --- | --- |',
+  '| ![i](z.png) | ![w](w.png) | ![r][ref] |',
+].join('\n');
+const PNG_R = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0a, 0x03]);
+
+/** 그 버전의 이미지 주소다. */
+function assetUrl(id: string, version = '1', docId = 'doc-1'): string {
+  return `/v1/documents/${docId}/versions/${version}/assets/${id}`;
+}
+
+/** NEST_MD 문서를 z.png 업로드와 함께 준비한다. */
+async function prepareNestDoc(): Promise<Awaited<ReturnType<AssetsService['prepareVersion']>>> {
+  return service.prepareVersion('doc-1', '1', NEST_MD, [up('z.png', PNG_A)]);
+}
+
+/** QUOTE_MD 문서를 z.png·r.png 업로드와 함께 준비한다. */
+async function prepareQuoteDoc(): Promise<Awaited<ReturnType<AssetsService['prepareVersion']>>> {
+  return service.prepareVersion('doc-1', '1', QUOTE_MD, [up('z.png', PNG_A), up('r.png', PNG_R)]);
+}
+
+/** 지금까지 일어난 find 호출 수다. assets 컬렉션만 쓰므로 그대로 센다. */
+function findCount(): number {
+  return db.calls.filter((call) => call.op === 'find').length;
+}
+
 describe('REQ-BE-2.1.1', () => {
   it('T-PREP-1 표 둘·이미지 셋(짝 없음 하나)과 업로드 둘을 등록하고 파일 둘을 저장한다', async () => {
     const md = [TABLE1, '![A](img/a.png)', TABLE2, '![B](b.jpg)', '![C](missing.png)'].join('\n\n');
@@ -246,10 +286,15 @@ describe('REQ-BE-2.1.1', () => {
         'isTemporary',
         'kind',
         'order',
+        'pathInTable',
         'placeholderId',
+        'tableId',
         'tableMarkdown',
         'version',
       ]);
+      // ★ 표 밖 레코드의 새 필드는 null이다 (P1)
+      expect(row.tableId).toBeNull();
+      expect(row.pathInTable).toBeNull();
       expect(row.hint).toBeNull();
       expect(row.hintStatus).toBe('pending');
       expect(row.isTemporary).toBe(false);
@@ -264,9 +309,53 @@ describe('REQ-BE-2.1.1', () => {
     expect(i1.imagePath).toBe('a.png');
     expect(i1.alt).toBe('A');
   });
+
+  it('T-PR3-SVC-1 GFM 칸 안 이미지는 표 안 이미지 레코드로 저장되고 파일이 짝지어진다', async () => {
+    const result = await prepareNestDoc();
+    expect(result.unmatchedImages).toEqual([]);
+    expect(store.get('doc-1/1/i1.png')).toEqual(PNG_A);
+    const i1 = record('i1');
+    expect(i1.fileKey).toBe('doc-1/1/i1.png');
+    expect(i1.tableId).toBe('t1');
+    expect(i1.hintStatus).toBe('done');
+    expect(i1.hint).toBeNull();
+    expect(i1.isTemporary).toBe(false);
+    // ★ 경로 글자 위치가 표 원문 안의 z.png를 가리킨다
+    const range = i1.pathInTable as { start: number; end: number } | null;
+    expect(range).not.toBeNull();
+    const tableMarkdown = record('t1').tableMarkdown as string;
+    expect(tableMarkdown.slice(range?.start, range?.end)).toBe('z.png');
+    const t1 = record('t1');
+    expect(t1.tableId).toBeNull();
+    expect(t1.pathInTable).toBeNull();
+    expect(t1.hintStatus).toBe('pending');
+    expect(records().map((row) => row.placeholderId)).toEqual(['t1', 'i1']);
+  });
+
+  // ★ 명세가 정하지 않은 값을 이 테스트가 고정한다(결정 근거는 TEST_IMPL_REPORT_2): assetCount는 자리표시가
+  // 있는 최상위 표·이미지의 수다. 표 안 이미지는 표의 일부이고 자리표시가 없으므로 세지 않는다
+  it('T-PR3-SVC-11 assetCount는 표 안 이미지를 세지 않는다(표의 일부)', async () => {
+    const md = `${NEST_MD}\n\n![o](o.png)`;
+    const result = await service.prepareVersion('doc-1', '1', md, [up('z.png', PNG_A)]);
+    // 레코드는 표 t1, 표 안 이미지 i1, 표 밖 이미지 i2 셋이지만 최상위는 t1·i2 둘이다
+    expect(records()).toHaveLength(3);
+    expect(result.assetCount).toBe(2);
+  });
 });
 
 describe('REQ-BE-1.1.4', () => {
+  it('T-PR3-SVC-2 HTML 표 안 이미지는 업로드가 없으면 unmatchedImages에 담기고 fileKey가 null이다', async () => {
+    const result = await service.prepareVersion(
+      'doc-1',
+      '1',
+      '<table><tr><td><img src="b.png"></td></tr></table>',
+      [],
+    );
+    expect(result.unmatchedImages).toEqual(['b.png']);
+    expect(record('i1').fileKey).toBeNull();
+    expect(record('i1').tableId).toBe('t1');
+  });
+
   it('T-PREP-3 같은 짝 없는 경로가 두 번 나와도 unmatchedImages에는 한 번이고 레코드의 파일 정보는 null이다', async () => {
     const result = await service.prepareVersion(
       'doc-1',
@@ -347,6 +436,15 @@ describe('REQ-BE-2.3.1', () => {
     expect(context.shouldContinue).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ generated: 0, temporary: 0, stopped: true });
     expect(fakeRag.summarizeTable).not.toHaveBeenCalled();
+    expect(fakeRag.captionImage).not.toHaveBeenCalled();
+  });
+
+  it('T-PR3-SVC-5 인용문 안 표는 블록 접두를 뗀 모양으로 요약을 요청하고 표 안 이미지는 캡션을 요청하지 않는다', async () => {
+    await prepareQuoteDoc();
+    const result = await service.generateHints('doc-1', '1', ctx());
+    expect(result).toEqual({ generated: 1, temporary: 0, stopped: false });
+    expect(fakeRag.summarizeTable).toHaveBeenCalledTimes(1);
+    expect(fakeRag.summarizeTable.mock.calls[0][0]).toBe(QUOTE_TABLE_DISPLAY);
     expect(fakeRag.captionImage).not.toHaveBeenCalled();
   });
 });
@@ -438,6 +536,13 @@ describe('REQ-BE-2.3.5', () => {
     // IF-1: 색인용 MD의 자리표시 ID 집합과 같다
     const ids = [...indexing.matchAll(IF1_ANYWHERE)].map((match) => match[1]);
     expect(new Set(hints.map((hint) => hint.placeholderId))).toEqual(new Set(ids));
+  });
+
+  it('T-PR3-SVC-6 hintsFor는 표 안 이미지를 빼고 자리표시가 있는 항목만 준다', async () => {
+    await prepareNestDoc();
+    await service.generateHints('doc-1', '1', ctx());
+    const hints = await service.hintsFor('doc-1', '1');
+    expect(hints.map((hint) => hint.placeholderId)).toEqual(['t1']);
   });
 
   it('T-HINT-8 pending이 남은 버전의 hintsFor는 그 항목에 description을 준다', async () => {
@@ -552,6 +657,35 @@ describe('REQ-BE-2.3.6', () => {
       expect(row.isTemporary).toBe(true);
       expect(row.hintStatus).toBe('done');
     }
+  });
+
+  it('T-PR3-SVC-7 표 안 이미지는 이어받아도 그대로이고 재생성 표시·편집 대상이 아니다', async () => {
+    await prepareNestDoc();
+    fakeRag.summarizeTable.mockRejectedValueOnce(new RagRequestError(502, 'SUMMARY_FAILED'));
+    await service.generateHints('doc-1', '1', ctx());
+    await service.inheritVersion('doc-1', '1', '2', new Map());
+    // ★ 바꾸지 않고 그대로 복사한다 — hint를 채우거나 isTemporary를 바꾸지 않는다
+    expect(record('i1', '2')).toEqual({ ...record('i1', '1'), version: '2' });
+    expect(record('i1', '2').hint).toBeNull();
+    expect(record('i1', '2').isTemporary).toBe(false);
+    expect(record('i1', '2').tableId).toBe('t1');
+
+    // 표 안 이미지가 임시이면서 pending이어도 세지 않는다(조건에 tableId null)
+    await db
+      .collection('assets')
+      .updateOne(
+        { docId: 'doc-1', version: '1', placeholderId: 'i1' },
+        { $set: { isTemporary: true, hintStatus: 'done' } },
+      );
+    expect(await service.markTemporaryForRegeneration('doc-1', '1')).toBe(1);
+    expect(record('t1').hintStatus).toBe('pending');
+    expect(record('i1').hintStatus).toBe('done');
+
+    // 편집 대상으로 받지 않는다
+    await expect(
+      service.inheritVersion('doc-1', '1', '3', new Map([['i1', '문장']])),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(records('3')).toEqual([]);
   });
 });
 
@@ -722,6 +856,18 @@ describe('REQ-BE-1.4.4', () => {
       isTemporary: true,
     });
   });
+
+  it('T-PR3-SVC-8 listViews는 표 안 이미지를 빼고 표를 접두 없이 짝 있는 경로만 주소로 바꿔 준다', async () => {
+    await prepareQuoteDoc();
+    await service.generateHints('doc-1', '1', ctx());
+    const views = await service.listViews('doc-1', '1');
+    expect(views.map((view) => view.placeholderId)).toEqual(['t1']);
+    // ★ z.png만 주소로 바뀐다. 짝 없는 w.png와 표 밖 정의를 쓰는 참조형은 그대로다
+    expect(views[0].tableMarkdown).toBe(
+      QUOTE_TABLE_DISPLAY.replace('(z.png)', `(${assetUrl('i1')})`),
+    );
+    expect(views[0].tableMarkdown).not.toMatch(/^[ \t]*>/m);
+  });
 });
 
 describe('REQ-BE-1.4.3', () => {
@@ -742,6 +888,11 @@ describe('REQ-BE-1.4.3', () => {
     expect(Object.prototype.hasOwnProperty.call(urls, '__proto__')).toBe(true);
     expect(Object.getOwnPropertyDescriptor(urls, '__proto__')?.value).toBeNull();
     expect(Object.getPrototypeOf(urls)).toBe(Object.prototype);
+  });
+
+  it('T-PR3-SVC-3 imageUrls에 표 안 이미지의 경로와 주소가 들어간다', async () => {
+    await prepareNestDoc();
+    expect(await service.imageUrls('doc-1', '1')).toEqual({ 'z.png': assetUrl('i1') });
   });
 });
 
@@ -784,6 +935,13 @@ describe('REQ-BE-2.4.1', () => {
     await prepareImageDoc();
     store.delete('doc-1/1/i1.png');
     await expect(service.readImage('doc-1', '1', 'i1')).rejects.toBeInstanceOf(AssetNotFoundError);
+  });
+
+  it('T-PR3-SVC-4 readImage가 표 안 이미지의 바이트와 contentType을 준다', async () => {
+    await prepareNestDoc();
+    const image = await service.readImage('doc-1', '1', 'i1');
+    expect(image.data).toEqual(PNG_A);
+    expect(image.contentType).toBe('image/png');
   });
 });
 
@@ -834,6 +992,145 @@ describe('REQ-BE-2.5.3', () => {
     await prepareHintDoc();
     const restored = await service.restore('doc-1', '1', `일반 문단 [[${ZWSP}minerva:x`);
     expect(restored).toBe('일반 문단 [[minerva:x');
+  });
+
+  it('T-PR3-SVC-10 표 안 이미지가 있는 표를 두 번 복원하면 결과가 같다', async () => {
+    await prepareNestDoc();
+    await service.generateHints('doc-1', '1', ctx());
+    const text = '앞 [[minerva:table:t1 | 키, 값]] 뒤';
+    const first = await service.restore('doc-1', '1', text);
+    expect(await service.restore('doc-1', '1', text)).toBe(first);
+    expect(first).toContain(assetUrl('i1'));
+  });
+});
+
+describe('REQ-BE-2.5.4', () => {
+  it('T-PR3-SVC-9 복원한 표는 접두를 유지한 채 짝 있는 경로만 그 버전의 주소로 바뀐다', async () => {
+    await prepareQuoteDoc();
+    await service.generateHints('doc-1', '1', ctx());
+    const text = '> [[minerva:table:t1 | 키, 값, 참조]]';
+    const expected = (version: string): string =>
+      [
+        `> | 키 | 값 | 참조 |`,
+        `> | --- | --- | --- |`,
+        `> | ![i](${assetUrl('i1', version)}) | ![w](w.png) | ![r][ref] |`,
+      ].join('\n');
+    // ★ restore는 블록 접두를 떼지 않는다 — 자리표시 자리에 원래 구조로 돌아가야 한다
+    expect(await service.restore('doc-1', '1', text)).toBe(expected('1'));
+
+    // 이어받은 버전으로 복원하면 주소의 버전이 그 버전이다
+    await service.inheritVersion('doc-1', '1', '2', new Map());
+    expect(await service.restore('doc-1', '2', text)).toBe(expected('2'));
+  });
+});
+
+describe('REQ-BE-1.4.5', () => {
+  /** 표 둘과 이미지가 든 문서를 버전 1로 준비하고 캡션까지 만든다. */
+  async function prepareRestorable(): Promise<void> {
+    await prepareHintDoc();
+    await service.generateHints('doc-1', '1', ctx());
+  }
+
+  const T1 = '[[minerva:table:t1 | x]]';
+  const I1 = '[[minerva:image:i1 | x]]';
+  const T2 = '[[minerva:table:t2 | x]]';
+
+  it('T-PR3-BATCH-1 같은 틱의 복원 요청은 문서 버전마다 조회 한 번으로 묶인다', async () => {
+    await prepareRestorable();
+    const before = findCount();
+    const results = await Promise.all([
+      service.restore('doc-1', '1', T1),
+      service.restore('doc-1', '1', I1),
+      service.restore('doc-1', '1', `${T2} ${T1}`),
+    ]);
+    expect(results[0]).toBe(TABLE1);
+    expect(results[1]).toBe(`![이미지 캡션](${assetUrl('i1')})`);
+    expect(results[2]).toBe(`${TABLE2} ${TABLE1}`);
+    expect(findCount() - before).toBe(1);
+    // ★ 조회 조건은 세 호출이 요청한 ID를 모두 담는다
+    const call = db.calls.filter((entry) => entry.op === 'find').at(-1);
+    const filter = call?.filter as {
+      $or: Array<Record<string, { $in: string[] }>>;
+    };
+    expect(new Set(filter.$or[0].placeholderId.$in)).toEqual(new Set(['t1', 'i1', 't2']));
+    expect(new Set(filter.$or[1].tableId.$in)).toEqual(new Set(['t1', 'i1', 't2']));
+  });
+
+  it('T-PR3-BATCH-2 버전이 다르면 묶음이 갈라져 조회가 버전마다 일어난다', async () => {
+    await prepareRestorable();
+    await service.inheritVersion('doc-1', '1', '2', new Map());
+    const before = findCount();
+    const results = await Promise.all([
+      service.restore('doc-1', '1', I1),
+      service.restore('doc-1', '2', I1),
+      service.restore('doc-1', '1', T1),
+    ]);
+    expect(results[0]).toContain(assetUrl('i1', '1'));
+    expect(results[1]).toContain(assetUrl('i1', '2'));
+    expect(results[2]).toBe(TABLE1);
+    expect(findCount() - before).toBe(2);
+  });
+
+  it('T-PR3-BATCH-3 앞 호출이 끝난 뒤의 호출은 새 조회를 만든다', async () => {
+    await prepareRestorable();
+    const before = findCount();
+    await service.restore('doc-1', '1', T1);
+    expect(findCount() - before).toBe(1);
+    await service.restore('doc-1', '1', T2);
+    expect(findCount() - before).toBe(2);
+  });
+
+  it('T-PR3-BATCH-4 조회가 실패하면 묶인 호출이 모두 같은 오류로 거부되고 다음 호출은 성공한다', async () => {
+    await prepareRestorable();
+    db.failNext('find', new Error('find-down'));
+    const settled = await Promise.allSettled([
+      service.restore('doc-1', '1', T1),
+      service.restore('doc-1', '1', I1),
+      service.restore('doc-1', '1', T2),
+    ]);
+    for (const outcome of settled) {
+      expect(outcome.status).toBe('rejected');
+      expect((outcome as PromiseRejectedResult).reason).toEqual(new Error('find-down'));
+    }
+    // ★ 실패한 묶음이 남아 다음 호출까지 막지 않는다
+    expect(await service.restore('doc-1', '1', T1)).toBe(TABLE1);
+  });
+
+  // ★ 명세(REQ-BE-2.5·1.4.5)에 조회 실패 동작은 없다 — 현재 구현의 동작(원 오류 그대로 전달, 묶음 단위 격리)을 고정한다
+  it('T-PR3-BATCH-6 조회 실패는 감싸지 않은 같은 오류 객체로 묶인 호출 모두에 전달된다', async () => {
+    await prepareRestorable();
+    const error = new Error('find-down');
+    db.failNext('find', error);
+    const settled = await Promise.allSettled([
+      service.restore('doc-1', '1', T1),
+      service.restore('doc-1', '1', I1),
+    ]);
+    for (const outcome of settled) {
+      expect(outcome.status).toBe('rejected');
+      expect((outcome as PromiseRejectedResult).reason).toBe(error);
+    }
+  });
+
+  it('T-PR3-BATCH-7 한 버전 묶음의 조회 실패는 같은 틱의 다른 버전 묶음에 번지지 않는다', async () => {
+    await prepareRestorable();
+    await service.inheritVersion('doc-1', '1', '2', new Map());
+    // ★ 묶음은 만들어진 순서(버전 1 먼저)로 조회하므로 첫 find 실패는 버전 1 묶음에 떨어진다
+    db.failNext('find', new Error('find-down'));
+    const settled = await Promise.allSettled([
+      service.restore('doc-1', '1', T1),
+      service.restore('doc-1', '2', T1),
+      service.restore('doc-1', '1', I1),
+    ]);
+    expect(settled[0]?.status).toBe('rejected');
+    expect(settled[2]?.status).toBe('rejected');
+    expect(settled[1]).toEqual({ status: 'fulfilled', value: TABLE1 });
+  });
+
+  it('T-PR3-BATCH-5자리표시가 없는 본문은 조회하지 않는다', async () => {
+    await prepareRestorable();
+    const before = findCount();
+    expect(await service.restore('doc-1', '1', '그냥 문단')).toBe('그냥 문단');
+    expect(findCount() - before).toBe(0);
   });
 });
 

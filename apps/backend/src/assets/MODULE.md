@@ -19,7 +19,7 @@
 | `REQ-BE-2.2` | 색인용 MD | 표·이미지 자리를 자리표시로 바꾼 색인용 MD를 만든다 |
 | `REQ-BE-2.3` | 요약·캡션 생성 | 표·이미지마다 요약·캡션을 받아 저장하고, 못 받으면 임시 설명을 쓴다 |
 | `REQ-BE-2.4` | 이미지 제공 | 문서 버전과 자리표시 ID로 이미지 파일을 돌려준다 |
-| `REQ-BE-2.5` | 복원 | 청크 본문의 자리표시를 원래 표·이미지로 바꾼다 |
+| `REQ-BE-2.5` | 복원 | 청크 본문의 자리표시를 원래 표·이미지로 바꾸고, 표 안 이미지 경로를 이미지 주소로 바꾼다 |
 
 **비범위**
 
@@ -106,21 +106,23 @@ common·라이브러리 의존은 생략했다.
 | `docId`, `version` | `string` | 필수 | 이 표·이미지가 속한 문서 버전 |
 | `placeholderId` | `string` | 필수 | 버전 안에서 고유. 영문 소문자·숫자(루트 `IF-1`) |
 | `kind` | `'table' \| 'image'` | 필수 | |
-| `order` | `number` | 필수 | 원본 MD에 나오는 차례 |
+| `order` | `number` | 필수 | 원본 MD에 나오는 차례. 표 안 이미지는 그 표 바로 뒤에 표 안 차례로 온다 |
 | `tableMarkdown` | `string \| null` | 조건부 | `table`이면 원본 표 그대로 |
-| `imagePath` | `string \| null` | 조건부 | `image`면 MD에 적힌 경로 그대로 |
+| `imagePath` | `string \| null` | 조건부 | `image`면 MD에 적힌 경로(Markdown 이스케이프와 HTML 문자 참조는 푼 값) |
 | `alt` | `string \| null` | 조건부 | `image`면 대체 텍스트 |
 | `fileKey` | `string \| null` | 조건부 | 짝이 있는 이미지면 파일 키(`{docId}/{version}/{placeholderId}.{ext}`). 이어받은 버전은 원래 버전의 키를 그대로 가리킨다 |
 | `contentType` | `string \| null` | 조건부 | `fileKey`가 있으면 필수 |
 | `description` | `string` | 필수 | 자리표시 설명. 줄바꿈과 `]]`가 없다(루트 `IF-1`) |
-| `hint` | `string \| null` | 조건부 | 요약·캡션. `hintStatus`가 `done`이면 필수 |
+| `hint` | `string \| null` | 조건부 | 요약·캡션. `hintStatus`가 `done`이고 `tableId`가 `null`이면 필수. 표 안 이미지는 늘 `null` |
 | `hintStatus` | `'pending' \| 'done'` | 필수 | |
 | `isTemporary` | `boolean` | 필수 | `hint`가 임시 설명이면 참 |
+| `tableId` | `string \| null` | 필수 | 표 안 이미지면 그 표의 `placeholderId`, 아니면 `null`. 값이 있으면 자리표시·요약·캡션이 없다(`hint` `null`, `hintStatus` `done`, `isTemporary` 거짓). 이 필드가 없는 레코드는 `null`로 읽는다 |
+| `pathInTable` | `{ start: number; end: number } \| null` | 조건부 | 표 안 이미지의 경로가 그 표 `tableMarkdown` 안에 적힌 위치(UTF-16 오프셋, `end`는 제외). 경로가 표 밖(참조형 정의)에 있으면 `null`. `tableId`가 `null`이면 `null` |
 
 ### 변환·저장 경계
 
 - **원본 MD → 색인용 MD** (`REQ-BE-2.2`) — 보존: 표·이미지 밖의 모든 글자와 순서. 파생: 표·이미지 자리마다 자리표시 한 줄, 자리표시 모양 문자열은 `REQ-BE-2.2.2`대로 깨뜨린다. 형식: 루트 `IF-1`
-- **청크 본문 → 복원 본문** (`REQ-BE-2.5`) — 표 자리표시는 `tableMarkdown`으로, 이미지 자리표시는 `![{hint}]({이미지 주소})`로(`API.md`의 `SearchResult`), 짝이 없는 이미지는 `{hint}` 문장만으로 바꾼다. 이미지 대체 텍스트로 넣는 `hint`는 `\`를 `\\`로, `[`·`]`를 `\[`·`\]`로, 줄바꿈을 공백으로 바꾼다. 그 버전에 레코드가 없거나 종류가 다른 자리표시는 그대로 둔다. `REQ-BE-2.2.2`로 넣은 U+200B는 하나 뺀다
+- **청크 본문 → 복원 본문** (`REQ-BE-2.5`) — 표 자리표시는 `tableMarkdown`으로(그 표 안 짝 있는 이미지의 경로 글자는 그 버전의 이미지 주소로 바꾼다. 경로가 표 밖 참조형 정의에 있으면 그대로 둔다), 이미지 자리표시는 `![{hint}]({이미지 주소})`로(`API.md`의 `SearchResult`), 짝이 없는 이미지는 `{hint}` 문장만으로 바꾼다. 이미지 대체 텍스트로 넣는 `hint`는 `\`를 `\\`로, `[`·`]`를 `\[`·`\]`로, 줄바꿈을 공백으로 바꾼다. 그 버전에 레코드가 없거나 종류가 다른 자리표시는 그대로 둔다. `REQ-BE-2.2.2`로 넣은 U+200B는 하나 뺀다
 
 ## 기능 그룹별 요구사항
 
@@ -183,7 +185,7 @@ export interface AssetViewData {
 
 **`REQ-BE-2.1.1`** 버전마다 표·이미지 등록
 
-- 처리 계약: `prepareVersion`은 원본 MD를 CommonMark·GFM으로 읽어, GFM 표와 HTML `<table>` 블록을 표로, Markdown 이미지(인라인·참조형)와 HTML `<img>`를 이미지로 등록한다. 표(GFM 표의 칸, HTML `<table>` 안) 안의 이미지는 표의 일부로 보고 따로 등록하지 않는다. 이미지 경로의 파일 이름이 `images`의 `fileName`과 같으면 짝으로 보고 파일을 저장한다(`REQ-BE-1.1.3`). 이미지 경로의 파일 이름은 `?`·`#` 뒤를 뗀 경로의 마지막 `/`·`\` 뒤이며, 그 값이나 퍼센트 디코딩한 값이 업로드 파일 이름(마지막 `/`·`\` 뒤)과 NFC로 맞춰 같으면 짝이다(대소문자 구분). 짝이 있는 이미지는 자리표시마다 파일을 저장한다. 짝이 없으면 `unmatchedImages`에 경로를 담는다(`REQ-BE-1.1.4`). `unmatchedImages`는 경로 중복을 빼고 처음 나온 순서다
+- 처리 계약: `prepareVersion`은 원본 MD를 CommonMark·GFM으로 읽어, GFM 표와 HTML `<table>` 블록을 표로, Markdown 이미지(인라인·참조형)와 HTML `<img>`를 이미지로 등록한다. 표(GFM 표의 칸, HTML `<table>` 안) 안의 이미지는 자리표시를 따로 만들지 않고 표의 일부로 요약한다. 짝 맞추기·파일 저장·`unmatchedImages`·`imageUrls`에는 다른 이미지와 같이 넣고, 표를 복원할 때 그 경로를 이미지 주소로 바꾼다. 이미지 경로의 파일 이름이 `images`의 `fileName`과 같으면 짝으로 보고 파일을 저장한다(`REQ-BE-1.1.3`). 이미지 경로의 파일 이름은 `?`·`#` 뒤를 뗀 경로의 마지막 `/`·`\` 뒤이며, 그 값이나 퍼센트 디코딩한 값이 업로드 파일 이름(마지막 `/`·`\` 뒤)과 NFC로 맞춰 같으면 짝이다(대소문자 구분). 짝이 있는 이미지는 자리표시마다 파일을 저장한다. 짝이 없으면 `unmatchedImages`에 경로를 담는다(`REQ-BE-1.1.4`). `unmatchedImages`는 경로 중복을 빼고 처음 나온 순서다
 - 실패: `images`에 같은 `fileName`이 둘 이상이면 짝을 정할 수 없으므로 `InvalidRequestError`를 내고 아무것도 저장하지 않는다
 - 충족 기준: 표 둘·이미지 셋(그중 하나는 짝 없음)이 든 MD에서 표·이미지 레코드가 다섯 개, 저장한 파일이 둘, `unmatchedImages`가 하나다
 
@@ -216,7 +218,7 @@ export interface AssetViewData {
 
 **`REQ-BE-2.3.1`** 표·이미지마다 한 건씩 요청
 
-- 처리 계약: `generateHints`는 `hintStatus`가 `pending`인 표·이미지를 `order` 순으로 하나씩 `summarizeTable`·`captionImage`로 요청한다. 다음 것을 요청하기 전에 `ctx.shouldContinue()`를 묻고, 거짓이면 `stopped: true`로 멈춘다(`REQ-BE-1.8.3`, `REQ-BE-1.2.8`)
+- 처리 계약: `generateHints`는 `hintStatus`가 `pending`인 표·이미지를 `order` 순으로 하나씩 `summarizeTable`·`captionImage`로 요청한다. 표는 둘째 줄부터의 블록 접두를 뗀 모양으로 보낸다. 다음 것을 요청하기 전에 `ctx.shouldContinue()`를 묻고, 거짓이면 `stopped: true`로 멈춘다(`REQ-BE-1.8.3`, `REQ-BE-1.2.8`)
 - 충족 기준: 표·이미지가 셋이면 RAG Server 호출이 세 번 차례로 일어나고, 두 번째 뒤 `shouldContinue`가 거짓이면 세 번째 호출이 없다
 
 **`REQ-BE-2.3.2`** 못 만든 것은 임시 설명
@@ -267,9 +269,14 @@ export interface AssetViewData {
 - 처리 계약: search와 documents는 모두 `restore`를 부른다. 복원에 쓰는 버전은 부른 쪽이 넘긴 RAG Server의 결과·청크 버전이다
 - 충족 기준: 같은 본문·버전으로 `restore`를 부르면 언제나 같은 결과다
 
+**`REQ-BE-2.5.4`** 표 안 이미지 경로를 이미지 주소로
+
+- 처리 계약: 복원하는 표의 그 버전 표 안 이미지 중 `fileKey`와 `pathInTable`이 있는 것만, `tableMarkdown`의 `pathInTable` 글자를 그 버전의 이미지 주소로 바꾼다(「변환·저장 경계」). 짝 없는 이미지와 경로가 표 밖 참조형 정의에 있는 이미지는 그대로 둔다. `listViews`의 표 모양도 같은 치환을 쓴다
+- 충족 기준: 칸에 짝 있는 `z.png`와 짝 없는 `w.png`가 든 표를 복원하면 `z.png` 자리만 그 버전의 이미지 주소이고, 이어받은 버전으로 복원하면 주소의 버전이 그 버전이다
+
 ### 조회와 삭제
 
-`listViews`는 `API.md`의 `AssetView`를 만드는 원천(원래 모양, 요약·캡션, 임시 여부)이고(`REQ-BE-1.4.4`), `deleteDocument`는 그 문서의 모든 레코드와 `{docId}/` 아래 파일을 지운다(`REQ-BE-1.8.5`). 두 함수의 충족 기준과 테스트는 documents가 그 REQ로 소유한다.
+`listViews`는 `API.md`의 `AssetView`를 만드는 원천(원래 모양, 요약·캡션, 임시 여부)이고(`REQ-BE-1.4.4`), 표 안 이미지는 넣지 않는다. 표의 원래 모양은 인용문·목록 안 표의 둘째 줄부터 붙은 블록 접두(`>`·들여쓰기)를 떼고 표 안 짝 있는 이미지의 경로를 이미지 주소로 바꾼 것이다. `deleteDocument`는 그 문서의 모든 레코드와 `{docId}/` 아래 파일을 지운다(`REQ-BE-1.8.5`). 두 함수의 충족 기준과 테스트는 documents가 그 REQ로 소유한다.
 
 ## 실행 계약
 
@@ -312,3 +319,4 @@ export interface AssetViewData {
 | `REQ-BE-2.5.1` | unit | 표 복원 | `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.5.2` | unit | 이미지·짝 없는 이미지 복원 | `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.5.3` | unit | 같은 입력 같은 결과 | `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |
+| `REQ-BE-2.5.4` | unit | 짝 있는 표 안 이미지만 주소로, 참조형·짝 없음은 그대로, 이어받은 버전 주소 | `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |

@@ -17,15 +17,16 @@ import type {
   UploadedImage,
 } from '../interfaces/assets.types';
 import { contentTypeOf, extensionOf, indexUploads, matchKeysOfPath } from '../helpers/image-files';
-import { extractAssets } from '../helpers/markdown-assets';
+import { extractAssets, tableForDisplay } from '../helpers/markdown-assets';
 import type { ExtractedAsset } from '../helpers/markdown-assets';
 import {
   imageUrlOf,
   placeholderIdsIn,
   restoreText,
+  rewriteTableImagePaths,
   unbreakPlaceholderLike,
 } from '../helpers/placeholder';
-import type { RestoreSource } from '../helpers/placeholder';
+import type { RestoreSource, TablePathReplacement } from '../helpers/placeholder';
 
 /** 요약·캡션 하나의 결과다. */
 interface ProducedHint {
@@ -40,9 +41,53 @@ interface MatchedFile {
   upload: UploadedImage;
 }
 
+/** 같은 틱에 모은 복원 조회 하나다. */
+interface RestoreBatch {
+  ids: Set<string>;
+  sources: Promise<ReadonlyMap<string, RestoreSource>>;
+}
+
+/** 표 안 이미지가 아닌가(자리표시가 있는 표·이미지인가)를 본다. ★ 필드가 없는 기존 레코드는 표 밖이다 */
+function isTopLevel(record: AssetRecord): boolean {
+  return (record.tableId ?? null) === null;
+}
+
+/** 표 안 이미지를 표 ID별로 묶는다. */
+function nestedByTable(records: readonly AssetRecord[]): Map<string, AssetRecord[]> {
+  const grouped = new Map<string, AssetRecord[]>();
+  for (const record of records) {
+    if (record.tableId === null || record.tableId === undefined) continue;
+    const list = grouped.get(record.tableId) ?? [];
+    list.push(record);
+    grouped.set(record.tableId, list);
+  }
+  return grouped;
+}
+
+/** 표 안 짝 있는 이미지의 경로 바꿀 자리를 만든다. */
+function tableReplacements(
+  docId: string,
+  version: string,
+  nested: readonly AssetRecord[],
+): TablePathReplacement[] {
+  const found: TablePathReplacement[] = [];
+  for (const record of nested) {
+    const range = record.pathInTable ?? null;
+    if (record.fileKey === null || range === null) continue;
+    found.push({
+      start: range.start,
+      end: range.end,
+      url: imageUrlOf(docId, version, record.placeholderId),
+    });
+  }
+  return found;
+}
+
 /** 표·이미지를 다룬다. */
 @Injectable()
 export class AssetsService implements OnModuleInit {
+  private readonly restoreBatches = new Map<string, RestoreBatch>();
+
   constructor(
     @Inject(AssetsCrudService) private readonly repo: AssetsCrudService,
     @Inject(FILE_STORE) private readonly files: FileStore,
@@ -87,15 +132,20 @@ export class AssetsService implements OnModuleInit {
     }
     await this.repo.replaceVersion(docId, version, records);
 
-    const tables = records.filter((record) => record.kind === 'table').length;
+    // ★ assetCount는 자리표시가 있는 최상위 표·이미지만 센다(표 안 이미지 제외). REQUIREMENTS 「용어」
+    //   표·이미지: "표 안의 이미지 참조는 따로 세지 않고 그 표의 일부로 본다".
+    //   반면 로그의 images는 표 안 이미지를 포함한 수다 — 같은 로그의 unmatched와 기준을 맞춘다(IMPL_PLAN)
+    const topLevel = records.filter(isTopLevel);
+    const tables = topLevel.filter((record) => record.kind === 'table').length;
+    const imageCount = records.length - tables;
     this.logger.info(
-      { docId, version, tables, images: records.length - tables, unmatched: unmatched.size },
+      { docId, version, tables, images: imageCount, unmatched: unmatched.size },
       'assets.prepared',
     );
     return {
       indexingMarkdown,
       unmatchedImages: [...unmatched],
-      assetCount: records.length,
+      assetCount: topLevel.length,
     };
   }
 
@@ -138,7 +188,8 @@ export class AssetsService implements OnModuleInit {
     changedHints: ReadonlyMap<string, string>,
   ): Promise<void> {
     const from = await this.repo.findByVersion(docId, fromVersion);
-    const known = new Set(from.map((record) => record.placeholderId));
+    // ★ 표 안 이미지는 요약·캡션을 바꿀 수 없다 — 자리표시가 없는 표의 일부다
+    const known = new Set(from.filter(isTopLevel).map((record) => record.placeholderId));
     const unknown = [...changedHints.keys()].filter((id) => !known.has(id));
     if (unknown.length > 0) {
       throw new InvalidRequestError('없는 표·이미지의 요약·캡션은 바꿀 수 없습니다');
@@ -147,6 +198,15 @@ export class AssetsService implements OnModuleInit {
       throw new InvalidRequestError('요약·캡션은 비울 수 없습니다');
     }
     const records = from.map((record): AssetRecord => {
+      // ★ 표 안 이미지는 그대로 복사한다. hint를 채우거나 isTemporary를 바꾸면 재색인 표시가 다시 요청한다
+      if (!isTopLevel(record)) {
+        return {
+          ...record,
+          version: toVersion,
+          tableId: record.tableId ?? null,
+          pathInTable: record.pathInTable ?? null,
+        };
+      }
       const changed = changedHints.get(record.placeholderId);
       if (changed !== undefined) {
         return {
@@ -155,6 +215,8 @@ export class AssetsService implements OnModuleInit {
           hint: changed,
           isTemporary: false,
           hintStatus: 'done',
+          tableId: null,
+          pathInTable: null,
         };
       }
       return {
@@ -163,6 +225,8 @@ export class AssetsService implements OnModuleInit {
         hint: record.hint ?? record.description,
         isTemporary: record.hint === null ? true : record.isTemporary,
         hintStatus: 'done',
+        tableId: null,
+        pathInTable: null,
       };
     });
     // ★ 파일은 복사하지 않고 fileKey를 그대로 이어받는다
@@ -180,19 +244,28 @@ export class AssetsService implements OnModuleInit {
     version: string,
   ): Promise<Array<{ placeholderId: string; text: string }>> {
     const records = await this.repo.findByVersion(docId, version);
-    return records.map((record) => ({
+    return records.filter(isTopLevel).map((record) => ({
       placeholderId: record.placeholderId,
       text: record.hint ?? record.description,
     }));
   }
 
-  /** 표·이미지 조회용 목록을 준다. */
+  /** 표·이미지 조회용 목록을 준다. 표 안 이미지는 표의 일부라 따로 넣지 않는다. */
   async listViews(docId: string, version: string): Promise<AssetViewData[]> {
     const records = await this.repo.findByVersion(docId, version);
-    return records.map((record) => ({
+    const nested = nestedByTable(records);
+    return records.filter(isTopLevel).map((record) => ({
       placeholderId: record.placeholderId,
       kind: record.kind,
-      tableMarkdown: record.kind === 'table' ? record.tableMarkdown : null,
+      tableMarkdown:
+        record.kind === 'table' && record.tableMarkdown !== null
+          ? tableForDisplay(
+              rewriteTableImagePaths(
+                record.tableMarkdown,
+                tableReplacements(docId, version, nested.get(record.placeholderId) ?? []),
+              ),
+            )
+          : null,
       imageUrl: imageUrlFor(docId, version, record),
       text: record.hint ?? record.description,
       isTemporary: record.isTemporary,
@@ -230,19 +303,59 @@ export class AssetsService implements OnModuleInit {
   async restore(docId: string, version: string, text: string): Promise<string> {
     const ids = placeholderIdsIn(text);
     if (ids.length === 0) return unbreakPlaceholderLike(text);
-    const records = await this.repo.findByIds(docId, version, ids);
-    const sources = new Map<string, RestoreSource>(
-      records.map((record) => [
-        record.placeholderId,
-        {
-          kind: record.kind,
-          tableMarkdown: record.tableMarkdown,
-          text: record.hint ?? record.description,
-          imageUrl: imageUrlFor(docId, version, record),
-        },
-      ]),
-    );
-    return restoreText(text, sources);
+    return restoreText(text, await this.restoreSources(docId, version, ids));
+  }
+
+  /** 같은 틱의 복원 요청을 문서 버전마다 조회 한 번으로 묶는다. */
+  private restoreSources(
+    docId: string,
+    version: string,
+    ids: readonly string[],
+  ): Promise<ReadonlyMap<string, RestoreSource>> {
+    const key = `${docId}\u0000${version}`;
+    let batch = this.restoreBatches.get(key);
+    if (batch === undefined) {
+      const wanted = new Set<string>();
+      // ★ 마이크로태스크에서 조회한다 — 같은 동기 구간의 호출이 모두 모인 뒤다
+      const sources = Promise.resolve().then(() => {
+        // ★ 조회 전에 묶음을 닫는다. 이 뒤에 온 호출은 새 묶음을 만든다
+        this.restoreBatches.delete(key);
+        return this.loadRestoreSources(docId, version, [...wanted]);
+      });
+      batch = { ids: wanted, sources };
+      this.restoreBatches.set(key, batch);
+    }
+    for (const id of ids) batch.ids.add(id);
+    return batch.sources;
+  }
+
+  /** 복원에 쓸 출처를 한 번에 읽어 ID별로 만든다. 표 안 이미지 레코드는 출처로 쓰지 않는다. */
+  private async loadRestoreSources(
+    docId: string,
+    version: string,
+    ids: readonly string[],
+  ): Promise<ReadonlyMap<string, RestoreSource>> {
+    const records = await this.repo.findForRestore(docId, version, ids);
+    const wanted = new Set(ids);
+    const nested = nestedByTable(records);
+    const sources = new Map<string, RestoreSource>();
+    for (const record of records) {
+      if (!isTopLevel(record) || !wanted.has(record.placeholderId)) continue;
+      sources.set(record.placeholderId, {
+        kind: record.kind,
+        // ★ 블록 접두는 떼지 않는다 — 자리표시 자리에 원래 구조 그대로 돌아가야 한다 (REQ-BE-2.5.4)
+        tableMarkdown:
+          record.tableMarkdown === null
+            ? null
+            : rewriteTableImagePaths(
+                record.tableMarkdown,
+                tableReplacements(docId, version, nested.get(record.placeholderId) ?? []),
+              ),
+        text: record.hint ?? record.description,
+        imageUrl: imageUrlFor(docId, version, record),
+      });
+    }
+    return sources;
   }
 
   /** 문서의 표·이미지를 모두 지운다. */
@@ -275,7 +388,8 @@ export class AssetsService implements OnModuleInit {
       const fileName = fileNameOfKey(record.fileKey);
       call = () => this.rag.captionImage(data, fileName);
     } else {
-      call = () => this.rag.summarizeTable(record.tableMarkdown ?? '');
+      // ★ 인용문·목록 안 표의 블록 접두를 뗀 모양으로 보낸다. 저장값은 그대로다
+      call = () => this.rag.summarizeTable(tableForDisplay(record.tableMarkdown ?? ''));
     }
 
     let text: unknown;
@@ -344,7 +458,10 @@ function toRecord(
     contentType: file?.contentType ?? null,
     description: asset.description,
     hint: null,
-    hintStatus: 'pending',
+    // ★ 표 안 이미지는 요약·캡션을 만들지 않는다 — 표의 일부다
+    hintStatus: asset.tableId === null ? 'pending' : 'done',
     isTemporary: false,
+    tableId: asset.tableId,
+    pathInTable: asset.pathInTable === null ? null : { ...asset.pathInTable },
   };
 }

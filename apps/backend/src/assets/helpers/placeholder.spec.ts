@@ -6,10 +6,11 @@ import {
   imageUrlOf,
   placeholderIdsIn,
   restoreText,
+  rewriteTableImagePaths,
   sanitizeDescription,
   unbreakPlaceholderLike,
 } from './placeholder';
-import type { RestoreSource } from './placeholder';
+import type { RestoreSource, TablePathReplacement } from './placeholder';
 
 // ★ 자리표시 형식은 루트 IF-1의 리터럴이다. 구현 상수에 기대지 않는다
 const IF1_STRICT = /^\[\[minerva:(table|image):[a-z0-9]+ \| [^\n]*\]\]$/;
@@ -158,6 +159,34 @@ describe('REQ-BE-2.5.1', () => {
     const sources = new Map([['t1', source({ kind: 'table', tableMarkdown: table })]]);
     const text = `[[${ZWSP}minerva:table:z | q]] 그리고 [[minerva:table:t1 | 열]]`;
     expect(restoreText(text, sources)).toBe(`[[minerva:table:z | q]] 그리고 ${table}`);
+  });
+});
+
+describe('REQ-BE-2.5.4', () => {
+  const TABLE = '| a | b |\n| - | - |\n| z.png | w.png |';
+  const zAt = TABLE.indexOf('z.png');
+  const wAt = TABLE.indexOf('w.png');
+  const zSpot: TablePathReplacement = { start: zAt, end: zAt + 5, url: '/u/z' };
+  const wSpot: TablePathReplacement = { start: wAt, end: wAt + 5, url: '/u/w' };
+  const EXPECTED = '| a | b |\n| - | - |\n| /u/z | /u/w |';
+
+  it('T-PR3-REW-1 주어진 두 자리만 주소로 바뀌고 입력 순서와 관계없이 결과가 같다', () => {
+    expect(rewriteTableImagePaths(TABLE, [zSpot, wSpot])).toBe(EXPECTED);
+    expect(rewriteTableImagePaths(TABLE, [wSpot, zSpot])).toBe(EXPECTED);
+    expect(rewriteTableImagePaths(TABLE, [wSpot])).toBe('| a | b |\n| - | - |\n| z.png | /u/w |');
+  });
+
+  it('T-PR3-REW-1 범위를 벗어난 자리·겹치는 자리·start가 end보다 큰 자리는 건너뛴다', () => {
+    const outside: TablePathReplacement = { start: 0, end: TABLE.length + 1, url: '/x' };
+    const reversed: TablePathReplacement = { start: zAt + 3, end: zAt + 1, url: '/x' };
+    const overlap: TablePathReplacement = { start: zAt + 2, end: zAt + 4, url: '/x' };
+    expect(rewriteTableImagePaths(TABLE, [outside, reversed, zSpot, overlap, wSpot])).toBe(
+      EXPECTED,
+    );
+  });
+
+  it('T-PR3-REW-1 빈 목록이면 원문 그대로다', () => {
+    expect(rewriteTableImagePaths(TABLE, [])).toBe(TABLE);
   });
 });
 

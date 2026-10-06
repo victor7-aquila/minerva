@@ -40,10 +40,13 @@ export class AssetsCrudService {
 
   /** 요약·캡션이 대기 중인 레코드를 order 순으로 읽는다. */
   findPending(docId: string, version: string): Promise<AssetRecord[]> {
-    return this.assets
-      .find({ docId, version, hintStatus: 'pending' }, PROJECTION)
-      .sort({ order: 1 })
-      .toArray();
+    return (
+      this.assets
+        // ★ tableId: null은 필드가 없는 옛 레코드도 맞춘다. 표 안 이미지는 요약·캡션 대상이 아니다
+        .find({ docId, version, hintStatus: 'pending', tableId: null }, PROJECTION)
+        .sort({ order: 1 })
+        .toArray()
+    );
   }
 
   /** 레코드 하나를 읽는다. */
@@ -51,9 +54,24 @@ export class AssetsCrudService {
     return this.assets.findOne({ docId, version, placeholderId }, PROJECTION);
   }
 
-  /** ID 목록의 레코드를 읽는다. */
-  findByIds(docId: string, version: string, ids: string[]): Promise<AssetRecord[]> {
-    return this.assets.find({ docId, version, placeholderId: { $in: ids } }, PROJECTION).toArray();
+  /** 복원에 쓸 레코드를 order 순으로 읽는다. ID 자신과 그 표 안 이미지를 함께 준다. */
+  async findForRestore(
+    docId: string,
+    version: string,
+    ids: readonly string[],
+  ): Promise<AssetRecord[]> {
+    if (ids.length === 0) return [];
+    return this.assets
+      .find(
+        {
+          docId,
+          version,
+          $or: [{ placeholderId: { $in: [...ids] } }, { tableId: { $in: [...ids] } }],
+        },
+        PROJECTION,
+      )
+      .sort({ order: 1 })
+      .toArray();
   }
 
   /** 요약·캡션을 저장한다. */
@@ -77,6 +95,7 @@ export class AssetsCrudService {
         docId,
         version,
         isTemporary: true,
+        tableId: null,
         $or: [{ kind: 'table' }, { fileKey: { $ne: null } }],
       },
       { $set: { hintStatus: 'pending' } },

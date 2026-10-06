@@ -64,6 +64,30 @@ export function imageUrlOf(docId: string, version: string, placeholderId: string
   return `/v1/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(version)}/assets/${encodeURIComponent(placeholderId)}`;
 }
 
+/** 표 안 이미지 경로를 바꿀 자리 하나다. 위치는 표 원문 기준이다. */
+export interface TablePathReplacement {
+  start: number;
+  end: number;
+  url: string;
+}
+
+/** 표 원문의 이미지 경로 자리를 주소로 바꾼다. 범위를 벗어나거나 겹치는 자리는 건너뛴다. */
+export function rewriteTableImagePaths(
+  tableMarkdown: string,
+  replacements: readonly TablePathReplacement[],
+): string {
+  const sorted = [...replacements].sort((a, b) => a.start - b.start);
+  let result = '';
+  let cursor = 0;
+  for (const item of sorted) {
+    // ★ 방어 — 저장된 위치가 표와 어긋났으면 그 자리는 건너뛴다
+    if (item.start < cursor || item.start > item.end || item.end > tableMarkdown.length) continue;
+    result += tableMarkdown.slice(cursor, item.start) + item.url;
+    cursor = item.end;
+  }
+  return result + tableMarkdown.slice(cursor);
+}
+
 /** 복원에 쓰는 표·이미지 하나다. */
 export interface RestoreSource {
   kind: AssetKind;
