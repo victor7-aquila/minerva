@@ -59,6 +59,15 @@ let events: IndexJobStateChangedEvent[];
 let moduleRef: TestingModule;
 let service: IndexingService;
 
+/** 끝나지 않는 Promise를 만든다. 경합 테스트에서 끼어들 순간을 고정하는 데 쓴다. */
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 /** 설정을 받아 서비스를 만든다. */
 async function build(config: Partial<AppConfig> = {}): Promise<void> {
   moduleRef = await Test.createTestingModule({
@@ -719,8 +728,9 @@ describe('REQ-BE-3.3.1', () => {
       }),
     });
     await service.reconcile(['a', 'b']);
+    // ★ 알림이 없으므로 RAG 왕복은 묶음 조회 1번뿐이다 (P41)
     expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
-    expect(fakeRag.getIndexStates).toHaveBeenCalledWith(['a', 'b']);
+    expect(fakeRag.getIndexStates.mock.calls[0][0]).toEqual(['a', 'b']);
     expect(events).toHaveLength(2);
     expect(events.map((e) => e.docId)).toEqual(['a', 'b']);
     expect(events.map((e) => e.source)).toEqual(['reconcile', 'reconcile']);
@@ -812,7 +822,8 @@ describe('REQ-BE-3.3.1', () => {
     });
     await expect(service.reconcile(['a', 'b'])).rejects.toBe(error);
     expect(logsOf('indexing.request_failed')).toHaveLength(0);
-    expect(events).toHaveLength(0);
+    // ★ 같은 묶음의 문서는 직렬 구간 안에서 동시에 발행하므로 오류가 난 문서(a)만 빠지고 b는 발행된다
+    expect(events.map((e) => e.docId)).toEqual(['b']);
   });
 
   /** 문서 n개의 색인 상태를 정하고, 작업 조회는 호출 순서·지연을 제어할 수 있게 한다. */
@@ -824,7 +835,7 @@ describe('REQ-BE-3.3.1', () => {
     return ids;
   }
 
-  it('T-REC-16 문서가 여러 개여도 이벤트는 상태 조회 순서대로 나오고 집계가 맞다', async () => {
+  it('T-REC-16 문서가 여러 개여도 문서마다 이벤트가 하나씩 나오고 집계가 맞다', async () => {
     const ids = manyDocs(9);
     // 앞 문서일수록 늦게 끝나게 해 완료 순서가 입력 순서와 달라지게 한다
     fakeRag.getIndexJob.mockImplementation(async (jobId) => {
@@ -833,16 +844,22 @@ describe('REQ-BE-3.3.1', () => {
       return job({ jobId, docId: `d${n}`, version: String(n), state: 'running', result: null });
     });
     await service.reconcile(ids);
-    expect(events.map((e) => e.docId)).toEqual(ids);
-    expect(events.map((e) => e.jobId)).toEqual(ids.map((_, i) => `j${i}`));
+    // ★ 발행은 문서의 직렬 구간 안에서 하므로 완료 순서를 따른다 (P23). 문서마다 하나씩이면 된다
+    // ★ 알림이 없으므로 색인 상태 조회는 묶음 1번뿐이다 (P41)
+    expect([...events.map((e) => e.docId)].sort()).toEqual([...ids].sort());
+    for (const event of events) {
+      expect(event.jobId).toBe(`j${event.docId.slice(1)}`);
+      expect(event.version).toBe(event.docId.slice(1));
+    }
     expect(events.map((e) => e.source)).toEqual(ids.map(() => 'reconcile'));
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
     const done = logsOf('indexing.reconciled');
     expect(done).toHaveLength(1);
     expect(payloadOf(done[0])).toEqual({ docs: 9, events: 9 });
   });
 
   it.each([2, 5])(
-    'T-REC-17 %i번째 문서의 작업 조회가 rag 오류가 아니면 그 오류로 던지고 앞 문서만 발행한다',
+    'T-REC-17 %i번째 문서의 작업 조회가 rag 오류가 아니면 그 오류로 던지고 같은 묶음의 오류 문서 외 문서만 발행한다',
     async (k) => {
       const ids = manyDocs(9);
       const error = new Error('boom');
@@ -852,8 +869,12 @@ describe('REQ-BE-3.3.1', () => {
         return job({ jobId, docId: `d${n}`, version: String(n), state: 'running', result: null });
       });
       await expect(service.reconcile(ids)).rejects.toBe(error);
-      // k번째 앞 문서는 모두 발행되고, k번째와 그 뒤는 발행되지 않는다
-      expect(events.map((e) => e.docId)).toEqual(ids.slice(0, k - 1));
+      // ★ 오류가 난 문서가 든 묶음(동시 4개)은 그 문서만 빠지고 모두 발행되며, 그 뒤 묶음은 돌지 않는다 (P23)
+      // ★ 4는 indexing.service.ts의 RECONCILE_CONCURRENCY(동시 처리 수)와 같은 값이다 — 상수가 바뀌면 함께 고친다
+      const concurrency = 4;
+      const batchEnd = (Math.floor((k - 1) / concurrency) + 1) * concurrency;
+      const expected = ids.slice(0, batchEnd).filter((id) => id !== `d${k - 1}`);
+      expect([...events.map((e) => e.docId)].sort()).toEqual([...expected].sort());
       // 오류 뒤 처리가 끝없이 이어지지 않는다
       expect(fakeRag.getIndexJob.mock.calls.length).toBeLessThan(ids.length);
     },
@@ -971,7 +992,7 @@ describe('REQ-BE-3.3.1', () => {
       jb: job({ jobId: 'jb', docId: 'b', state: 'running', result: null }),
     });
     await expect(service.reconcile(['a', 'b'])).resolves.toBeUndefined();
-    expect(events.map((e) => e.docId)).toEqual(['a', 'b']);
+    expect([...events.map((e) => e.docId)].sort()).toEqual(['a', 'b']);
     const failed = logsOf('indexing.event_dispatch_failed');
     expect(failed).toHaveLength(1);
     expect(payloadOf(failed[0])).toEqual({
@@ -1017,6 +1038,262 @@ describe('REQ-BE-3.3.1', () => {
     });
     await service.reconcile(['b']);
     expect(capture.lines.join('\n')).not.toContain(FAILMSG_SENT);
+  });
+
+  /** 조건이 참이 될 때까지 이벤트 루프를 돌린다. ★ 실제 시간을 기다리지 않는다 */
+  async function until(check: () => boolean): Promise<void> {
+    for (let i = 0; i < 200 && !check(); i += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    if (!check()) throw new Error('조건이 참이 되지 않았습니다');
+  }
+
+  it('T-PR3-REC-1 묶음 조회 뒤 알림이 처리돼도 낡은 상태가 아니라 다시 조회한 상태로 발행한다', async () => {
+    const gate = deferred<RagIndexState[]>();
+    let fresh = state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' });
+    let calls = 0;
+    fakeRag.getIndexStates.mockImplementation((docIds) => {
+      calls += 1;
+      // ★ 첫 호출(묶음)만 멈춘다. 그 값은 알림 처리보다 앞선 낡은 스냅샷이다
+      if (calls === 1) return gate.promise;
+      return Promise.resolve(docIds.includes('A') ? [fresh] : []);
+    });
+    let jobOf: RagIndexJob | Error = new RagRequestError(404, 'JOB_NOT_FOUND');
+    fakeRag.getIndexJob.mockImplementation(async () => {
+      if (jobOf instanceof Error) throw jobOf;
+      return jobOf;
+    });
+
+    const running = service.reconcile(['A']);
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
+    // 멈춘 동안 failed 알림이 처리된다. 작업 조회 실패로 RAG_UNREACHABLE 대체 사유가 나간다
+    await service.handleNotification(
+      note({ docId: 'A', jobId: 'jA', jobState: 'failed', sequence: 1 }),
+    );
+    expect(events.map((e) => e.source)).toEqual(['notification']);
+    expect(events[0].failure?.code).toBe('RAG_UNREACHABLE');
+
+    // 그 뒤 RAG Server 상태가 실제 사유가 있는 failed로 바뀌고 묶음 호출이 풀린다
+    fresh = state({
+      docId: 'A',
+      latestJobId: 'jA',
+      latestJobState: 'failed',
+      latestJobStage: null,
+    });
+    jobOf = job({
+      jobId: 'jA',
+      docId: 'A',
+      state: 'failed',
+      result: null,
+      failure: {
+        code: 'PARSE_FAILED',
+        message: FAILMSG_SENT,
+        headingPath: null,
+        placeholderId: null,
+      },
+    });
+    gate.resolve([state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' })]);
+    await running;
+
+    const reconciled = events.filter((e) => e.source === 'reconcile');
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0].jobState).toBe('failed');
+    expect(reconciled[0].failure).toEqual({
+      code: 'PARSE_FAILED',
+      message: FAILMSG_SENT,
+      headingPath: null,
+      placeholderId: null,
+    });
+    // ★ 낡은 running 이벤트는 나가지 않는다
+    expect(events.some((e) => e.jobState === 'running')).toBe(false);
+    // 묶음 1번 + A를 직렬 구간 안에서 다시 조회 1번
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(2);
+    expect([...fakeRag.getIndexStates.mock.calls[1][0]]).toEqual(['A']);
+  });
+
+  it('T-PR3-REC-2 알림이 반영된 A의 다시 조회는 A 알림 처리가 끝난 뒤에 하고 알림 없는 B는 다시 조회하지 않고 기다리지도 않는다', async () => {
+    const order: string[] = [];
+    const gateBatch = deferred<void>();
+    const gateA = deferred<void>();
+    emitter.on(INDEX_JOB_STATE_CHANGED, async (event: IndexJobStateChangedEvent) => {
+      order.push(`start:${event.docId}:${event.source}`);
+      // ★ A의 알림 반영만 멈춘다
+      if (event.docId === 'A' && event.source === 'notification') await gateA.promise;
+      order.push(`end:${event.docId}:${event.source}`);
+    });
+    let calls = 0;
+    fakeRag.getIndexStates.mockImplementation(async (docIds) => {
+      calls += 1;
+      order.push(`states:${docIds.join(',')}`);
+      // ★ 첫 호출(묶음)만 멈춘다. 그동안 A의 알림이 반영된다
+      if (calls === 1) await gateBatch.promise;
+      return [
+        state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' }),
+        state({ docId: 'B', latestJobId: 'jB', latestJobState: 'running' }),
+      ].filter((s) => docIds.includes(s.docId));
+    });
+    jobsById({
+      jA: job({ jobId: 'jA', docId: 'A', state: 'running', result: null }),
+      jB: job({ jobId: 'jB', docId: 'B', state: 'running', result: null }),
+    });
+
+    const running = service.reconcile(['A', 'B']);
+    await until(() => order.includes('states:A,B'));
+    // 묶음 조회가 멈춘 동안 A의 알림이 반영되고 그 이벤트 처리가 멈춘다
+    const notified = service.handleNotification(
+      note({ docId: 'A', jobId: 'jA', jobState: 'running', sequence: 1 }),
+    );
+    await until(() => order.includes('start:A:notification'));
+    gateBatch.resolve();
+    // B는 A를 기다리지 않고 발행을 마친다
+    await until(() => order.includes('end:B:reconcile'));
+    expect(order).not.toContain('end:A:notification');
+    // ★ 알림이 없던 B는 다시 조회하지 않는다. A도 알림 처리가 끝나기 전에는 조회하지 않는다
+    expect(order).not.toContain('states:B');
+    expect(order).not.toContain('states:A');
+
+    gateA.resolve();
+    await notified;
+    await running;
+    // A의 다시 조회는 A 알림 처리가 끝난 뒤이고, A의 reconcile 이벤트가 그 뒤에 나간다
+    expect(order.indexOf('states:A')).toBeGreaterThan(order.indexOf('end:A:notification'));
+    expect(order.indexOf('start:A:reconcile')).toBeGreaterThan(order.indexOf('states:A'));
+    expect(order).not.toContain('states:B');
+  });
+
+  /** 문서 하나(A)의 알림 순번 1을 처리하고 getIndexJob이 못 받아 대체 사유가 나가게 한다. */
+  const noteFailedA = (sequence: number) =>
+    service.handleNotification(note({ docId: 'A', jobId: 'jA', jobState: 'failed', sequence }));
+
+  it('T-PR3-F5-1 알림이 없으면 묶음 조회 1번으로 문서 셋의 이벤트가 나온다', async () => {
+    const ids = ['A', 'B', 'C'];
+    fakeRag.getIndexStates.mockResolvedValue(
+      ids.map((docId) => state({ docId, latestJobId: `j${docId}`, latestJobState: 'running' })),
+    );
+    jobsById(
+      Object.fromEntries(
+        ids.map((docId) => [
+          `j${docId}`,
+          job({ jobId: `j${docId}`, docId, state: 'running', result: null }),
+        ]),
+      ),
+    );
+    await service.reconcile(ids);
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
+    expect([...fakeRag.getIndexStates.mock.calls[0][0]]).toEqual(ids);
+    expect([...events.map((e) => e.docId)].sort()).toEqual(ids);
+  });
+
+  it('T-PR3-F5-2 묶음 조회 중 알림이 반영된 A만 다시 조회하고 B는 묶음 결과로 발행한다', async () => {
+    const gate = deferred<RagIndexState[]>();
+    const freshA = state({
+      docId: 'A',
+      latestJobId: 'jA',
+      latestJobState: 'failed',
+      latestJobStage: null,
+    });
+    let calls = 0;
+    fakeRag.getIndexStates.mockImplementation((docIds) => {
+      calls += 1;
+      // ★ 첫 호출(묶음)은 알림 처리보다 앞선 낡은 스냅샷으로 멈춰 있다
+      if (calls === 1) return gate.promise;
+      return Promise.resolve(docIds.includes('A') ? [freshA] : []);
+    });
+    let jobA: RagIndexJob | Error = new RagRequestError(404, 'JOB_NOT_FOUND');
+    fakeRag.getIndexJob.mockImplementation(async (jobId) => {
+      if (jobId === 'jB') return job({ jobId: 'jB', docId: 'B', state: 'running', result: null });
+      if (jobA instanceof Error) throw jobA;
+      return jobA;
+    });
+
+    const running = service.reconcile(['A', 'B']);
+    await noteFailedA(1);
+    expect(events[0].failure?.code).toBe('RAG_UNREACHABLE');
+
+    jobA = job({
+      jobId: 'jA',
+      docId: 'A',
+      state: 'failed',
+      result: null,
+      failure: {
+        code: 'PARSE_FAILED',
+        message: FAILMSG_SENT,
+        headingPath: null,
+        placeholderId: null,
+      },
+    });
+    gate.resolve([
+      state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' }),
+      state({ docId: 'B', latestJobId: 'jB', latestJobState: 'running' }),
+    ]);
+    await running;
+
+    const reconciled = events.filter((e) => e.source === 'reconcile');
+    const a = reconciled.find((e) => e.docId === 'A');
+    const b = reconciled.find((e) => e.docId === 'B');
+    expect(a?.jobState).toBe('failed');
+    expect(a?.failure?.code).toBe('PARSE_FAILED');
+    expect(b?.jobState).toBe('running');
+    // ★ 묶음 1번 + A만 다시 조회 1번이다. B는 다시 조회하지 않는다
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(2);
+    expect([...fakeRag.getIndexStates.mock.calls[1][0]]).toEqual(['A']);
+  });
+
+  it('T-PR3-F5-3 이미 반영한 순번 이하의 알림은 무시되어 다시 조회를 일으키지 않는다', async () => {
+    fakeRag.getIndexJob.mockResolvedValue(
+      job({ jobId: 'jA', docId: 'A', state: 'running', result: null }),
+    );
+    // 먼저 순번 5를 반영해 둔다
+    await service.handleNotification(
+      note({ docId: 'A', jobId: 'jA', jobState: 'running', sequence: 5 }),
+    );
+    const gate = deferred<RagIndexState[]>();
+    fakeRag.getIndexStates.mockImplementation(() => gate.promise);
+
+    const running = service.reconcile(['A']);
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
+    // ★ 묶음 조회 중 같은 순번(무시됨)과 더 낮은 순번 알림이 온다
+    const before = events.length;
+    await service.handleNotification(
+      note({ docId: 'A', jobId: 'jA', jobState: 'running', sequence: 5 }),
+    );
+    await service.handleNotification(
+      note({ docId: 'A', jobId: 'jA', jobState: 'running', sequence: 3 }),
+    );
+    expect(events).toHaveLength(before);
+    gate.resolve([state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' })]);
+    await running;
+
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
+    expect(events.filter((e) => e.source === 'reconcile')).toHaveLength(1);
+  });
+
+  it('T-PR3-F5-4 묶음 조회 전에 반영이 끝난 알림은 다시 조회를 일으키지 않는다', async () => {
+    fakeRag.getIndexJob.mockRejectedValue(new RagRequestError(404, 'JOB_NOT_FOUND'));
+    await noteFailedA(1);
+    expect(events).toHaveLength(1);
+
+    fakeRag.getIndexStates.mockResolvedValue([
+      state({ docId: 'A', latestJobId: 'jA', latestJobState: 'failed', latestJobStage: null }),
+    ]);
+    fakeRag.getIndexJob.mockResolvedValue(
+      job({
+        jobId: 'jA',
+        docId: 'A',
+        state: 'failed',
+        result: null,
+        failure: {
+          code: 'PARSE_FAILED',
+          message: FAILMSG_SENT,
+          headingPath: null,
+          placeholderId: null,
+        },
+      }),
+    );
+    await service.reconcile(['A']);
+    // ★ 묶음이 이미 알림 반영 뒤의 값이므로 1번이다
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
+    expect(events.filter((e) => e.source === 'reconcile')).toHaveLength(1);
   });
 });
 

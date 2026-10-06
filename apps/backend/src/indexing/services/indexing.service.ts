@@ -76,6 +76,8 @@ export class IndexingService implements OnModuleInit {
   private readonly chunking: RagChunking;
   /** 문서별 알림 처리 사슬의 꼬리다. ★ 끝나면 지운다 */
   private readonly chains = new Map<string, Promise<void>>();
+  /** 문서별로 반영한 알림 수다. ★ 지우지 않는다 — 지우면 0으로 돌아가 묶음 조회 뒤의 반영을 놓친다 */
+  private readonly notified = new Map<string, number>();
 
   constructor(
     @Inject(RagClient) private readonly rag: RagClient,
@@ -136,28 +138,47 @@ export class IndexingService implements OnModuleInit {
     const unique = [...new Set(docIds)];
     let events = 0;
     if (unique.length > 0) {
+      // ★ 묶음 조회 직전에 저장한다 — 조회 중에 반영된 알림도 다시 조회 쪽으로 간다
+      const seen = new Map(unique.map((id) => [id, this.notified.get(id) ?? 0]));
       const states = await this.loadStates(unique);
       if (states !== null) {
         const wanted = new Set(unique);
-        const targets = states.filter((state) => wanted.has(state.docId)); // ★ 요청하지 않은 문서는 버린다
+        // ★ 요청하지 않은 문서와 작업이 없는 문서는 버린다
+        const targets = states.filter((s) => wanted.has(s.docId) && s.latestJobId !== null);
         for (let start = 0; start < targets.length; start += RECONCILE_CONCURRENCY) {
-          // ★ 조회만 묶음 단위로 동시에 하고, 발행은 states 순서대로 하나씩 한다
+          // ★ 문서 사이는 묶음 안에서 동시에, 같은 문서는 알림과 같은 사슬에서 차례로 돈다
           const settled = await Promise.allSettled(
-            targets.slice(start, start + RECONCILE_CONCURRENCY).map((s) => this.reconcileEvent(s)),
+            targets
+              .slice(start, start + RECONCILE_CONCURRENCY)
+              .map((s) =>
+                this.serializeByDoc(s.docId, () => this.reconcileOne(s, seen.get(s.docId) ?? 0)),
+              ),
           );
           for (const outcome of settled) {
-            // ★ 앞 문서의 발행을 마친 뒤에 던지므로 순차 처리와 같은 시점의 예외다
-            // ★ 단, 같은 묶음 뒤쪽 문서의 getIndexJob은 이미 호출된 상태라 읽기 호출과
-            //   indexing.request_failed 로그가 남을 수 있다 (읽기 전용이며 결과는 버려진다)
+            // ★ 같은 묶음 앞 문서의 발행을 마친 뒤에 던진다
             if (outcome.status === 'rejected') throw outcome.reason;
-            if (outcome.value === null) continue;
-            await this.dispatch(outcome.value);
-            events += 1;
+            if (outcome.value) events += 1;
           }
         }
       }
     }
     this.logger.info({ docs: unique.length, events }, 'indexing.reconciled');
+  }
+
+  /** 직렬 구간 안에서 문서 하나의 이벤트를 발행한다. 발행했으면 참이다. */
+  private async reconcileOne(batchState: RagIndexState, seen: number): Promise<boolean> {
+    const docId = batchState.docId;
+    let state: RagIndexState | undefined = batchState;
+    // ★ 묶음 조회 뒤 이 문서에 알림이 반영됐을 때만 다시 조회한다 — 낡은 스냅샷을 쓰지 않으면서 RAG 왕복은 보통 묶음 1번이다
+    if ((this.notified.get(docId) ?? 0) !== seen) {
+      const fresh = await this.loadStates([docId]);
+      state = fresh?.find((s) => s.docId === docId);
+    }
+    if (state === undefined) return false;
+    const event = await this.reconcileEvent(state);
+    if (event === null) return false;
+    await this.dispatch(event);
+    return true;
   }
 
   /** 문서들 중 running 작업의 단계를 문서별로 돌려준다. RAG Server 실패면 빈 값이다. */
@@ -260,6 +281,8 @@ export class IndexingService implements OnModuleInit {
       this.logReceived(n, false);
       return;
     }
+
+    this.notified.set(n.docId, (this.notified.get(n.docId) ?? 0) + 1);
 
     await this.dispatch({
       docId: n.docId,
