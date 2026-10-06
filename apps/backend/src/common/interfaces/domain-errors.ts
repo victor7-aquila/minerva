@@ -1,4 +1,4 @@
-/** 도메인 오류 코드다. API.md 「오류 코드」에서 INTERNAL_ERROR를 뺀 목록과 같다. */
+/** 도메인 오류 코드다. API.md 「오류 코드」에서 NOT_FOUND(프레임워크가 내는 없는 경로)와 INTERNAL_ERROR를 뺀 목록과 같다. */
 export type ErrorCode =
   | 'INVALID_REQUEST'
   | 'UNSUPPORTED_FILE'
