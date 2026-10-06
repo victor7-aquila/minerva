@@ -795,6 +795,28 @@ describe('REQ-BE-10.1.1', () => {
     await expect(client.getIndexStates(['doc-001'])).resolves.toEqual([]);
   });
 
+  // ★ 스택 초과 회귀: 묶음 응답을 합칠 때 인자 펼치기(push(...items))를 쓰면 응답이 클 때 RangeError가 난다
+  it('T-URL-12 묶음마다 응답 항목이 200000개여도 예외 없이 모두 모은다', async () => {
+    const perBatch = 200000;
+    const item = (docId: string) => ({ doc_id: docId });
+    server.setHandler((req) => {
+      const first = (bodyOf(req) as { doc_ids: string[] }).doc_ids[0] ?? '';
+      return {
+        status: 200,
+        json: { items: Array.from({ length: perBatch }, (_, i) => item(`${first}-${i}`)) },
+      };
+    });
+    const ids = Array.from({ length: 101 }, (_, i) => `doc-${i}`);
+    const result = await client.getIndexStates(ids);
+    // 100개 묶음 + 1개 묶음 = 두 요청, 응답 합산 400000개
+    expect(server.requests).toHaveLength(2);
+    expect(result).toHaveLength(perBatch * 2);
+    expect(result[0]?.docId).toBe('doc-0-0');
+    expect(result[perBatch - 1]?.docId).toBe(`doc-0-${perBatch - 1}`);
+    expect(result[perBatch]?.docId).toBe('doc-100-0');
+    expect(result[perBatch * 2 - 1]?.docId).toBe(`doc-100-${perBatch - 1}`);
+  });
+
   it('T-URL-11 search의 결과가 없으면 []를 돌려준다', async () => {
     server.setHandler(() => ({ status: 200, json: { results: [] } }));
     await expect(client.search({ query: 'q' })).resolves.toEqual([]);

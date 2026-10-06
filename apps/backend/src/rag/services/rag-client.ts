@@ -181,7 +181,8 @@ export class RagClient {
         timeoutMs: this.timeoutMs,
         parse: (b) => arrayField(b, 'items').map(fromIndexState),
       });
-      states.push(...items);
+      // ★ 응답 크기는 외부 서버가 정하므로 펼침 push 대신 반복문으로 넣는다
+      for (const item of items) states.push(item);
     }
     return states;
   }
