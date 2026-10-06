@@ -11,7 +11,7 @@ Backend가 Console과 AI 에이전트·개발 도구에 제공하는 HTTP API다
 - **null과 빠진 필드** — 응답의 선택 필드는 값이 없으면 빠뜨리지 않고 `null`로 내보낸다. 요청의 선택 필드는 빠뜨리면 기본값을 쓴다. `PATCH`에서는 빠진 필드는 바꾸지 않고, `null`은 값을 지운다
 - **시각·날짜** — 시각은 UTC의 ISO 8601 문자열(예: `2026-10-04T05:05:31Z`)이다 (`REQ-BE-8.4`). 날짜로 거르는 파라미터는 날짜 문자열(예: `2026-10-04`)이며 한국 표준시(KST) 하루로 해석한다 (`REQ-BE-1.3.4`, `REQ-BE-6.2.2`)
 - **ID** — `doc_id`, `golden_set_id`, `log_id`는 Backend가 정한 문자열이다. `doc_id`는 소문자 UUID다. 경로의 `{doc_id}`와 `exclude_doc_id`가 이 형식이 아니면 `400 INVALID_REQUEST`다
-- **이미지 주소** — 표·이미지의 이미지 주소(`AssetView.image_url`, `GET /v1/documents/{doc_id}/original`의 `images` 값, 복원한 본문의 `![캡션](주소)`)는 호스트 없이 `/v1/`로 시작하는 Backend 기준 경로다
+- **이미지 주소** — 표·이미지의 이미지 주소(`AssetView.image_url`, `GET /v1/documents/{doc_id}/original`의 `images` 값, 복원한 본문의 `![캡션](주소)`, 표 안 이미지 경로를 바꾼 주소)는 호스트 없이 `/v1/`로 시작하는 Backend 기준 경로다
 - **페이지네이션** — 목록 요청은 `page`(1부터, 기본 1)와 `page_size`(20·50·100, 기본 20)를 받고, 응답은 `{"items": [...], "total": 정수, "page": 정수, "page_size": 정수}`다 (`REQ-BE-7.1.3`)
 - **정렬** — 목록 요청은 `sort`(열 이름)와 `order`(`asc`·`desc`, 기본 `desc`)를 받는다. 한 번에 한 열만 정렬한다
 - **공통 오류** — 형식이 잘못된 요청은 `400 INVALID_REQUEST` (`REQ-BE-7.1.2`), 없는 경로는 `404 NOT_FOUND`, RAG Server가 응답하지 않거나 준비 중이면 `503 RAG_UNAVAILABLE` (`REQ-BE-10.1.2`), 예상하지 못한 서버 오류는 `500 INTERNAL_ERROR`다
@@ -490,7 +490,7 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 | `file_name` | `string` | 필수 | 마지막으로 올린 MD 파일 이름 |
 | `result` | `ProcessingResult` | 선택 | `processing_state`가 `completed`면 값, 아니면 `null` |
 | `failure` | `ProcessingFailure` | 선택 | `processing_state`가 `failed`면 값, 아니면 `null` |
-| `assets` | `AssetView[]` | 필수 | 마지막 버전의 표·이미지. 문서 안 순서대로 |
+| `assets` | `AssetView[]` | 필수 | 마지막 버전의 표·이미지. 문서 안 순서대로. 표 안 이미지는 표의 일부라 따로 나오지 않는다 |
 
 ### `ProcessingResult`
 
@@ -514,7 +514,7 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 | :--- | :--- | :--- | :--- |
 | `placeholder_id` | `string` | 필수 | |
 | `kind` | `string` | 필수 | `table` 또는 `image` |
-| `table_markdown` | `string` | 조건부 | `kind`가 `table`이면 원본 Markdown 표, 아니면 `null` |
+| `table_markdown` | `string` | 조건부 | `kind`가 `table`이면 원본 Markdown 표, 아니면 `null`. 인용문·목록 안 표는 둘째 줄부터의 블록 접두를 떼고, 표 안 짝 있는 이미지의 경로는 이미지 주소로 바꾼다 |
 | `image_url` | `string` | 조건부 | `kind`가 `image`이고 짝이 있으면 이미지 주소, 아니면 `null` |
 | `text` | `string` | 필수 | 요약·캡션 |
 | `is_fallback` | `boolean` | 필수 | 임시 설명인가 |
@@ -549,7 +549,7 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 | `name` | `string` | 필수 | 문서 이름 |
 | `edition` | `ResultEdition` | 선택 | 판 정보가 없으면 `null` |
 | `heading_path` | `string[]` | 필수 | |
-| `markdown` | `string` | 필수 | 결과 본문. 나뉜 청크면 조각 전부를 순서대로 이은 것이다. 표는 원본 Markdown 표, 이미지는 `![캡션](이미지 주소)`로 바뀌어 있다 (`REQ-BE-2.5`, `REQ-BE-4.2.1`) |
+| `markdown` | `string` | 필수 | 결과 본문. 나뉜 청크면 조각 전부를 순서대로 이은 것이다. 표는 원본 Markdown 표(표 안 짝 있는 이미지의 경로는 이미지 주소), 이미지는 `![캡션](이미지 주소)`로 바뀌어 있다 (`REQ-BE-2.5`, `REQ-BE-4.2.1`) |
 | `before` | `string[]` | 필수 | 앞 청크 본문들(복원됨). `expand_neighbors`가 `false`면 빈 배열 |
 | `after` | `string[]` | 필수 | 뒤 청크 본문들(복원됨). `expand_neighbors`가 `false`면 빈 배열 |
 
