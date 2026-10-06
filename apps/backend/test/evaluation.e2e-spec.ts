@@ -155,11 +155,24 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
-  if (harness !== undefined) await waitUntil(noneEvaluating, 15_000);
-  await harness?.close();
-  await fake?.close();
-  if (dbName !== undefined) await dropTestDb(dbName);
-  if (tmpDir !== undefined) await fs.rm(tmpDir, { recursive: true, force: true });
+  // ★ 정리는 단계마다 앞 단계의 실패와 관계없이 돈다(평가 대기가 시간 초과여도 서버·DB·임시 폴더를 치운다)
+  try {
+    if (harness !== undefined) await waitUntil(noneEvaluating, 15_000);
+  } finally {
+    try {
+      await harness?.close();
+    } finally {
+      try {
+        await fake?.close();
+      } finally {
+        try {
+          if (dbName !== undefined) await dropTestDb(dbName);
+        } finally {
+          if (tmpDir !== undefined) await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      }
+    }
+  }
 });
 
 /** 골든셋 추가를 요청한다. */
@@ -443,6 +456,51 @@ describe('REQ-BE-5.2.5', () => {
     expectError(second, 409, 'EVALUATION_IN_PROGRESS');
     await waitAllDone();
     expect(await harness.db.collection('evaluation_records').countDocuments({})).toBe(2);
+  });
+});
+
+describe('REQ-BE-5.3.2', () => {
+  it('T-PR3-E2E-EVL-1 평가를 세 번 하면 최근 기록은 마지막 결과이고 실제 Mongo의 aggregate도 같다', async () => {
+    // ★ 같은 골든셋의 평가 결과가 호출마다 다르게 나오도록 순서대로 응답한다(적중, 적중, 놓침)
+    let evaluations = 0;
+    fake.setHandler((req) => {
+      if (req.method === 'POST' && req.url === '/v1/evaluations') {
+        evaluations += 1;
+        const expanded = evaluations < 3 ? wireMetrics(evaluations) : wireMetrics(null);
+        return { status: 200, json: { n: 10, base: wireMetrics(null), expanded } };
+      }
+      return router(req);
+    });
+    const added = await addQuery('Q-SEQ');
+    expect(added.status).toBe(201);
+    const id = (added.body as { golden_set_id: string }).golden_set_id;
+    await waitAllDone();
+    for (let i = 0; i < 2; i += 1) {
+      expect((await request(baseUrl).post(`/v1/golden-sets/${id}/evaluate`)).status).toBe(202);
+      await waitAllDone();
+    }
+    expect(evaluations).toBe(3);
+    expect(
+      await harness.db.collection('evaluation_records').countDocuments({ goldenSetId: id }),
+    ).toBe(3);
+
+    const list = (await listGolden()).body as ListBody;
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0].latest.outcome).toBe('miss');
+
+    // 실제 Mongo에서 같은 파이프라인 모양으로 골든셋마다 가장 늦게 시작한 기록 하나를 읽는다
+    const latest = await harness.db
+      .collection('evaluation_records')
+      .aggregate([
+        { $match: { goldenSetId: { $in: [id] } } },
+        { $sort: { goldenSetId: 1, startedAt: -1 } },
+        { $group: { _id: '$goldenSetId', latest: { $first: '$$ROOT' } } },
+        { $replaceRoot: { newRoot: '$latest' } },
+        { $project: { _id: 0 } },
+      ])
+      .toArray();
+    expect(latest).toHaveLength(1);
+    expect(latest[0].outcome).toBe('miss');
   });
 });
 

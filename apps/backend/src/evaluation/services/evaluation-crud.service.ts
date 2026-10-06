@@ -105,13 +105,42 @@ export class EvaluationCrudService {
     return found !== null;
   }
 
-  /** 골든셋들의 기록을 시작 늦은 순으로 준다. 빈 배열이면 DB를 부르지 않는다. */
-  findRecordsOf(goldenSetIds: readonly string[]): Promise<EvaluationRecord[]> {
-    if (goldenSetIds.length === 0) return Promise.resolve([]);
+  /** 골든셋마다 시작이 가장 늦은 기록 하나씩을 준다. 빈 배열이면 DB를 부르지 않는다. */
+  async findLatestRecordsOf(goldenSetIds: readonly string[]): Promise<EvaluationRecord[]> {
+    if (goldenSetIds.length === 0) return [];
     return this.records
-      .find({ goldenSetId: { $in: [...goldenSetIds] } }, PROJECTION)
-      .sort({ startedAt: -1 })
+      .aggregate<EvaluationRecord>([
+        { $match: { goldenSetId: { $in: [...goldenSetIds] } } },
+        { $sort: { goldenSetId: 1, startedAt: -1 } },
+        { $group: { _id: '$goldenSetId', latest: { $first: '$$ROOT' } } },
+        { $replaceRoot: { newRoot: '$latest' } },
+        { $project: { _id: 0 } },
+      ])
       .toArray();
+  }
+
+  /** 기록들 중 평가 중인 것을 평가 실패로 바꾸고 바꾼 건수를 준다. 비면 DB를 부르지 않는다. */
+  async failRecords(recordIds: readonly string[], errorMessage: string, at: Date): Promise<number> {
+    if (recordIds.length === 0) return 0;
+    const result = await this.records.updateMany(
+      { recordId: { $in: [...recordIds] }, outcome: 'evaluating' },
+      { $set: { outcome: 'error', errorMessage, evaluatedAt: at } },
+    );
+    return result.modifiedCount;
+  }
+
+  /** 골든셋 ID 전체를 준다. */
+  async findAllGoldenSetIds(): Promise<string[]> {
+    const found = await this.goldenSets
+      .find({}, { projection: { _id: 0, goldenSetId: 1 } })
+      .toArray();
+    return found.map((g) => g.goldenSetId);
+  }
+
+  /** 주어진 골든셋에 속하지 않은 기록을 지우고 지운 건수를 준다. */
+  async deleteOrphanRecords(goldenSetIds: readonly string[]): Promise<number> {
+    const result = await this.records.deleteMany({ goldenSetId: { $nin: [...goldenSetIds] } });
+    return result.deletedCount;
   }
 
   /** 평가 중인 기록을 끝낸다. 평가 중이 아니거나 없으면 false다. */

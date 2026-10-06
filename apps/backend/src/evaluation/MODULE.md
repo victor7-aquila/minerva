@@ -172,7 +172,7 @@ test/evaluation.e2e-spec.ts
 
 **`REQ-BE-5.2.8`** 기동 때 남은 평가 중 기록 정리
 
-- 처리 계약: 기동할 때(요청을 받기 전) `evaluating` 기록을 모두 "서버가 다시 시작해 평가하지 못했습니다"로 `error`로 바꾸고 평가 시각을 기동 시각으로 둔다
+- 처리 계약: 기동할 때(요청을 받기 전) `evaluating` 기록을 모두 "서버가 다시 시작해 평가하지 못했습니다"로 `error`로 바꾸고 평가 시각을 기동 시각으로 둔다. 이어서 골든셋이 없는 기록(골든셋 삭제 중 기록 삭제가 실패해 남은 것)을 지운다
 - 충족 기준: `evaluating` 기록이 남은 채 기동하면 모두 `error`가 되고, 그 뒤 전체 다시 평가가 거부되지 않는다
 
 ### 조회 — `REQ-BE-5.3`
@@ -212,10 +212,10 @@ test/evaluation.e2e-spec.ts
 | :--- | :--- | :--- | :--- | :--- |
 | `evaluation.done` | 평가 한 건 끝 | info | `goldenSetId`, `outcome`, `rank`, `elapsedMs` | `REQ-BE-5.2` |
 | `evaluation.restart_cleanup` | 기동 때 정리 | warning | `count` | `REQ-BE-5.2.8` |
-| `evaluation.orphan_cleaned` | 골든셋이 지워진 평가 중 기록을 정리 | info | `goldenSetId`, `removed` | `REQ-BE-5.2.4` |
+| `evaluation.orphan_cleaned` | 골든셋이 지워진 평가 중 기록을 정리, 또는 기동 때 고아 기록 정리 | info | `goldenSetId`(기동 정리면 `null`), `removed` | `REQ-BE-5.2.4` |
 | `evaluation.task_failed` | 평가 백그라운드 작업 실패(기록 저장 실패 등) | warning | `task`, `goldenSetId`, `errorName` | `REQ-BE-5.2` |
 
-`evaluation.done`은 기록을 실제로 끝냈을 때만 남기고, `rank`는 `expanded.rank`(평가 실패면 `null`)다. `evaluation.restart_cleanup`은 바꾼 기록이 있을 때만 남긴다. `evaluation.orphan_cleaned`는 `removed`가 지운 기록 건수이며 정리 분기를 탈 때마다 남긴다. 질의와 정답 구간은 로그에 넣지 않는다.
+`evaluation.done`은 기록을 실제로 끝냈을 때만 남기고, `rank`는 `expanded.rank`(평가 실패면 `null`)다. `evaluation.restart_cleanup`은 바꾼 기록이 있을 때만 남긴다. `evaluation.orphan_cleaned`는 `removed`가 지운 기록 건수이며, 평가 실행의 정리 분기는 탈 때마다, 기동 정리는 지운 기록이 있을 때만 남긴다. 질의와 정답 구간은 로그에 넣지 않는다.
 
 ## 테스트와 추적성
 

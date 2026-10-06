@@ -355,6 +355,33 @@ describe('REQ-BE-5.1.4', () => {
     expect(records().filter((r) => r.outcome === 'evaluating')).toEqual([]);
     expect(linesOf('evaluation.done')).toHaveLength(2);
   });
+
+  it('T-PR3-EVR-5 기록 삭제가 실패한 뒤 다시 지우면 404이고 남은 기록이 모두 지워진다', async () => {
+    await seedEvaluation(
+      h.db,
+      [goldenSetRecord({ goldenSetId: 'G1' }), goldenSetRecord({ goldenSetId: 'G2' })],
+      [
+        evaluationRecord({ recordId: 'r1', goldenSetId: 'G1' }),
+        evaluationRecord({ recordId: 'r2', goldenSetId: 'G1' }),
+        evaluationRecord({ recordId: 'r3', goldenSetId: 'G2' }),
+      ],
+    );
+    // ★ failNext('deleteMany')는 골든셋 삭제(첫 deleteMany)에 걸리므로, 기록 컬렉션의 삭제만 스파이로 한 번 실패시킨다
+    const spy = jest
+      .spyOn(h.db.collection('evaluation_records'), 'deleteMany')
+      .mockRejectedValueOnce(new Error('db down'));
+    try {
+      await expect(h.service.remove('G1')).rejects.toThrow('db down');
+      expect(goldens().map((g) => g.goldenSetId)).toEqual(['G2']);
+      expect(records().filter((r) => r.goldenSetId === 'G1')).toHaveLength(2);
+      const error = await h.service.remove('G1').catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(GoldenSetNotFoundError);
+    } finally {
+      spy.mockRestore();
+    }
+    // ★ 골든셋이 이미 없어도 남은 기록은 지운다
+    expect(records().map((r) => r.recordId)).toEqual(['r3']);
+  });
 });
 
 describe('REQ-BE-5.2.1', () => {
@@ -489,6 +516,60 @@ describe('REQ-BE-5.2.3', () => {
     expect(view.latest.outcome).toBe('evaluating');
     await h.tasks.drain();
   });
+
+  it('T-PR3-EVR-1 평가 중 확인(isEvaluating)이 실패하면 기록을 error로 끝내고 RAG를 부르지 않는다', async () => {
+    await h.service.create(body());
+    // ★ create 뒤, 백그라운드 평가 전에 건다. 평가의 첫 findOne(isEvaluating)이 실패한다
+    h.db.failNext('findOne', new Error('db down'));
+    await h.tasks.drain();
+    expect(h.rag.evaluate).toHaveBeenCalledTimes(0);
+    const [record] = records();
+    expect(record.outcome).toBe('error');
+    expect(record.errorMessage).toBe(EVALUATION_MESSAGES.unexpected);
+    expect(record.errorMessage).not.toContain('db down');
+    expect(record.evaluatedAt).not.toBeNull();
+    const failed = linesOf('evaluation.task_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].task).toBe('evaluate');
+  });
+
+  it('T-PR3-EVR-2 기록 끝내기(finishRecord)가 실패하면 보조 갱신으로 error가 된다', async () => {
+    await h.service.create(body());
+    h.db.failNext('updateOne', new Error('db down'));
+    await h.tasks.drain();
+    expect(h.rag.evaluate).toHaveBeenCalledTimes(1);
+    const [record] = records();
+    expect(record.outcome).toBe('error');
+    expect(record.errorMessage).toBe(EVALUATION_MESSAGES.unexpected);
+    expect(linesOf('evaluation.task_failed')).toHaveLength(1);
+    expect(linesOf('evaluation.done')).toHaveLength(0);
+  });
+
+  it('T-PR3-EVR-3 보조 갱신까지 실패하면 기록은 평가 중으로 남고 처리되지 않은 거부는 없다', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await h.service.create(body());
+      h.db.failNext('updateOne', new Error('db down 1'));
+      h.db.failNext('updateMany', new Error('db down 2'));
+      await h.tasks.drain();
+      // 거부가 처리되지 않았다면 이벤트 루프를 몇 번 돌려야 보고된다
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    } finally {
+      // ★ 리스너는 반드시 해제한다
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+    expect(records()[0].outcome).toBe('evaluating');
+    // ★ 보조 갱신의 실패가 아니라 원래 오류가 작업 실패로 남는다
+    const failed = linesOf('evaluation.task_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].errorName).toBe('Error');
+  });
 });
 
 describe('REQ-BE-5.2.4', () => {
@@ -577,7 +658,9 @@ describe('REQ-BE-5.2.4', () => {
     expect(h.rag.evaluate).toHaveBeenCalledTimes(3);
     const g1New = records().filter((r) => r.goldenSetId === 'G1' && r.recordId !== 'r-G1');
     expect(g1New).toHaveLength(1);
-    expect(g1New[0].outcome).toBe('evaluating');
+    // ★ 기록 끝내기가 실패해도 보조 갱신이 평가 실패로 끝낸다(평가 중으로 남지 않는다)
+    expect(g1New[0].outcome).toBe('error');
+    expect(g1New[0].errorMessage).toBe(EVALUATION_MESSAGES.unexpected);
   });
 
   it('T-ALL-5 종료가 시작되면 남은 건을 평가하지 않는다', async () => {
@@ -643,6 +726,25 @@ describe('REQ-BE-5.2.5', () => {
     await h.tasks.drain();
     await expect(h.service.evaluateAll()).resolves.toBeUndefined();
     await h.tasks.drain();
+  });
+
+  it('T-PR3-EVR-4 기록 저장이 부분 실패하면 들어간 기록을 error로 끝내고 다음 전체 다시 평가는 성공한다', async () => {
+    await seedFinished(['G1', 'G2', 'G3']);
+    // ★ 앞 두 건만 들어간 뒤 실패한다(ordered insertMany)
+    h.db.failNext('insertMany', new Error('db down'), { insertFirst: 2 });
+    await expect(h.service.evaluateAll()).rejects.toThrow('db down');
+    const added = records().filter((r) => !r.recordId.startsWith('r-'));
+    expect(added).toHaveLength(2);
+    for (const record of added) {
+      expect(record.outcome).toBe('error');
+      expect(record.errorMessage).toBe(EVALUATION_MESSAGES.unexpected);
+    }
+    expect(records().filter((r) => r.outcome === 'evaluating')).toEqual([]);
+    expect(h.rag.evaluate).toHaveBeenCalledTimes(0);
+    // 평가 중 기록이 남지 않았으므로 다음 요청은 409가 아니다
+    await expect(h.service.evaluateAll()).resolves.toBeUndefined();
+    await h.tasks.drain();
+    expect(h.rag.evaluate).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -787,6 +889,42 @@ describe('REQ-BE-5.2.8', () => {
     expect(linesOf('evaluation.restart_cleanup')).toHaveLength(0);
     expect(h.db.calls.filter((call) => call.op === 'createIndex').length).toBeGreaterThanOrEqual(4);
   });
+
+  it('T-PR3-ORPH-1 기동하면 골든셋이 없는 기록을 지우고 건수를 남기며, 없으면 로그도 없다', async () => {
+    await h.close();
+    capture.clear();
+    h = await buildEvaluationTestModule({ stream: capture.stream, init: false });
+    await seedEvaluation(
+      h.db,
+      [goldenSetRecord({ goldenSetId: 'G1' })],
+      [
+        evaluationRecord({ recordId: 'R1', goldenSetId: 'G1' }),
+        // 골든셋이 없는 기록 둘(하나는 평가 중으로 남은 것)
+        evaluationRecord({ recordId: 'RX', goldenSetId: 'GX' }),
+        evaluatingRecord({ recordId: 'RY', goldenSetId: 'GY' }),
+      ],
+    );
+    await h.moduleRef.init();
+    expect(records().map((r) => r.recordId)).toEqual(['R1']);
+    const cleaned = linesOf('evaluation.orphan_cleaned');
+    expect(cleaned).toHaveLength(1);
+    expect(extraKeys(cleaned[0])).toEqual(['goldenSetId', 'removed']);
+    expect(cleaned[0].goldenSetId).toBeNull();
+    expect(cleaned[0].removed).toBe(2);
+
+    // 고아가 없는 기동은 로그를 남기지 않는다
+    await h.close();
+    capture.clear();
+    h = await buildEvaluationTestModule({ stream: capture.stream, init: false });
+    await seedEvaluation(
+      h.db,
+      [goldenSetRecord({ goldenSetId: 'G1' })],
+      [evaluationRecord({ recordId: 'R1', goldenSetId: 'G1' })],
+    );
+    await h.moduleRef.init();
+    expect(records().map((r) => r.recordId)).toEqual(['R1']);
+    expect(linesOf('evaluation.orphan_cleaned')).toHaveLength(0);
+  });
 });
 
 describe('REQ-BE-5.3.2', () => {
@@ -822,6 +960,59 @@ describe('REQ-BE-5.3.2', () => {
     );
     const page = await h.service.list(listQuery());
     expect(page.items[0].latest.outcome).toBe('miss');
+  });
+
+  it('T-PR3-EVL-1 골든셋마다 시작이 가장 늦은 기록이 latest이고 기록은 aggregate 한 번으로 읽는다', async () => {
+    await seedEvaluation(
+      h.db,
+      [goldenSetRecord({ goldenSetId: 'G1' }), goldenSetRecord({ goldenSetId: 'G2' })],
+      [
+        evaluationRecord({
+          recordId: 'r1',
+          goldenSetId: 'G1',
+          outcome: 'hit',
+          startedAt: new Date('2026-10-01T00:00:00Z'),
+        }),
+        evaluationRecord({
+          recordId: 'r2',
+          goldenSetId: 'G1',
+          outcome: 'miss',
+          expanded: missMetrics(),
+          startedAt: new Date('2026-10-03T00:00:00Z'),
+        }),
+        evaluationRecord({
+          recordId: 'r3',
+          goldenSetId: 'G1',
+          outcome: 'error',
+          n: null,
+          base: null,
+          expanded: null,
+          startedAt: new Date('2026-10-02T00:00:00Z'),
+        }),
+        evaluationRecord({
+          recordId: 'r4',
+          goldenSetId: 'G2',
+          outcome: 'hit',
+          startedAt: new Date('2026-10-01T00:00:00Z'),
+        }),
+      ],
+    );
+    // ★ 시드 호출 기록을 비운 뒤 목록 조회 한 번만 센다
+    h.db.calls.length = 0;
+    const page = await h.service.list(listQuery({ sort: 'created_at', order: 'asc' }));
+    const latestOf = (id: string): string | undefined =>
+      page.items.find((item) => item.golden_set_id === id)?.latest.outcome;
+    expect(latestOf('G1')).toBe('miss');
+    expect(latestOf('G2')).toBe('hit');
+    // ★ golden_sets의 find는 남는다. 평가 기록을 읽는 find(goldenSetId 조건)는 없어야 한다
+    const recordFinds = h.db.calls.filter(
+      (call) => call.op === 'find' && JSON.stringify(call.filter).includes('goldenSetId'),
+    );
+    expect(recordFinds).toEqual([]);
+    const aggregates = h.db.calls.filter((call) => call.op === 'aggregate');
+    expect(aggregates).toHaveLength(1);
+    // 골든셋마다 기록 하나씩만 읽는다
+    expect(aggregates[0].returned).toBe(2);
   });
 
   it('T-LATEST-2 페이지 안의 문서만 조회하고 없는 문서·삭제된 문서를 채운다', async () => {

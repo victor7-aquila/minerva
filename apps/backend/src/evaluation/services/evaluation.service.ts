@@ -64,6 +64,9 @@ export class EvaluationService implements OnModuleInit {
     await this.repo.ensureIndexes();
     const count = await this.repo.failEvaluating(EVALUATION_MESSAGES.restarted, this.clock.now());
     if (count > 0) this.logger.warn({ count }, 'evaluation.restart_cleanup');
+    // ★ 골든셋 삭제 중 기록 삭제가 실패해 남은 고아 기록을 지운다
+    const removed = await this.repo.deleteOrphanRecords(await this.repo.findAllGoldenSetIds());
+    if (removed > 0) this.logger.info({ goldenSetId: null, removed }, 'evaluation.orphan_cleaned');
   }
 
   /** 골든셋을 추가하고 평가를 시작한다. */
@@ -102,9 +105,10 @@ export class EvaluationService implements OnModuleInit {
 
   /** 골든셋과 그 기록을 지운다. */
   async remove(goldenSetId: string): Promise<void> {
-    if (!(await this.repo.deleteGoldenSet(goldenSetId))) throw new GoldenSetNotFoundError();
-    // ★ 골든셋 먼저, 기록 나중
+    const deleted = await this.repo.deleteGoldenSet(goldenSetId);
+    // ★ 골든셋 먼저, 기록 나중. 앞선 삭제가 기록 삭제에서 실패했으면 다시 부를 때 남은 기록을 지운다
     await this.repo.deleteRecordsOf(goldenSetId);
+    if (!deleted) throw new GoldenSetNotFoundError();
   }
 
   /** 골든셋 한 건을 다시 평가한다. */
@@ -132,7 +136,13 @@ export class EvaluationService implements OnModuleInit {
         record: this.newRecord(row.goldenSet.goldenSetId),
       }));
       // ★ 응답 전에 모두 평가 중으로 둔다 — 바로 뒤의 전체 다시 평가가 409를 받는다
-      await this.repo.insertRecords(items.map((item) => item.record));
+      try {
+        await this.repo.insertRecords(items.map((item) => item.record));
+      } catch (error) {
+        // ★ 일부만 들어갔을 수 있다 — 평가 중으로 남지 않게 실패로 끝내 본다
+        await this.failQuietly(items.map((item) => item.record.recordId));
+        throw error;
+      }
       if (items.length > 0) this.tasks.run('evaluate_all', null, () => this.runAll(items));
     } finally {
       this.startingAll = false;
@@ -183,7 +193,7 @@ export class EvaluationService implements OnModuleInit {
   /** 골든셋 전체와 그 최근 기록을 읽는다. */
   private async loadRows(): Promise<GoldenSetRow[]> {
     const goldenSets = await this.repo.findAllGoldenSets();
-    const records = await this.repo.findRecordsOf(goldenSets.map((g) => g.goldenSetId));
+    const records = await this.repo.findLatestRecordsOf(goldenSets.map((g) => g.goldenSetId));
     return joinLatest(goldenSets, latestByGoldenSet(records));
   }
 
@@ -206,33 +216,48 @@ export class EvaluationService implements OnModuleInit {
   private async runEvaluation(goldenSet: GoldenSetRecord, recordId: string): Promise<void> {
     if (this.tasks.stopping) return;
     const started = performance.now();
-    // ★ 골든셋이 지워졌으면 RAG Server를 부르지 않는다
-    if (!(await this.repo.isEvaluating(recordId))) return;
-    // ★ 골든셋 삭제와 겹쳐 뒤늦게 만들어진 고아 기록이면 RAG 호출 없이 정리하고 끝낸다
-    if ((await this.repo.findGoldenSet(goldenSet.goldenSetId)) === null) {
-      const removed = await this.repo.deleteRecordsOf(goldenSet.goldenSetId);
-      // ★ 질의·정답 구간은 로그에 넣지 않는다
+    try {
+      // ★ 골든셋이 지워졌으면 RAG Server를 부르지 않는다
+      if (!(await this.repo.isEvaluating(recordId))) return;
+      // ★ 골든셋 삭제와 겹쳐 뒤늦게 만들어진 고아 기록이면 RAG 호출 없이 정리하고 끝낸다
+      if ((await this.repo.findGoldenSet(goldenSet.goldenSetId)) === null) {
+        const removed = await this.repo.deleteRecordsOf(goldenSet.goldenSetId);
+        // ★ 질의·정답 구간은 로그에 넣지 않는다
+        this.logger.info(
+          { goldenSetId: goldenSet.goldenSetId, removed },
+          'evaluation.orphan_cleaned',
+        );
+        return;
+      }
+      const result = await this.evaluateGoldenSet(goldenSet);
+      const finished = await this.repo.finishRecord(recordId, {
+        ...result,
+        evaluatedAt: this.clock.now(),
+      });
+      if (!finished) return;
       this.logger.info(
-        { goldenSetId: goldenSet.goldenSetId, removed },
-        'evaluation.orphan_cleaned',
+        {
+          goldenSetId: goldenSet.goldenSetId,
+          outcome: result.outcome,
+          rank: result.expanded?.rank ?? null,
+          elapsedMs: Math.round(performance.now() - started),
+        },
+        'evaluation.done',
       );
-      return;
+    } catch (error) {
+      // ★ 평가 중으로 남지 않게 실패로 한 번 더 끝내 본다. 이것도 실패하면 기동 정리가 맡는다
+      await this.failQuietly([recordId]);
+      throw error;
     }
-    const result = await this.evaluateGoldenSet(goldenSet);
-    const finished = await this.repo.finishRecord(recordId, {
-      ...result,
-      evaluatedAt: this.clock.now(),
-    });
-    if (!finished) return;
-    this.logger.info(
-      {
-        goldenSetId: goldenSet.goldenSetId,
-        outcome: result.outcome,
-        rank: result.expanded?.rank ?? null,
-        elapsedMs: Math.round(performance.now() - started),
-      },
-      'evaluation.done',
-    );
+  }
+
+  /** 기록들을 예상하지 못한 오류로 끝내 본다. ★ 실패는 삼킨다 — 원래 오류가 우선이다 */
+  private async failQuietly(recordIds: readonly string[]): Promise<void> {
+    try {
+      await this.repo.failRecords(recordIds, EVALUATION_MESSAGES.unexpected, this.clock.now());
+    } catch {
+      // ★ 삼킨다
+    }
   }
 
   /** 정답 문서를 확인하고 RAG Server로 평가한다. 실패는 사유로 바꿔 돌려준다. */
