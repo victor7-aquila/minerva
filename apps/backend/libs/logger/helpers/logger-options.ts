@@ -1,3 +1,4 @@
+import { IncomingMessage } from 'node:http';
 import { stdSerializers } from 'pino';
 import type { DestinationStream } from 'pino';
 import type { Params } from 'nestjs-pino';
@@ -65,11 +66,13 @@ function stripQuery(url: string): string {
 
 // ★ 요청 직렬화: url과 referer 헤더의 쿼리를 뗀다. 쿼리 문자열에 사용자 입력이 실릴 수 있다 (REQ-BE-8.2.1)
 /** pino 기본 요청 직렬화 결과에서 url·referer의 쿼리를 뗀다. */
-function serializeRequest(req: Parameters<typeof stdSerializers.req>[0]): Record<string, unknown> {
-  // ★ 평범한 객체(로그 호출이 직접 넘긴 req 필드)는 기본 직렬화 없이 복사해 같은 규칙을 적용한다. 기존 redact 경로도 그대로 동작한다
-  const serialized = isPlainObject(req)
-    ? { ...req }
-    : (stdSerializers.req(req) as unknown as Record<string, unknown>);
+function serializeRequest(req: unknown): Record<string, unknown> {
+  // ★ pino-http는 이미 직렬화한 req를 넘긴다. 다시 직렬화하면 socket이 없어 remoteAddress·remotePort가 빠진다.
+  //   IncomingMessage일 때만 표준 serializer를 쓰고, 그 밖(평범한 객체 등)은 복사해 같은 규칙을 적용한다
+  const serialized =
+    req instanceof IncomingMessage
+      ? (stdSerializers.req(req) as unknown as Record<string, unknown>)
+      : { ...(req as Record<string, unknown>) };
   if (typeof serialized.url === 'string') serialized.url = stripQuery(serialized.url);
   const headers = serialized.headers;
   if (headers !== null && typeof headers === 'object') {

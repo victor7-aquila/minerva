@@ -1,8 +1,11 @@
+import { IncomingMessage } from 'node:http';
+import type { IncomingHttpHeaders } from 'node:http';
+import { Socket } from 'node:net';
 import { Writable } from 'node:stream';
 import { Body, Controller, Post } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { LoggerModule, PinoLogger } from 'nestjs-pino';
-import pino from 'pino';
+import pino, { stdSerializers } from 'pino';
 import request from 'supertest';
 import { createLoggerParams, createPinoHttpOptions, scrubForbiddenKeys } from './logger-options';
 import { REDACTED_LOG_PATHS } from '../interfaces/log-constants';
@@ -131,7 +134,7 @@ describe('REQ-BE-8.2.1', () => {
   });
 
   describe('T-LOG-11 요청(req) 직렬화는 url·referer의 쿼리와 프래그먼트를 뗀다', () => {
-    /** IncomingMessage를 흉내 낸 클래스 인스턴스다. */
+    /** IncomingMessage가 아닌 클래스 인스턴스다. ★ 자기 속성을 복사하는 경로를 탄다 */
     class FakeIncomingMessage {
       method = 'GET';
       url: string | undefined;
@@ -142,6 +145,18 @@ describe('REQ-BE-8.2.1', () => {
       }
     }
 
+    /** 진짜 IncomingMessage를 만든다. ★ 속성이 프로토타입에 있어 표준 직렬화 경로를 탄다 */
+    function incoming(
+      url: string | undefined,
+      headers: Record<string, unknown> | undefined,
+    ): IncomingMessage {
+      const req = new IncomingMessage(new Socket());
+      req.method = 'GET';
+      req.url = url;
+      if (headers !== undefined) req.headers = headers as IncomingHttpHeaders;
+      return req;
+    }
+
     /** req 필드로 한 줄을 남기고 파싱한 req를 돌려준다. */
     function logReq(req: unknown): { out: Record<string, any>; line: string } {
       const { logger, lines } = makeLogger();
@@ -150,21 +165,25 @@ describe('REQ-BE-8.2.1', () => {
     }
 
     it('클래스 인스턴스 req의 url에서 ?쿼리와 #프래그먼트를 떼고 나머지는 남긴다', () => {
-      const withQuery = logReq(
-        new FakeIncomingMessage('/v1/search?q=QSECRET&x=1', { host: 'h', accept: 'a' }),
-      );
+      const withQuery = logReq(incoming('/v1/search?q=QSECRET&x=1', { host: 'h', accept: 'a' }));
       expect(withQuery.out.url).toBe('/v1/search');
       expect(withQuery.out.method).toBe('GET');
       expect(withQuery.out.headers.host).toBe('h');
       expect(withQuery.line).not.toContain('QSECRET');
-      const withFragment = logReq(new FakeIncomingMessage('/v1/a#FSECRET', {}));
+      const withFragment = logReq(incoming('/v1/a#FSECRET', {}));
       expect(withFragment.out.url).toBe('/v1/a');
       expect(withFragment.line).not.toContain('FSECRET');
+      // IncomingMessage가 아닌 클래스 인스턴스도 같은 규칙이다
+      const fake = logReq(new FakeIncomingMessage('/v1/search?q=QSECRET&x=1', { host: 'h' }));
+      expect(fake.out.url).toBe('/v1/search');
+      expect(fake.out.method).toBe('GET');
+      expect(fake.out.headers.host).toBe('h');
+      expect(fake.line).not.toContain('QSECRET');
     });
 
     it.each(['referer', 'referrer'])('headers.%s의 쿼리와 프래그먼트를 뗀다', (name) => {
       const { out, line } = logReq(
-        new FakeIncomingMessage('/v1/a', {
+        incoming('/v1/a', {
           [name]: 'https://example.test/page?token=RSECRET#FSECRET',
           host: 'h',
         }),
@@ -209,12 +228,53 @@ describe('REQ-BE-8.2.1', () => {
       expect(noHeaders.out.headers).toBeUndefined();
       const classNoHeaders = logReq(new FakeIncomingMessage('/v1/a?q=1', undefined));
       expect(classNoHeaders.out.url).toBe('/v1/a');
+      const realNoHeaders = logReq(incoming('/v1/a?q=1', undefined));
+      expect(realNoHeaders.out.url).toBe('/v1/a');
     });
 
     it("'#'만 있거나 '#'로 시작하는 url은 빈 문자열이 된다", () => {
       expect(logReq({ method: 'GET', url: '#' }).out.url).toBe('');
       expect(logReq({ method: 'GET', url: '/v1/a#' }).out.url).toBe('/v1/a');
       expect(logReq({ method: 'GET', url: '?' }).out.url).toBe('');
+    });
+  });
+
+  describe('T-PR3-LOG-1 요청(req) 직렬화는 remoteAddress·remotePort를 남기고 쿼리는 뗀다', () => {
+    /** 원격 주소가 있는 진짜 IncomingMessage를 만든다. */
+    function incomingWithRemote(): IncomingMessage {
+      const socket = new Socket();
+      // ★ 연결되지 않은 소켓이라 원격 주소를 자기 속성으로 정의한다
+      Object.defineProperty(socket, 'remoteAddress', { value: '10.1.2.3' });
+      Object.defineProperty(socket, 'remotePort', { value: 54321 });
+      const req = new IncomingMessage(socket);
+      req.method = 'GET';
+      req.url = '/v1/a?q=QSECRET';
+      req.headers = { host: 'h' };
+      return req;
+    }
+
+    it('이미 직렬화된 req도 remoteAddress·remotePort를 남기고 url의 쿼리를 뗀다', () => {
+      // ★ pino-http가 넘기는 모양이다: 표준 serializer를 한 번 거친 객체(IncomingMessage가 아니다)
+      const serialized = stdSerializers.req(incomingWithRemote());
+      expect(serialized).not.toBeInstanceOf(IncomingMessage);
+      const { logger, lines } = makeLogger();
+      logger.info({ req: serialized }, 'common.test');
+      const out = JSON.parse(lines[0]).req;
+      expect(out.remoteAddress).toBe('10.1.2.3');
+      expect(out.remotePort).toBe(54321);
+      expect(out.url).toBe('/v1/a');
+      expect(lines[0]).not.toContain('QSECRET');
+    });
+
+    it('IncomingMessage도 한 번만 직렬화해 remoteAddress·remotePort를 남기고 쿼리를 뗀다', () => {
+      const { logger, lines } = makeLogger();
+      logger.info({ req: incomingWithRemote() }, 'common.test');
+      const out = JSON.parse(lines[0]).req;
+      expect(out.remoteAddress).toBe('10.1.2.3');
+      expect(out.remotePort).toBe(54321);
+      expect(out.url).toBe('/v1/a');
+      expect(out.headers.host).toBe('h');
+      expect(lines[0]).not.toContain('QSECRET');
     });
   });
 
@@ -281,6 +341,9 @@ describe('REQ-BE-8.2.1', () => {
       expect(requestLog).toBeDefined();
       expect(requestLog.req.headers['x-minerva-token']).toBe('[removed]');
       expect(requestLog.req.method).toBe('POST');
+      // ★ pino-http가 이미 직렬화한 req를 다시 직렬화하면 socket이 없어 remoteAddress가 빠진다
+      expect(requestLog.req.remoteAddress).toMatch(/127\.0\.0\.1|::1/);
+      expect(typeof requestLog.req.remotePort).toBe('number');
       expect(requestLog.res.statusCode).toBe(201);
 
       const ctxLog = parsed.find((o) => o.msg === 'probe.handled');
