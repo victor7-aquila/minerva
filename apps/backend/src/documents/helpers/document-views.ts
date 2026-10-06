@@ -1,5 +1,6 @@
 import type { AssetViewData } from '../../assets';
 import { toIsoUtc } from '../../../libs/utils';
+import type { ProcessingState, SearchState } from '../../common';
 import type { RagDocumentChunk } from '../../rag';
 import type {
   AssetView,
@@ -7,17 +8,18 @@ import type {
   DocumentDetailView,
   DocumentRecord,
   DocumentRefView,
-  DocumentSortColumn,
   DocumentSummaryView,
   DocumentVersionRecord,
+  EditionRow,
   EditionValue,
   EditionView,
+  ListSortSpec,
 } from '../interfaces/documents.types';
 
 /** 검색 상태 정렬 순서다. */
-const SEARCH_STATE_ORDER = ['searchable', 'not_searchable', 'replaced'];
+const SEARCH_STATE_ORDER: readonly SearchState[] = ['searchable', 'not_searchable', 'replaced'];
 /** 처리 상태 정렬 순서다. API.md 나열 순이다. */
-const PROCESSING_STATE_ORDER = [
+const PROCESSING_STATE_ORDER: readonly ProcessingState[] = [
   'uploaded',
   'captioning',
   'queued',
@@ -43,7 +45,7 @@ export function toRefView(doc: DocumentRecord): DocumentRefView {
 }
 
 /** 같은 이름의 검색 가능 문서들에서 이름별 가장 늦은 판 날짜를 구한다. */
-export function latestEditionDates(searchable: readonly DocumentRecord[]): Map<string, string> {
+export function latestEditionDates(searchable: readonly EditionRow[]): Map<string, string> {
   const latest = new Map<string, string>();
   for (const doc of searchable) {
     if (doc.edition === null || doc.searchState !== 'searchable' || doc.deleted) continue;
@@ -56,19 +58,10 @@ export function latestEditionDates(searchable: readonly DocumentRecord[]): Map<s
   return latest;
 }
 
-/** 최신판만 거르기에서 남는 문서인가를 돌려준다. */
-export function isLatestOrNoEdition(
-  doc: DocumentRecord,
-  latest: ReadonlyMap<string, string>,
-): boolean {
-  if (doc.edition === null) return true;
-  return doc.searchState === 'searchable' && doc.edition.editionDate === latest.get(doc.name);
-}
-
 /** 문서의 판 칸을 만든다. */
 export function siblingEditions(
   doc: DocumentRecord,
-  searchable: readonly DocumentRecord[],
+  searchable: readonly EditionRow[],
 ): EditionView[] {
   if (doc.edition === null) return [];
   const editions: EditionValue[] = [doc.edition];
@@ -96,39 +89,69 @@ export function siblingEditions(
     .map((edition) => ({ label: edition.label, edition_date: edition.editionDate }));
 }
 
-/** 첫 정렬 열의 비교값을 구한다. */
-function primaryCompare(column: DocumentSortColumn, a: DocumentRecord, b: DocumentRecord): number {
+/** 이름별 가장 늦은 검색 가능 판 날짜를 쌍 목록으로 준다. */
+export function latestEditionPairs(
+  rows: readonly EditionRow[],
+): Array<{ name: string; editionDate: string }> {
+  return [...latestEditionDates(rows)].map(([name, editionDate]) => ({ name, editionDate }));
+}
+
+/** 목록 정렬 조건을 만든다. ★ 키 순서가 우선순위이고, 동점은 수정 시각 최근순 → 문서 ID 오름차순이며 방향과 무관하다 */
+export function listSortSpec(
+  column: 'name' | 'uploaded_at' | 'updated_at',
+  order: 'asc' | 'desc',
+): ListSortSpec {
+  const direction = order === 'asc' ? 1 : -1;
   switch (column) {
     case 'name':
-      return compareCodePoints(a.name, b.name);
-    case 'search_state':
-      return SEARCH_STATE_ORDER.indexOf(a.searchState) - SEARCH_STATE_ORDER.indexOf(b.searchState);
-    case 'processing_state':
-      return (
-        PROCESSING_STATE_ORDER.indexOf(a.processingState) -
-        PROCESSING_STATE_ORDER.indexOf(b.processingState)
-      );
+      return { name: direction, updatedAt: -1, docId: 1 };
     case 'uploaded_at':
-      return a.uploadedAt.getTime() - b.uploadedAt.getTime();
+      return { uploadedAt: direction, updatedAt: -1, docId: 1 };
     case 'updated_at':
-      return a.updatedAt.getTime() - b.updatedAt.getTime();
+      return { updatedAt: direction, docId: 1 };
   }
 }
 
-/** 목록 정렬 비교 함수를 만든다. */
-export function compareDocuments(
-  column: DocumentSortColumn,
+/** 상태 열의 값 순서를 준다. desc면 뒤집는다. ★ 매번 새 배열이다 */
+export function stateBucketOrder(column: 'search_state', order: 'asc' | 'desc'): SearchState[];
+export function stateBucketOrder(
+  column: 'processing_state',
   order: 'asc' | 'desc',
-): (a: DocumentRecord, b: DocumentRecord) => number {
-  const sign = order === 'asc' ? 1 : -1;
-  return (a, b) => {
-    const primary = primaryCompare(column, a, b) * sign;
-    if (primary !== 0) return primary;
-    // ★ 동점은 수정 시각 최근순 → 문서 ID 오름차순이며 방향과 무관하다
-    const byUpdated = b.updatedAt.getTime() - a.updatedAt.getTime();
-    if (byUpdated !== 0) return byUpdated;
-    return compareCodePoints(a.docId, b.docId);
-  };
+): ProcessingState[];
+export function stateBucketOrder(
+  column: 'search_state' | 'processing_state',
+  order: 'asc' | 'desc',
+): SearchState[] | ProcessingState[];
+export function stateBucketOrder(
+  column: 'search_state' | 'processing_state',
+  order: 'asc' | 'desc',
+): SearchState[] | ProcessingState[] {
+  const values: SearchState[] | ProcessingState[] =
+    column === 'search_state' ? [...SEARCH_STATE_ORDER] : [...PROCESSING_STATE_ORDER];
+  return order === 'desc' ? values.reverse() : values;
+}
+
+/** 값별 개수에서 skip·limit이 걸치는 값마다 가져올 범위를 준다. 개수 0인 값은 건너뛴다. */
+export function bucketWindows(
+  counts: readonly number[],
+  skip: number,
+  limit: number,
+): Array<{ index: number; skip: number; limit: number }> {
+  const windows: Array<{ index: number; skip: number; limit: number }> = [];
+  let remainingSkip = skip;
+  let remainingLimit = limit;
+  for (let index = 0; index < counts.length && remainingLimit > 0; index += 1) {
+    const count = counts[index];
+    if (remainingSkip >= count) {
+      remainingSkip -= count;
+      continue;
+    }
+    const take = Math.min(count - remainingSkip, remainingLimit);
+    windows.push({ index, skip: remainingSkip, limit: take });
+    remainingSkip = 0;
+    remainingLimit -= take;
+  }
+  return windows;
 }
 
 /** 문서를 목록 항목으로 바꾼다. */

@@ -14,6 +14,7 @@ import {
   targetStateOf,
 } from '../helpers/document-state';
 import { DocumentsCrudService } from './documents-crud.service';
+import type { DocumentUpdate, VersionCondition, VersionUpdate } from './documents-crud.service';
 import {
   RAG_UNREACHABLE_FAILURE,
   REPLACED_FAILURE,
@@ -24,22 +25,33 @@ import type { DocumentRecord, VersionFailure } from '../interfaces/documents.typ
 /** 이벤트 반영을 다시 시도하는 최대 횟수다. */
 const MAX_ATTEMPTS = 3;
 
-/**
- * 내가 쓴 값이 지금도 그대로인지 확인하는 조건을 만든다.
- * ★ 하위 객체는 키 순서에 흔들리지 않게 점 경로의 단순 값으로 펼친다(배열은 비교에서 뺀다)
- */
-function writtenCondition(set: Record<string, unknown>, prefix = ''): Record<string, unknown> {
+/** 하위 객체를 점 경로의 단순 값으로 펼친다. 배열은 뺀다. */
+function flattenWritten(set: Record<string, unknown>, prefix: string): Record<string, unknown> {
   const cond: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(set)) {
     const path = `${prefix}${key}`;
     if (Array.isArray(value)) continue;
     if (value !== null && typeof value === 'object') {
-      Object.assign(cond, writtenCondition(value as Record<string, unknown>, `${path}.`));
+      Object.assign(cond, flattenWritten(value as Record<string, unknown>, `${path}.`));
     } else {
       cond[path] = value ?? null;
     }
   }
   return cond;
+}
+
+/**
+ * 내가 쓴 값이 지금도 그대로인지 확인하는 조건을 만든다.
+ * ★ 하위 객체는 키 순서에 흔들리지 않게 점 경로의 단순 값으로 펼친다(배열은 비교에서 뺀다)
+ */
+function writtenCondition(set: VersionUpdate): VersionCondition {
+  // ★ 점 경로 키는 VersionCondition 범위의 값만 만든다 — VersionUpdate의 필드만 펼치기 때문이다
+  return flattenWritten({ ...set }, '') as VersionCondition;
+}
+
+/** 처리 중인 버전의 키를 만든다. */
+function activeKey(docId: string, version: string): string {
+  return `${docId}\u0000${version}`;
 }
 
 /** 문서 처리 수명주기(상태 전이·처리 파이프라인·이벤트 반영·교체·정리)를 맡는다. */
@@ -53,6 +65,11 @@ export class DocumentLifecycle {
   private readonly deletingDirty = new Set<string>();
   /** 진행 중에 새 요청이 들어와 한 번 더 돌아야 하는 문서다(이름·판 정보). */
   private readonly syncingDirty = new Set<string>();
+  /**
+   * 이 프로세스에서 처리 중인 버전이다. 키는 `${docId}\u0000${version}`이다.
+   * ★ 기동 처리와 요청 처리가 같은 버전을 두 번 돌리지 않게 한다
+   */
+  private readonly active = new Set<string>();
 
   constructor(
     @Inject(DocumentsCrudService) private readonly repo: DocumentsCrudService,
@@ -162,15 +179,79 @@ export class DocumentLifecycle {
     this.logger.info({ docId, version, reason }, 'documents.processing_stopped');
   }
 
-  /** 버전 처리를 백그라운드로 시작한다. */
+  /** 새 버전을 쓴 뒤 그사이 삭제·교체가 남긴 것을 맞춘다. ★ 실패는 삼킨다 — 호출자의 결과·오류가 우선이다 */
+  async recheckAfterVersionWrite(docId: string): Promise<void> {
+    try {
+      const cur = await this.repo.findDocument(docId);
+      if (cur === null) return;
+      if (cur.deleted) {
+        // ★ 그사이 데이터 삭제가 끝났으면 방금 쓴 표·이미지·버전이 남는다. 다시 지우게 한다 (REQ-BE-1.8.5)
+        await this.repo.updateDocument({ docId, deleted: true }, { purged: false });
+        this.scheduleChunkDeletion(docId);
+        return;
+      }
+      if (cur.searchState === 'replaced' && cur.processingState === 'failed') {
+        // ★ 선점 직후 교체되면 교체가 쓴 사유가 빈 버전 레코드에 덮였다 (REQ-BE-1.2.8)
+        // ★ 다시 읽은 문서의 마지막 버전에 쓴다 — 롤백 뒤에는 되돌아간 버전이다
+        await this.repo.updateVersion(
+          docId,
+          cur.latestVersion,
+          { failure: { ...REPLACED_FAILURE } },
+          { failure: null },
+        );
+      }
+    } catch {
+      // ★ 삼킨다 — 삭제는 주기 재요청이, 사유는 조회 때 null로 보일 뿐이다
+    }
+  }
+
+  /**
+   * 버전 처리를 백그라운드로 시작한다. 같은 버전이 이미 처리 중이면 아무것도 하지 않는다.
+   * ★ 중복으로 건너뛴 경우는 로그를 남기지 않는다 — 처리 중인 쪽이 결과를 남긴다
+   */
   startProcessing(
     docId: string,
     version: string,
     opts: { startAt: 'hints' | 'index'; force: boolean },
   ): void {
-    this.tasks.run(opts.startAt === 'hints' ? 'process' : 'index', docId, () =>
-      this.processVersion(docId, version, opts),
-    );
+    // ★ 종료 중이면 tasks.run이 작업을 받지 않아 키가 풀리지 않는다 — 키를 잡지 않고 끝낸다
+    if (this.tasks.stopping) return;
+    const key = activeKey(docId, version);
+    if (this.active.has(key)) return;
+    // ★ 호출 즉시(동기로) 잡는다 — setImmediate로 작업이 시작되기 전의 틈도 막는다
+    this.active.add(key);
+    this.tasks.run(opts.startAt === 'hints' ? 'process' : 'index', docId, async () => {
+      try {
+        await this.processVersion(docId, version, opts);
+      } finally {
+        this.active.delete(key);
+      }
+    });
+  }
+
+  /** 기동 처리용이다. 처리 중이 아니고 아직 작업 ID가 없는 색인 대기 버전이면 색인을 요청한다. 요청했으면 참이다. */
+  async requestIndexIfIdle(docId: string, version: string, force: boolean): Promise<boolean> {
+    const key = activeKey(docId, version);
+    if (this.active.has(key)) return false;
+    this.active.add(key);
+    try {
+      const doc = await this.repo.findDocument(docId);
+      const ver = await this.repo.findVersion(docId, version);
+      // ★ 분류 뒤 요청 처리가 먼저 끝냈으면(작업 ID가 생겼거나 상태가 바뀌었으면) 다시 보내지 않는다
+      if (
+        doc === null ||
+        ver === null ||
+        ver.jobId !== null ||
+        doc.latestVersion !== version ||
+        doc.processingState !== 'queued'
+      ) {
+        return false;
+      }
+      await this.requestIndexFor(docId, version, force);
+      return true;
+    } finally {
+      this.active.delete(key);
+    }
   }
 
   /** 버전 하나를 표·이미지 처리부터 또는 색인 요청부터 처리한다. */
@@ -280,6 +361,11 @@ export class DocumentLifecycle {
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
       if (await this.applyEventOnce(event)) return;
     }
+    // ★ 시도를 다 쓰면 로그를 남긴다 — 다음 상태 맞추기가 맞춘다 (REQ-BE-1.9.5)
+    this.logger.warn(
+      { docId: event.docId, version: event.version, jobState: event.jobState },
+      'documents.event_dropped',
+    );
   }
 
   /** 이벤트를 한 번 반영해 본다. 끝났으면(반영했거나 반영할 것이 없으면) 참, 조건이 어긋났으면 거짓이다. */
@@ -297,7 +383,7 @@ export class DocumentLifecycle {
     if (!changeState && searchable === null) return true;
 
     const stateChanged = changeState && target !== doc.processingState;
-    const set: Record<string, unknown> = {};
+    const set: DocumentUpdate = {};
     if (stateChanged) set.processingState = target;
     if (searchable !== null) {
       set.searchableVersion = searchable;
@@ -307,7 +393,7 @@ export class DocumentLifecycle {
     // ★ 버전 레코드를 먼저 쓰고 쓰기 전 값(ver)을 보관한다. 상태 갱신 뒤 멈춰도 result·failure가
     //   비지 않는다. 갱신이 어긋나 포기하면 보관한 값으로 되돌린다.
     //   처리 상태가 그대로여도 failed 이벤트면 실패 사유를 갱신한다 (REQ-BE-1.9.5, RAG_UNREACHABLE 대체)
-    let versionSet: Record<string, unknown> | null = null;
+    let versionSet: VersionUpdate | null = null;
     if (changeState && target === 'completed') {
       versionSet = { result: event.result ? { ...event.result } : null, failure: null };
     } else if (changeState && target === 'failed') {

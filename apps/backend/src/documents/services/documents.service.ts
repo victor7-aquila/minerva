@@ -4,6 +4,7 @@ import type { OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PinoLogger } from 'nestjs-pino';
 import { AssetsService } from '../../assets';
+import type { UploadedImage } from '../../assets';
 import {
   DocumentLockedError,
   DocumentNotFoundError,
@@ -19,12 +20,13 @@ import { LogsService } from '../../logs';
 import { RagClient, RagRequestError } from '../../rag';
 import { DocumentClock } from './document-clock';
 import { DocumentLifecycle } from './document-lifecycle.service';
-import { EDITABLE_STATES, isLocked, nextVersion } from '../helpers/document-state';
+import { EDITABLE_STATES, isLocked, nextVersion, previousVersion } from '../helpers/document-state';
 import {
-  compareDocuments,
-  isLatestOrNoEdition,
-  latestEditionDates,
+  bucketWindows,
+  latestEditionPairs,
+  listSortSpec,
   siblingEditions,
+  stateBucketOrder,
   toChunkView,
   toDetail,
   toRefView,
@@ -37,21 +39,32 @@ import type {
   ReplacementCheckQueryDto,
 } from '../interfaces/documents.dto';
 import { DocumentsCrudService } from './documents-crud.service';
+import type { DocumentUpdate, ListCriteria } from './documents-crud.service';
 import type {
   ChunkView,
   DocumentDetailView,
   DocumentRecord,
   DocumentRefData,
   DocumentRefView,
+  DocumentSortColumn,
   DocumentSummaryView,
+  DocumentVersionRecord,
   EditionValue,
   EvaluationTarget,
+  ListStateFilter,
   OriginalView,
   UploadedDocumentView,
 } from '../interfaces/documents.types';
 import { classifyUpload, matchMeta } from '../helpers/upload-files';
-import type { UploadFile, UploadMetaInput, UploadSizeLimits } from '../helpers/upload-files';
+import type {
+  NewDocumentInput,
+  UploadFile,
+  UploadMetaInput,
+  UploadSizeLimits,
+} from '../helpers/upload-files';
 
+/** 이름 목록을 읽는 묶음 크기다. */
+const NAMES_BATCH = 100;
 /** 다른 편집이 먼저 반영됐을 때의 안내 문장이다. */
 const CONCURRENT_EDIT_MESSAGE = '다른 변경이 먼저 반영되었습니다. 다시 불러온 뒤 고쳐 주세요';
 
@@ -122,7 +135,7 @@ export class DocumentsService implements OnModuleInit {
   private async claimNewVersion(
     doc: DocumentRecord,
     to: ProcessingState,
-    extraSet: Record<string, unknown>,
+    extraSet: DocumentUpdate,
   ): Promise<string> {
     const next = nextVersion(doc.latestVersion);
     const ok = await this.repo.updateDocument(
@@ -147,7 +160,7 @@ export class DocumentsService implements OnModuleInit {
     claimed: ProcessingState,
   ): Promise<void> {
     try {
-      await this.repo.updateDocument(
+      const reverted = await this.repo.updateDocument(
         { docId: doc.docId, latestVersion: next, processingState: claimed },
         {
           processingState: doc.processingState,
@@ -159,6 +172,13 @@ export class DocumentsService implements OnModuleInit {
           'pendingRag.metadata': doc.pendingRag.metadata,
         },
       );
+      if (!reverted) {
+        // ★ 그사이 교체되면 처리 상태가 failed로 바뀌어 위 조건이 맞지 않는다. 마지막 버전만 되돌린다 — 처리·검색 상태는 교체 규칙대로 둔다
+        await this.repo.updateDocument(
+          { docId: doc.docId, latestVersion: next, searchState: 'replaced' },
+          { latestVersion: doc.latestVersion },
+        );
+      }
     } catch {
       // ★ 삼킨다 — 기동 처리가 마지막 버전 레코드 없는 문서를 이전 버전으로 되돌린다
     }
@@ -175,122 +195,207 @@ export class DocumentsService implements OnModuleInit {
     const classified = classifyUpload(files, this.limits, 'upload');
     const inputs = matchMeta(classified.markdowns, meta);
 
-    const created: UploadedDocumentView[] = [];
     const docIds: string[] = [];
-    for (const input of inputs) {
-      const docId = randomUUID();
-      const prepared = await this.assets.prepareVersion(
-        docId,
-        '1',
-        input.markdown,
-        classified.images,
-      );
-      await this.repo.insertVersion({
-        docId,
-        version: '1',
-        origin: 'upload',
-        fileName: input.fileName,
-        originalMarkdown: input.markdown,
-        indexingMarkdown: prepared.indexingMarkdown,
-        jobId: null,
-        result: null,
-        failure: null,
-      });
-      const now = this.clock.now();
-      await this.repo.insertDocument({
-        docId,
-        name: input.name,
-        edition: input.edition,
-        editionEnteredAt: now,
-        searchState: 'not_searchable',
-        processingState: 'uploaded',
-        latestVersion: '1',
-        searchableVersion: null,
-        deleted: false,
-        pendingRag: { deleteChunks: false, metadata: false },
-        purged: false,
-        uploadedAt: now,
-        updatedAt: now,
-      });
-      await this.logs.record({
-        kind: 'upload',
-        docId,
-        name: input.name,
-        editionLabel: input.edition?.label ?? null,
-        outcome: 'success',
-      });
-      docIds.push(docId);
-      created.push({
-        doc_id: docId,
-        name: input.name,
-        file_name: input.fileName,
-        unmatched_images: prepared.unmatchedImages,
-      });
+    const created: Array<{ view: UploadedDocumentView; input: NewDocumentInput }> = [];
+    try {
+      for (const input of inputs) {
+        const docId = randomUUID();
+        // ★ 첫 쓰기 전에 넣는다 — 실패하면 이 문서의 쓰기도 되돌린다
+        docIds.push(docId);
+        created.push({ view: await this.createOne(docId, input, classified.images), input });
+      }
+      // ★ 업로드 기록은 모든 문서를 만든 뒤에 남긴다 — 실패한 요청의 기록이 남지 않게 한다
+      // 기록을 남긴 뒤 다른 기록에서 실패하면 이미 남은 기록은 지우지 않는다(logs에 삭제 경로가 없다)
+      for (const { view, input } of created) await this.recordUpload(view.doc_id, input);
+    } catch (error) {
+      await this.discardAll(docIds);
+      throw error;
     }
-    // ★ 모두 만든 뒤에 처리를 시작한다 — 응답 뒤에 돈다 (REQ-BE-1.1.9)
+    // ★ 모두 성공한 뒤에만 처리를 시작한다. 응답 뒤에 돈다 (REQ-BE-1.1.9)
     for (const docId of docIds) {
       this.lifecycle.startProcessing(docId, '1', { startAt: 'hints', force: false });
     }
-    return { documents: created };
+    return { documents: created.map((c) => c.view) };
+  }
+
+  /** 올린 MD 하나로 문서를 만든다. 표·이미지, 버전, 문서 레코드를 쓴다. */
+  private async createOne(
+    docId: string,
+    input: NewDocumentInput,
+    images: readonly UploadedImage[],
+  ): Promise<UploadedDocumentView> {
+    const prepared = await this.assets.prepareVersion(docId, '1', input.markdown, images);
+    await this.repo.insertVersion({
+      docId,
+      version: '1',
+      origin: 'upload',
+      fileName: input.fileName,
+      originalMarkdown: input.markdown,
+      indexingMarkdown: prepared.indexingMarkdown,
+      jobId: null,
+      result: null,
+      failure: null,
+    });
+    const now = this.clock.now();
+    await this.repo.insertDocument({
+      docId,
+      name: input.name,
+      edition: input.edition,
+      editionEnteredAt: now,
+      searchState: 'not_searchable',
+      processingState: 'uploaded',
+      latestVersion: '1',
+      searchableVersion: null,
+      deleted: false,
+      pendingRag: { deleteChunks: false, metadata: false },
+      purged: false,
+      uploadedAt: now,
+      updatedAt: now,
+    });
+    return {
+      doc_id: docId,
+      name: input.name,
+      file_name: input.fileName,
+      unmatched_images: prepared.unmatchedImages,
+    };
+  }
+
+  /** 업로드 기록을 남긴다. */
+  private async recordUpload(docId: string, input: NewDocumentInput): Promise<void> {
+    await this.logs.record({
+      kind: 'upload',
+      docId,
+      name: input.name,
+      editionLabel: input.edition?.label ?? null,
+      outcome: 'success',
+    });
+  }
+
+  /** 만드는 도중 실패한 업로드의 문서들을 모두 지운다. */
+  private async discardAll(docIds: readonly string[]): Promise<void> {
+    for (const docId of docIds) await this.discardOne(docId);
+  }
+
+  /** 문서 하나의 표·이미지, 버전, 문서 레코드를 지운다. 단계마다 따로 시도한다. */
+  private async discardOne(docId: string): Promise<void> {
+    const steps = [
+      () => this.assets.deleteDocument(docId),
+      () => this.repo.deleteVersions(docId),
+      () => this.repo.deleteDocumentRecord(docId),
+    ];
+    for (const step of steps) {
+      try {
+        await step();
+      } catch {
+        // ★ 삼킨다 — 하나가 실패해도 나머지를 지우고 원래 오류를 던진다
+      }
+    }
   }
 
   // ── 목록·조회 ──
 
   /** 문서 목록을 페이지로 준다. */
   async list(query: ListDocumentsQueryDto): Promise<Page<DocumentSummaryView>> {
-    const candidates = await this.repo.findListCandidates({
+    const criteria: ListCriteria = {
       searchStates: query.search_state,
       processingStates: query.processing_state,
       name: query.name?.trim(),
       hasEdition: query.has_edition,
       uploadedFrom: query.uploaded_from ? parseKstDayRange(query.uploaded_from).start : undefined,
       uploadedTo: query.uploaded_to ? parseKstDayRange(query.uploaded_to).end : undefined,
-    });
-    const searchable = await this.repo.findSearchableWithEdition();
-
-    let filtered = candidates;
+    };
     if (query.latest_only === true) {
-      const latest = latestEditionDates(searchable);
-      filtered = candidates.filter((doc) => isLatestOrNoEdition(doc, latest));
+      criteria.latestEditions = latestEditionPairs(await this.repo.findEditionRows());
     }
-    const sorted = [...filtered].sort(
-      compareDocuments(query.sort ?? 'updated_at', query.order ?? 'desc'),
-    );
-    const page = query.page ?? 1;
     const pageSize = query.page_size ?? 20;
-    const pageDocs = sorted.slice((page - 1) * pageSize, page * pageSize);
+    const skip = ((query.page ?? 1) - 1) * pageSize;
+    const column: DocumentSortColumn = query.sort ?? 'updated_at';
+    const order = query.order ?? 'desc';
+    // ★ 거르기·정렬·쪽 자르기는 DB가 한다 — 전체를 읽어 메모리에서 자르지 않는다
+    const { docs: pageDocs, total } =
+      column === 'search_state' || column === 'processing_state'
+        ? await this.pageByState(criteria, column, order, skip, pageSize)
+        : {
+            docs: await this.repo.findListPage(
+              criteria,
+              listSortSpec(column, order),
+              skip,
+              pageSize,
+            ),
+            total: await this.repo.countList(criteria),
+          };
 
     const indexingIds = pageDocs
       .filter((d) => d.processingState === 'indexing')
       .map((d) => d.docId);
     const stages = indexingIds.length > 0 ? await this.indexing.getStages(indexingIds) : new Map();
-    const failedDocs = pageDocs.filter((d) => d.processingState === 'failed');
-    const failedVersions = await this.repo.findVersionsOf(failedDocs.map((d) => d.docId));
-    const latestOf = new Map(failedDocs.map((d) => [d.docId, d.latestVersion]));
-    const failureMessages = new Map(
-      failedVersions
-        .filter((v) => latestOf.get(v.docId) === v.version)
-        .map((v) => [v.docId, v.failure?.message ?? null]),
+    // ★ 실패 사유는 페이지의 실패 문서가 가리키는 마지막 버전의 것만 읽는다
+    const failedVersions = await this.repo.findLatestFailures(
+      pageDocs
+        .filter((d) => d.processingState === 'failed')
+        .map((d) => ({ docId: d.docId, version: d.latestVersion })),
     );
+    const failureMessages = new Map(
+      failedVersions.map((v) => [v.docId, v.failure?.message ?? null]),
+    );
+    const editionRows = await this.repo.findEditionRows([...new Set(pageDocs.map((d) => d.name))]);
 
     const items = pageDocs.map((doc) =>
       toSummary(doc, {
-        siblings: siblingEditions(doc, searchable),
+        siblings: siblingEditions(doc, editionRows),
         stage: stages.get(doc.docId) ?? null,
         failureMessage: failureMessages.get(doc.docId) ?? null,
       }),
     );
-    return toPage(items, sorted.length, query);
+    return toPage(items, total, query);
+  }
+
+  /** 상태 열 정렬로 한 쪽을 읽는다. 값 순서대로 값별 구간을 이어 붙인다. */
+  private async pageByState(
+    criteria: ListCriteria,
+    column: 'search_state' | 'processing_state',
+    order: 'asc' | 'desc',
+    skip: number,
+    limit: number,
+  ): Promise<{ docs: DocumentRecord[]; total: number }> {
+    const filters: ListStateFilter[] =
+      column === 'search_state'
+        ? stateBucketOrder(column, order).map((searchState) => ({ searchState }))
+        : stateBucketOrder(column, order).map((processingState) => ({ processingState }));
+    const counts = await Promise.all(filters.map((state) => this.repo.countList(criteria, state)));
+    const docs: DocumentRecord[] = [];
+    for (const window of bucketWindows(counts, skip, limit)) {
+      // ★ 값 안의 순서는 방향과 무관하게 수정 시각 최근순 → 문서 ID 오름차순이다
+      docs.push(
+        ...(await this.repo.findListPage(
+          criteria,
+          { updatedAt: -1, docId: 1 },
+          window.skip,
+          window.limit,
+          filters[window.index],
+        )),
+      );
+    }
+    return { docs, total: counts.reduce((sum, count) => sum + count, 0) };
   }
 
   /** 문서 이름 목록을 준다. */
   async names(query: DocumentNamesQueryDto): Promise<{ items: string[] }> {
-    const active = await this.repo.findActive();
+    const limit = query.limit ?? 20;
     const prefix = query.prefix ?? '';
-    const names = [...new Set(active.map((d) => d.name))]
-      .filter((name) => name.startsWith(prefix))
-      .sort(compareCodePoints);
-    return { items: names.slice(0, query.limit ?? 20) };
+    const items: string[] = [];
+    let after: string | null = null;
+    while (items.length < limit) {
+      const batch: string[] = await this.repo.findNamesSorted(prefix, after, NAMES_BATCH);
+      for (const name of batch) {
+        if (items.length >= limit) break;
+        // ★ 이름순이라 같은 이름은 이어져 나온다
+        if (items[items.length - 1] !== name) items.push(name);
+      }
+      if (batch.length < NAMES_BATCH) break;
+      after = batch[batch.length - 1];
+    }
+    return { items };
   }
 
   /** 같은 판이 되는 문서들을 준다. */
@@ -312,27 +417,37 @@ export class DocumentsService implements OnModuleInit {
   /** 문서 하나의 정보를 준다. */
   async getDetail(docId: string): Promise<DocumentDetailView> {
     const doc = await this.activeDocument(docId);
-    const ver = await this.repo.findVersion(docId, doc.latestVersion);
-    // ★ 기동 처리가 고치기 전의 드문 경우다
-    if (ver === null) throw new DocumentNotFoundError();
+    const { record, version } = await this.versionForView(doc);
     const stage =
       doc.processingState === 'indexing'
         ? ((await this.indexing.getStages([docId])).get(docId) ?? null)
         : null;
-    const siblings = siblingEditions(doc, await this.repo.findSearchableWithEdition(doc.name));
-    const assets = await this.assets.listViews(docId, doc.latestVersion);
-    return toDetail(doc, ver, { siblings, stage, assets });
+    const siblings = siblingEditions(doc, await this.repo.findEditionRows([doc.name]));
+    const assets = await this.assets.listViews(docId, version);
+    return toDetail(doc, record, { siblings, stage, assets });
   }
 
   /** 마지막 원본 MD와 이미지 주소를 준다. */
   async getOriginal(docId: string): Promise<OriginalView> {
     const doc = await this.activeDocument(docId);
-    const ver = await this.repo.findVersion(docId, doc.latestVersion);
-    if (ver === null) throw new DocumentNotFoundError();
+    const { record, version } = await this.versionForView(doc);
     return {
-      markdown: ver.originalMarkdown,
-      images: await this.assets.imageUrls(docId, doc.latestVersion),
+      markdown: record.originalMarkdown,
+      images: await this.assets.imageUrls(docId, version),
     };
+  }
+
+  /** 조회에 쓸 버전 레코드를 준다. 선점 뒤 레코드를 쓰기 전이면 직전 버전이다. */
+  private async versionForView(
+    doc: DocumentRecord,
+  ): Promise<{ record: DocumentVersionRecord; version: string }> {
+    const latest = await this.repo.findVersion(doc.docId, doc.latestVersion);
+    if (latest !== null) return { record: latest, version: doc.latestVersion };
+    // ★ 새 버전을 만드는 중이거나 그 롤백이 끝나지 못했다 — 없거나 삭제된 문서가 아니므로 404가 아니다 (REQ-BE-1.4.1, AP-12)
+    const prev = previousVersion(doc.latestVersion);
+    const record = prev === null ? null : await this.repo.findVersion(doc.docId, prev);
+    if (prev === null || record === null) throw new DocumentNotFoundError();
+    return { record, version: prev };
   }
 
   /** 지금 검색에 쓰이는 청크를 준다. */
@@ -397,7 +512,7 @@ export class DocumentsService implements OnModuleInit {
     if (!nameChanged && !editionChanged && hintChanges.size === 0) return this.getDetail(docId);
 
     const now = this.clock.now();
-    const set: Record<string, unknown> = { updatedAt: now };
+    const set: DocumentUpdate = { updatedAt: now };
     if (nameChanged) set.name = newName;
     if (editionChanged) set.edition = newEdition;
     if (nameChanged || labelChanged) set.editionEnteredAt = now; // REQ-BE-1.2.4
@@ -436,8 +551,11 @@ export class DocumentsService implements OnModuleInit {
         });
       } catch (error) {
         await this.rollbackClaim(doc, next, 'queued');
+        await this.lifecycle.recheckAfterVersionWrite(docId);
         throw error;
       }
+      // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다
+      await this.lifecycle.recheckAfterVersionWrite(docId);
       await this.logs.record(editLog);
       await this.lifecycle.recordStateChange(doc, 'queued');
       this.lifecycle.startProcessing(docId, next, { startAt: 'index', force: false });
@@ -497,8 +615,11 @@ export class DocumentsService implements OnModuleInit {
       });
     } catch (error) {
       await this.rollbackClaim(doc, next, 'uploaded');
+      await this.lifecycle.recheckAfterVersionWrite(docId);
       throw error;
     }
+    // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다
+    await this.lifecycle.recheckAfterVersionWrite(docId);
     await this.logs.record({
       kind: 'content_upload',
       docId,
@@ -542,8 +663,11 @@ export class DocumentsService implements OnModuleInit {
       count = await this.assets.markTemporaryForRegeneration(docId, next);
     } catch (error) {
       await this.rollbackClaim(doc, next, 'queued');
+      await this.lifecycle.recheckAfterVersionWrite(docId);
       throw error;
     }
+    // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다
+    await this.lifecycle.recheckAfterVersionWrite(docId);
 
     if (count > 0) {
       // ★ 임시 설명이 있으면 다시 만든다. 기록에는 최종 상태만 남긴다 (D6)

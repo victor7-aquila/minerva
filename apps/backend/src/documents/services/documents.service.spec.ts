@@ -6,7 +6,8 @@ import {
   RagUnavailableError,
   UnsupportedFileError,
 } from '../../common';
-import type { ProcessingState } from '../../common';
+import type { PreparedVersion } from '../../assets';
+import type { ProcessingState, SearchState } from '../../common';
 import { RagRequestError } from '../../rag';
 import type { RagDocumentChunk, RagJobStage } from '../../rag';
 import {
@@ -120,6 +121,149 @@ function findCalls(): number {
   return h.db.calls.filter((call) => call.op === 'find').length;
 }
 
+/** 끝나지 않는 Promise와 그것을 풀거나 거부시키는 손잡이다. */
+interface Gate<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+}
+
+/** prepareVersion이 돌려줄 값이다. */
+const PREPARED: PreparedVersion = {
+  indexingMarkdown: IDX_SENT,
+  unmatchedImages: [],
+  assetCount: 0,
+};
+
+/**
+ * 내용 다시 올리기를 prepareVersion에서 멈춘 채 시작한다.
+ * ★ 이 순간 선점(latestVersion 2, 처리 상태 uploaded)은 끝났고 버전 2 레코드는 아직 없다.
+ * 결과 Promise는 거부돼도 처리되지 않은 거부가 되지 않게 곧바로 값으로 바꾼다
+ */
+async function holdUpload(): Promise<{ gate: Gate<PreparedVersion>; outcome: Promise<unknown> }> {
+  const gate = deferred<PreparedVersion>();
+  h.assets.prepareVersion.mockImplementationOnce(() => gate.promise);
+  const outcome = h.service.uploadContents(DOC_A, [uploadFile('new.md', '# 새 내용')]).then(
+    () => 'resolved' as unknown,
+    (error: unknown) => error,
+  );
+  await waitUntil(() => h.assets.prepareVersion.mock.calls.length > 0);
+  return { gate, outcome };
+}
+
+/**
+ * 완료 문서에 내용 다시 올리기를 시작하고 prepareVersion에서 멈춘다. 그동안 교체돼 처리 실패로 바뀐다.
+ * ★ replaceOne이 남기는 상태(replaced·failed)다. 호출자가 gate를 거부시킨다
+ */
+async function holdReplacedUpload(): Promise<{
+  gate: Gate<PreparedVersion>;
+  outcome: Promise<unknown>;
+}> {
+  await seedDoc({ docId: DOC_A });
+  const held = await holdUpload();
+  expect(docOf(h.db, DOC_A).latestVersion).toBe('2');
+  await h.db
+    .collection('documents')
+    .updateOne({ docId: DOC_A }, { $set: { searchState: 'replaced', processingState: 'failed' } });
+  return held;
+}
+
+/** 재색인을 inheritVersion에서 멈춘 채 시작한다. holdUpload와 같은 순간이다. */
+async function holdReindex(): Promise<{ gate: Gate<void>; outcome: Promise<unknown> }> {
+  const gate = deferred<void>();
+  h.assets.inheritVersion.mockImplementationOnce(() => gate.promise);
+  const outcome = h.service.reindex(DOC_A).then(
+    () => 'resolved' as unknown,
+    (error: unknown) => error,
+  );
+  await waitUntil(() => h.assets.inheritVersion.mock.calls.length > 0);
+  return { gate, outcome };
+}
+
+/**
+ * 요약·캡션 편집(edit)을 inheritVersion에서 멈춘 채 시작한다. holdUpload와 같은 순간이다.
+ * ★ 호출 전에 seedDoc과 listViews 모의(t1이 있는 상태)가 준비돼 있어야 한다
+ */
+async function holdEdit(): Promise<{ gate: Gate<void>; outcome: Promise<unknown> }> {
+  const gate = deferred<void>();
+  h.assets.inheritVersion.mockImplementationOnce(() => gate.promise);
+  const outcome = h.service
+    .edit(DOC_A, editBody({ assets: [{ placeholder_id: 't1', text: HINT_SENT }] }))
+    .then(
+      () => 'resolved' as unknown,
+      (error: unknown) => error,
+    );
+  await waitUntil(() => h.assets.inheritVersion.mock.calls.length > 0);
+  return { gate, outcome };
+}
+
+/** 멈춘 동안 문서를 삭제하고 데이터 삭제(purge)까지 끝낸다. */
+async function removeAndPurge(): Promise<void> {
+  await h.service.remove(DOC_A);
+  await h.drain();
+  expect(docOf(h.db, DOC_A).purged).toBe(true);
+  expect(h.assets.deleteDocument).toHaveBeenCalledTimes(1);
+}
+
+/** 그 문서의 버전 레코드 개수다. */
+function versionRows(docId: string): number {
+  return h.db.dump('document_versions').filter((v) => v.docId === docId).length;
+}
+
+/** 코드 포인트 순 비교다. ★ 소스의 구현을 쓰지 않고 이 파일에서 따로 만든 독립 비교다 */
+function cmpPoints(a: string, b: string): number {
+  const left = Array.from(a);
+  const right = Array.from(b);
+  for (let i = 0; i < Math.min(left.length, right.length); i += 1) {
+    const diff = (left[i].codePointAt(0) ?? 0) - (right[i].codePointAt(0) ?? 0);
+    if (diff !== 0) return diff;
+  }
+  return left.length - right.length;
+}
+
+/** 동점 규칙이다. 수정 시각 늦은 순, 같으면 문서 ID 오름차순이며 정렬 방향과 무관하다. */
+function tieBreak(a: DocumentRecord, b: DocumentRecord): number {
+  return b.updatedAt.getTime() - a.updatedAt.getTime() || cmpPoints(a.docId, b.docId);
+}
+
+/** 값 열(상태) 정렬의 기대 문서 ID 순서다. 값 순서대로 묶고 묶음 안은 동점 규칙이다. */
+function expectedByBucket(
+  docs: readonly DocumentRecord[],
+  valueOf: (doc: DocumentRecord) => string,
+  valueOrder: readonly string[],
+): string[] {
+  return valueOrder.flatMap((value) =>
+    docs
+      .filter((doc) => valueOf(doc) === value)
+      .sort(tieBreak)
+      .map((doc) => doc.docId),
+  );
+}
+
+/** 이 값 구성으로 문서들을 만든다. 수정 시각은 문서마다 달라 묶음 안 순서가 정해진다. */
+function bucketDocs(
+  counts: ReadonlyArray<readonly [string, number]>,
+  over: (value: string) => Partial<DocumentRecord>,
+): DocumentRecord[] {
+  const base = Date.UTC(2026, 9, 1);
+  const docs: DocumentRecord[] = [];
+  let seq = 0;
+  for (const [value, count] of counts) {
+    for (let k = 0; k < count; k += 1) {
+      seq += 1;
+      docs.push(
+        docRecord({
+          docId: uid(seq),
+          name: `d${seq}`,
+          updatedAt: new Date(base + ((seq * 13) % 97) * 60000),
+          ...over(value),
+        }),
+      );
+    }
+  }
+  return docs;
+}
+
 describe('REQ-BE-1.1.1', () => {
   it('T-UP-1 MD 둘과 이미지 하나로 문서 둘을 만들고 응답 항목은 네 키뿐이다', async () => {
     const png = Buffer.from([1, 2, 3]);
@@ -146,6 +290,76 @@ describe('REQ-BE-1.1.1', () => {
     expect(first?.[1]).toBe('1');
     expect(first?.[3]).toEqual([{ fileName: 'p.png', contentType: 'image/png', data: png }]);
     await h.drain();
+  });
+
+  /** MD 셋을 올린다. */
+  const uploadThree = () =>
+    h.service.upload(
+      [uploadFile('a.md', '# A'), uploadFile('b.md', '# B'), uploadFile('c.md', '# C')],
+      [
+        { file_name: 'a.md', name: 'A' },
+        { file_name: 'b.md', name: 'B' },
+        { file_name: 'c.md', name: 'C' },
+      ],
+    );
+
+  it('T-PR3-F2-1 문서를 모두 만든 뒤에 업로드 기록을 남기고 그다음 처리를 시작한다', async () => {
+    const insertDocument = jest.spyOn(h.repo, 'insertDocument');
+    const insertVersion = jest.spyOn(h.repo, 'insertVersion');
+    const result = await uploadThree();
+    await h.drain();
+
+    expect(result.documents).toHaveLength(3);
+    expect(insertDocument).toHaveBeenCalledTimes(3);
+    expect(h.logs.recordsOf('upload')).toHaveLength(3);
+    // ★ 모든 문서 쓰기(준비·버전·문서)가 첫 업로드 기록보다 먼저다
+    const firstRecord = Math.min(
+      ...h.logs.record.mock.calls
+        .map((call, index) => ({
+          kind: call[0].kind,
+          order: h.logs.record.mock.invocationCallOrder[index],
+        }))
+        .filter((entry) => entry.kind === 'upload')
+        .map((entry) => entry.order),
+    );
+    expect(Math.max(...insertDocument.mock.invocationCallOrder)).toBeLessThan(firstRecord);
+    expect(Math.max(...insertVersion.mock.invocationCallOrder)).toBeLessThan(firstRecord);
+    expect(Math.max(...h.assets.prepareVersion.mock.invocationCallOrder)).toBeLessThan(firstRecord);
+    // 처리 시작은 문서마다 하나다
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(3);
+    // ★ 처리 단계의 기록(요약 등)은 제외하고 업로드 기록만 본다
+    const uploadOrders = h.logs.record.mock.calls
+      .map((call, index) => ({
+        kind: call[0].kind,
+        order: h.logs.record.mock.invocationCallOrder[index],
+      }))
+      .filter((entry) => entry.kind === 'upload')
+      .map((entry) => entry.order);
+    expect(Math.max(...uploadOrders)).toBeLessThan(
+      Math.min(...h.assets.generateHints.mock.invocationCallOrder),
+    );
+  });
+
+  it('T-PR3-F2-2 셋째 문서 쓰기가 실패하면 만든 문서·버전이 하나도 남지 않고 원래 오류로 거부된다', async () => {
+    const failure = new Error('third insert boom');
+    // ★ 셋째 준비 안에서 다음 insertOne(셋째 버전 쓰기)을 실패시킨다
+    h.assets.prepareVersion
+      .mockResolvedValueOnce(PREPARED)
+      .mockResolvedValueOnce(PREPARED)
+      .mockImplementationOnce(async () => {
+        h.db.failNext('insertOne', failure);
+        return PREPARED;
+      });
+    await expect(uploadThree()).rejects.toBe(failure);
+    await h.drain();
+
+    expect(h.db.dump('documents')).toHaveLength(0);
+    expect(h.db.dump('document_versions')).toHaveLength(0);
+    const ids = h.assets.prepareVersion.mock.calls.map((call) => call[0]);
+    expect(ids).toHaveLength(3);
+    for (const docId of ids) expect(h.assets.deleteDocument).toHaveBeenCalledWith(docId);
+    expect(h.logs.recordsOf('upload')).toHaveLength(0);
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
   });
 });
 
@@ -243,6 +457,121 @@ describe('REQ-BE-1.1.9', () => {
       'v1',
     );
   });
+
+  /** 문서 둘을 올린다. */
+  const uploadTwo = () =>
+    h.service.upload(
+      [uploadFile('a.md', '# A'), uploadFile('b.md', '# B')],
+      [
+        { file_name: 'a.md', name: 'A' },
+        { file_name: 'b.md', name: 'B' },
+      ],
+    );
+
+  /** 문서 ID가 prepareVersion에 넘어간 차례대로 모은다. */
+  const preparedIds = (): string[] => h.assets.prepareVersion.mock.calls.map((call) => call[0]);
+
+  /** 문서·버전 레코드가 모두 없는지 본다. */
+  const expectNoRecords = (...docIds: string[]): void => {
+    for (const docId of docIds) {
+      expect(h.db.dump('documents').some((doc) => doc.docId === docId)).toBe(false);
+      expect(versionRows(docId)).toBe(0);
+    }
+  };
+
+  it('T-PR3-UP-1 둘째 준비가 실패하면 요청 전체가 되돌려지고 원래 오류로 거부되며 처리는 시작되지 않는다', async () => {
+    h.assets.prepareVersion
+      .mockResolvedValueOnce(PREPARED)
+      .mockRejectedValueOnce(new Error('second boom'));
+    await expect(uploadTwo()).rejects.toThrow('second boom');
+    await h.drain();
+
+    const [firstId, secondId] = preparedIds();
+    // ★ 요청 하나를 한 단위로 본다 — 첫 문서도 지워진다 (P38)
+    expectNoRecords(firstId, secondId);
+    expect(h.assets.deleteDocument).toHaveBeenCalledWith(firstId);
+    expect(h.assets.deleteDocument).toHaveBeenCalledWith(secondId);
+    expect(h.logs.recordsOf('upload')).toHaveLength(0);
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
+  });
+
+  it('T-PR3-UP-1b 첫째 준비가 실패해도 첫째 문서의 파일이 정리되고 아무것도 남지 않으며 처리는 시작되지 않는다', async () => {
+    h.assets.prepareVersion.mockRejectedValueOnce(new Error('first boom'));
+    await expect(uploadTwo()).rejects.toThrow('first boom');
+    await h.drain();
+
+    // ★ docId는 첫 쓰기 전에 되돌릴 목록에 들어간다 — 준비가 일부만 쓰고 실패해도 지운다 (P38①)
+    expect(h.assets.prepareVersion).toHaveBeenCalledTimes(1);
+    const [firstId] = preparedIds();
+    expect(h.assets.deleteDocument).toHaveBeenCalledWith(firstId);
+    expectNoRecords(firstId);
+    expect(h.db.dump('documents')).toHaveLength(0);
+    expect(h.db.dump('document_versions')).toHaveLength(0);
+    expect(h.logs.record).not.toHaveBeenCalled();
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
+  });
+
+  it('T-PR3-UP-2 모든 문서를 만든 뒤 둘째 업로드 기록이 실패하면 두 문서 모두 지워지고 처리는 시작되지 않는다', async () => {
+    h.logs.record.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('log boom'));
+    await expect(uploadTwo()).rejects.toThrow('log boom');
+    await h.drain();
+
+    const [firstId, secondId] = preparedIds();
+    expectNoRecords(firstId, secondId);
+    expect(h.assets.deleteDocument).toHaveBeenCalledWith(firstId);
+    expect(h.assets.deleteDocument).toHaveBeenCalledWith(secondId);
+    // ★ 첫째 업로드 기록 호출은 이미 일어났다 — 남은 기록은 지우지 않는다 (P38⑤)
+    expect(h.logs.record).toHaveBeenCalledTimes(2);
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
+  });
+
+  it.each(['assets.deleteDocument', 'repo.deleteVersions', 'repo.deleteDocumentRecord'] as const)(
+    'T-PR3-UP-3 정리 단계 %s가 첫째 문서에서 실패해도 나머지 단계와 다른 문서는 정리되고 원래 오류로 거부된다',
+    async (failingStep) => {
+      h.assets.prepareVersion
+        .mockResolvedValueOnce(PREPARED)
+        .mockRejectedValueOnce(new Error('primary failure'));
+      // ★ 첫째 문서의 이 단계만 실패시킨다. spy라 구현 여부와 무관하게 거부를 건다
+      const isFirst = (docId: string): boolean => docId === preparedIds()[0];
+      const cleanupFailure = async (docId: string): Promise<void> => {
+        if (isFirst(docId)) throw new Error('cleanup failure');
+      };
+      const realDeleteVersions = h.repo.deleteVersions.bind(h.repo);
+      const realDeleteRecord = h.repo.deleteDocumentRecord.bind(h.repo);
+      const deleteVersions = jest
+        .spyOn(h.repo, 'deleteVersions')
+        .mockImplementation(
+          failingStep === 'repo.deleteVersions' ? cleanupFailure : realDeleteVersions,
+        );
+      const deleteRecord = jest
+        .spyOn(h.repo, 'deleteDocumentRecord')
+        .mockImplementation(
+          failingStep === 'repo.deleteDocumentRecord' ? cleanupFailure : realDeleteRecord,
+        );
+      if (failingStep === 'assets.deleteDocument') {
+        h.assets.deleteDocument.mockImplementation(cleanupFailure);
+      }
+      await expect(uploadTwo()).rejects.toThrow('primary failure');
+      await h.drain();
+
+      const [firstId, secondId] = preparedIds();
+      // ★ 어느 단계가 실패해도 세 단계 모두 두 문서에 대해 시도됐다 (단계별 독립 정리, AP-17)
+      expect(h.assets.deleteDocument).toHaveBeenCalledWith(firstId);
+      expect(h.assets.deleteDocument).toHaveBeenCalledWith(secondId);
+      expect(deleteVersions).toHaveBeenCalledWith(firstId);
+      expect(deleteVersions).toHaveBeenCalledWith(secondId);
+      expect(deleteRecord).toHaveBeenCalledWith(firstId);
+      expect(deleteRecord).toHaveBeenCalledWith(secondId);
+      // ★ 실패한 단계가 지우는 것만 첫째 문서에 남을 수 있고, 둘째 문서는 모두 지워진다
+      expectNoRecords(secondId);
+      if (failingStep === 'assets.deleteDocument') expectNoRecords(firstId);
+      if (failingStep === 'repo.deleteVersions') {
+        expect(h.db.dump('documents').some((doc) => doc.docId === firstId)).toBe(false);
+      }
+      if (failingStep === 'repo.deleteDocumentRecord') expect(versionRows(firstId)).toBe(0);
+      expect(h.assets.generateHints).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe('REQ-BE-1.2.4', () => {
@@ -374,6 +703,152 @@ describe('REQ-BE-1.3.8', () => {
     const page = await h.service.list(listQuery());
     expect(page.items[0].failure_message).toBe(FAILMSG_SENT);
   });
+
+  it('T-PR3-FAIL-1 버전이 셋인 실패 문서도 마지막 버전의 사유만 필요한 필드만 읽어 준다', async () => {
+    const failure = (code: string, message: string) => ({
+      code,
+      message,
+      headingPath: null,
+      placeholderId: null,
+    });
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, processingState: 'failed', latestVersion: '3' })],
+      [
+        versionRecord({ docId: DOC_A, version: '1', failure: failure('V1', '버전1 사유') }),
+        versionRecord({ docId: DOC_A, version: '2', failure: failure('V2', '버전2 사유') }),
+        versionRecord({ docId: DOC_A, version: '3', failure: failure('V3', FAILMSG_SENT) }),
+      ],
+    );
+    const start = h.db.calls.length;
+    const page = await h.service.list(listQuery());
+    expect(page.items[0].failure_message).toBe(FAILMSG_SENT);
+
+    // ★ 본문(originalMarkdown·indexingMarkdown)을 읽지 않는다 — projection과 필터 모양으로 본다
+    const lookups = h.db.calls.slice(start).filter((call) => {
+      const filter = call.filter as { $or?: unknown } | undefined;
+      return call.op === 'find' && Array.isArray(filter?.$or);
+    });
+    expect(lookups).toHaveLength(1);
+    expect(lookups[0].filter).toEqual({ $or: [{ docId: DOC_A, version: '3' }] });
+    expect(lookups[0].options).toMatchObject({
+      projection: { _id: 0, docId: 1, version: 1, failure: 1 },
+    });
+    expect(lookups[0].returned).toBe(1);
+  });
+});
+
+describe('REQ-BE-1.3.1', () => {
+  it('T-PR3-LIST-1 130개 중 3쪽은 독립 비교 함수의 41~60번째와 같고 DB에서 그 쪽만 읽는다', async () => {
+    const base = Date.UTC(2026, 9, 1);
+    const docs = Array.from({ length: 130 }, (_unused, i) =>
+      docRecord({
+        docId: uid(i + 1),
+        // ★ 이름이 겹치게 만들어 동점 규칙(수정 시각 늦은 순 → 문서 ID)도 함께 본다
+        name: `${i % 7 === 0 ? '가' : 'n'}${String(i % 31).padStart(2, '0')}`,
+        updatedAt: new Date(base + ((i * 7) % 11) * 60000),
+      }),
+    );
+    await seed(h.db, docs);
+
+    const page = await h.service.list(
+      listQuery({ page: 3, page_size: 20, sort: 'name', order: 'asc' }),
+    );
+
+    const expected = [...docs]
+      .sort((a, b) => cmpPoints(a.name, b.name) || tieBreak(a, b))
+      .slice(40, 60)
+      .map((doc) => doc.docId);
+    expect(page.items.map((item) => item.doc_id)).toEqual(expected);
+    expect(page.total).toBe(130);
+    // ★ 전체를 읽어 메모리에서 자르지 않는다 — documents 조회가 돌려준 문서 수의 합이 한 쪽 이하다
+    const returned = h.db.calls
+      .filter((call) => call.op === 'find')
+      .reduce((sum, call) => sum + (call.returned ?? 0), 0);
+    expect(returned).toBeLessThanOrEqual(20);
+  });
+});
+
+describe('REQ-BE-1.3.2', () => {
+  /** 쪽마다 기대 순서의 같은 구간과 같은지 본다. */
+  async function expectPages(
+    sort: 'search_state' | 'processing_state',
+    order: 'asc' | 'desc',
+    pageSize: 20 | 50 | 100,
+    expected: readonly string[],
+  ): Promise<void> {
+    const pages = Math.ceil(expected.length / pageSize);
+    for (let page = 1; page <= pages; page += 1) {
+      const result = await h.service.list(listQuery({ page, page_size: pageSize, sort, order }));
+      expect({ page, ids: result.items.map((item) => item.doc_id), total: result.total }).toEqual({
+        page,
+        ids: expected.slice((page - 1) * pageSize, page * pageSize),
+        total: expected.length,
+      });
+    }
+  }
+
+  it('T-PR3-LIST-2 검색 상태 열은 값 순서로 정렬되고 쪽 경계가 값 경계에 걸려도 맞다', async () => {
+    const order: SearchState[] = ['searchable', 'not_searchable', 'replaced'];
+    const docs = bucketDocs(
+      [
+        ['searchable', 15],
+        ['not_searchable', 12],
+        ['replaced', 8],
+      ],
+      (value) => ({ searchState: value as SearchState }),
+    );
+    await seed(h.db, docs);
+    // ★ asc 1쪽은 15 | 5로, 2쪽은 7 | 8로 값 경계에 걸친다. 묶음 안 순서는 방향과 무관하다
+    await expectPages(
+      'search_state',
+      'asc',
+      20,
+      expectedByBucket(docs, (doc) => doc.searchState, order),
+    );
+    await expectPages(
+      'search_state',
+      'desc',
+      20,
+      expectedByBucket(docs, (doc) => doc.searchState, [...order].reverse()),
+    );
+  });
+
+  it('T-PR3-LIST-3 처리 상태 여섯 값을 섞어도 값 순서대로이고 개수가 0인 값이 있어도 맞다', async () => {
+    const order: ProcessingState[] = [
+      'uploaded',
+      'captioning',
+      'queued',
+      'indexing',
+      'completed',
+      'failed',
+    ];
+    const docs = bucketDocs(
+      [
+        ['uploaded', 9],
+        ['captioning', 0],
+        ['queued', 12],
+        ['indexing', 8],
+        ['completed', 17],
+        ['failed', 14],
+      ],
+      (value) => ({ processingState: value as ProcessingState }),
+    );
+    await seed(h.db, docs);
+    // ★ 60건을 20건씩 3쪽으로 읽으면 쪽 경계가 값 경계에 여러 번 걸친다
+    await expectPages(
+      'processing_state',
+      'asc',
+      20,
+      expectedByBucket(docs, (doc) => doc.processingState, order),
+    );
+    await expectPages(
+      'processing_state',
+      'desc',
+      20,
+      expectedByBucket(docs, (doc) => doc.processingState, [...order].reverse()),
+    );
+  });
 });
 
 describe('REQ-BE-1.3.5', () => {
@@ -442,6 +917,41 @@ describe('REQ-BE-1.3.3', () => {
     );
     expect(combined.items.map((item) => item.doc_id)).toEqual([uid(2)]);
   });
+
+  it('T-PR3-LIST-4 판 조회는 필요한 필드만 읽고 최신판 거르기를 DB 조건으로 한다', async () => {
+    await seed(h.db, [
+      docRecord({ docId: uid(1), name: 'N', edition: ed('v2022', '2022-01-01') }),
+      docRecord({ docId: uid(2), name: 'N', edition: ed('v2025', '2025-01-01') }),
+      docRecord({ docId: uid(3), name: 'N', edition: null }),
+    ]);
+    const start = h.db.calls.length;
+    const latest = await h.service.list(listQuery({ latest_only: true }));
+    expect(latest.items.map((item) => item.doc_id).sort()).toEqual([uid(2), uid(3)]);
+    expect(latest.total).toBe(2);
+
+    // ★ 판 칸·최신판 계산용 조회는 검색 가능·판 있음 조건에 projection으로 다섯 필드만 읽는다
+    const editionFinds = h.db.calls.slice(start).filter((call) => {
+      const filter = call.filter as Record<string, unknown> | undefined;
+      return (
+        call.op === 'find' &&
+        filter?.searchState === 'searchable' &&
+        JSON.stringify(filter.edition) === JSON.stringify({ $ne: null })
+      );
+    });
+    expect(editionFinds.length).toBeGreaterThanOrEqual(1);
+    for (const call of editionFinds) {
+      expect(call.options).toMatchObject({
+        projection: { _id: 0, docId: 1, name: 1, edition: 1, searchState: 1, deleted: 1 },
+      });
+    }
+    // ★ 최신판이 아닌 문서는 DB가 거른다 — 목록 조회가 돌려준 수의 합이 남는 문서 수와 판 조회 수의 합이다
+    const returnedTotal = h.db.calls
+      .slice(start)
+      .filter((call) => call.op === 'find')
+      .reduce((sum, call) => sum + (call.returned ?? 0), 0);
+    const editionReturned = editionFinds.reduce((sum, call) => sum + (call.returned ?? 0), 0);
+    expect(returnedTotal - editionReturned).toBe(2);
+  });
 });
 
 describe('REQ-BE-1.8.2', () => {
@@ -488,6 +998,55 @@ describe('REQ-BE-1.3.7', () => {
   it('T-LIST-7 접두사와 limit을 적용한다', async () => {
     expect((await h.service.names(names({ prefix: '가' }))).items).toEqual(['가', '가나']);
     expect((await h.service.names(names({ limit: 2 }))).items).toHaveLength(2);
+  });
+
+  // ★ 위 beforeEach의 시드(uid 1~6)와 섞이지 않게 아래 NAMES 테스트는 고유 접두사(P3-·a.b·P3U-)와
+  // uid 100번대 이후 ID를 쓰고, 이름 조회도 그 접두사로 한정한다
+  it('T-PR3-NAMES-1 같은 이름이 250개여도 이름순 묶음으로 읽어 적게 읽고 모든 이름을 준다', async () => {
+    const docs = Array.from({ length: 250 }, (_unused, i) =>
+      docRecord({ docId: uid(i + 100), name: 'P3-A' }),
+    );
+    docs.push(
+      docRecord({ docId: uid(351), name: 'P3-B' }),
+      docRecord({ docId: uid(352), name: 'P3-C' }),
+      docRecord({ docId: uid(353), name: 'P3-D' }),
+      docRecord({ docId: uid(354), name: 'P3-E', deleted: true }),
+    );
+    await seed(h.db, docs);
+
+    const start = h.db.calls.length;
+    const result = await h.service.names(names({ prefix: 'P3-' }));
+    expect(result.items).toEqual(['P3-A', 'P3-B', 'P3-C', 'P3-D']);
+
+    // ★ 전체 문서를 읽지 않는다 — 조회 2번 이하, 돌려준 문서 수의 합이 200 이하다
+    const finds = h.db.calls.slice(start).filter((call) => call.op === 'find');
+    expect(finds.length).toBeLessThanOrEqual(2);
+    expect(finds.reduce((sum, call) => sum + (call.returned ?? 0), 0)).toBeLessThanOrEqual(200);
+  });
+
+  it('T-PR3-NAMES-2 접두사의 점은 글자 그대로이고 limit을 지킨다', async () => {
+    await seed(h.db, [
+      docRecord({ docId: uid(101), name: 'a.b-1' }),
+      docRecord({ docId: uid(102), name: 'axb' }),
+      docRecord({ docId: uid(103), name: 'a.b-2' }),
+    ]);
+    // ★ 접두사를 정규식에 그대로 넣으면 '.'이 아무 글자에 맞아 axb가 섞인다
+    expect((await h.service.names(names({ prefix: 'a.b' }))).items).toEqual(['a.b-1', 'a.b-2']);
+    expect((await h.service.names(names({ prefix: 'a.b', limit: 1 }))).items).toEqual(['a.b-1']);
+  });
+
+  it('T-PR3-NAMES-3 U+FFFF 위(보조 평면) 문자 이름도 코드 포인트 순으로 준다', async () => {
+    // ★ UTF-16 코드 유닛 순이면 이모지(D83D…)가 U+FFFD보다 앞서 어긋난다
+    const emoji = String.fromCodePoint(0x1f600);
+    const bmp = String.fromCodePoint(0xfffd);
+    await seed(h.db, [
+      docRecord({ docId: uid(101), name: `P3U-${emoji}` }),
+      docRecord({ docId: uid(102), name: `P3U-${bmp}` }),
+      docRecord({ docId: uid(103), name: 'P3U-a' }),
+    ]);
+    const expected = [`P3U-${emoji}`, `P3U-${bmp}`, 'P3U-a'].sort(cmpPoints);
+    expect(expected).toEqual(['P3U-a', `P3U-${bmp}`, `P3U-${emoji}`]);
+    expect((await h.service.names(names({ prefix: 'P3U-' }))).items).toEqual(expected);
   });
 });
 
@@ -544,6 +1103,100 @@ describe('REQ-BE-1.4.1', () => {
     await seed(h.db, [docRecord({ docId: DOC_A, deleted: true })], [versionRecord()]);
     await expect(h.service.getDetail(DOC_A)).rejects.toBeInstanceOf(DocumentNotFoundError);
     await expect(h.service.getDetail(DOC_B)).rejects.toBeInstanceOf(DocumentNotFoundError);
+  });
+
+  it('T-PR3-WIN-1 새 버전을 만드는 중에도 상세·원본은 이전 버전으로 응답한다', async () => {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A })],
+      [
+        versionRecord({
+          docId: DOC_A,
+          version: '1',
+          fileName: 'old.md',
+          originalMarkdown: '옛 원본',
+        }),
+      ],
+    );
+    const { gate, outcome } = await holdUpload();
+    // ★ 선점은 끝났고 버전 2 레코드는 아직 없는 순간이다
+    expect(docOf(h.db, DOC_A).latestVersion).toBe('2');
+    expect(versionOf(h.db, DOC_A, '2')).toBeUndefined();
+
+    const detail = await h.service.getDetail(DOC_A);
+    expect(detail.file_name).toBe('old.md');
+    expect(h.assets.listViews).toHaveBeenCalledWith(DOC_A, '1');
+    const original = await h.service.getOriginal(DOC_A);
+    expect(original.markdown).toBe('옛 원본');
+    expect(h.assets.imageUrls).toHaveBeenCalledWith(DOC_A, '1');
+
+    gate.resolve(PREPARED);
+    expect(await outcome).toBe('resolved');
+    await h.drain();
+  });
+
+  it('T-PR3-WIN-2 마지막 버전 레코드가 없으면 처리 상태와 관계없이 직전 버전으로 응답하고 직전 버전도 없으면 없는 문서다', async () => {
+    await seed(
+      h.db,
+      [
+        // 잠금 상태가 아니어도 마지막 버전(2)의 레코드만 없으면 직전 버전(1)으로 응답한다
+        docRecord({ docId: DOC_A, processingState: 'completed', latestVersion: '2' }),
+        docRecord({ docId: DOC_B, processingState: 'failed', latestVersion: '2' }),
+        // 직전 버전(1)의 레코드도 없다
+        docRecord({ docId: DOC_C, processingState: 'uploaded', latestVersion: '2' }),
+        // 직전 버전 자체가 없다(마지막 버전이 1이다)
+        docRecord({ docId: DOC_D, processingState: 'completed', latestVersion: '1' }),
+      ],
+      [DOC_A, DOC_B].map((docId) =>
+        versionRecord({ docId, version: '1', fileName: 'old.md', originalMarkdown: '옛 원본' }),
+      ),
+    );
+    for (const docId of [DOC_A, DOC_B]) {
+      // ★ 직전 버전 레코드가 있으면 404가 아니다 (P39③)
+      expect((await h.service.getDetail(docId)).file_name).toBe('old.md');
+      expect((await h.service.getOriginal(docId)).markdown).toBe('옛 원본');
+      expect(h.assets.listViews).toHaveBeenLastCalledWith(docId, '1');
+    }
+    for (const docId of [DOC_C, DOC_D]) {
+      await expect(h.service.getDetail(docId)).rejects.toBeInstanceOf(DocumentNotFoundError);
+      await expect(h.service.getOriginal(docId)).rejects.toBeInstanceOf(DocumentNotFoundError);
+    }
+  });
+
+  it('T-PR3-F3-1 선점 뒤 교체되고 준비가 실패하면 마지막 버전이 되돌려져 상세·원본이 404가 아니다', async () => {
+    const { gate, outcome } = await holdReplacedUpload();
+    gate.reject(new Error('prepare boom'));
+    expect(await outcome).toMatchObject({ message: 'prepare boom' });
+    await h.drain();
+
+    // ★ 롤백 조건(처리 상태)이 맞지 않아도 latestVersion은 레코드가 있는 1로 돌아와야 한다
+    const doc = docOf(h.db, DOC_A);
+    expect(doc.latestVersion).toBe('1');
+    expect(doc.processingState).toBe('failed');
+    expect(doc.searchState).toBe('replaced');
+    const detail = await h.service.getDetail(DOC_A);
+    expect(detail.failure?.code).toBe('REPLACED');
+    expect((await h.service.getOriginal(DOC_A)).markdown).toBe(MD_SENT);
+  });
+
+  it('T-PR3-F3-2 롤백 저장까지 실패해 마지막 버전이 2로 남아도 상세·원본은 버전 1로 응답한다', async () => {
+    const { gate, outcome } = await holdReplacedUpload();
+    // ★ 다음 updateOne은 rollbackClaim의 갱신이다. 예외는 rollbackClaim이 삼킨다
+    h.db.failNext('updateOne', new Error('rollback boom'));
+    gate.reject(new Error('prepare boom'));
+    expect(await outcome).toMatchObject({ message: 'prepare boom' });
+    await h.drain();
+
+    expect(docOf(h.db, DOC_A).latestVersion).toBe('2');
+    expect(versionOf(h.db, DOC_A, '2')).toBeUndefined();
+    // 버전 1의 REPLACED 사유 채우기는 단언하지 않는다. 계획(개정 3 P39②)은 다시 읽은 latestVersion('2')을
+    // 대상으로 정하고, 그 레코드가 없으면 recheckAfterVersionWrite는 아무것도 쓰지 않는 것만 정상으로 둔다.
+    // 버전 1에 사유를 남기는 것은 계획이 정하지 않았다.
+    const detail = await h.service.getDetail(DOC_A);
+    expect(detail.file_name).toBe(FILE_SENT);
+    expect(h.assets.listViews).toHaveBeenLastCalledWith(DOC_A, '1');
+    expect((await h.service.getOriginal(DOC_A)).markdown).toBe(MD_SENT);
+    expect(h.assets.imageUrls).toHaveBeenLastCalledWith(DOC_A, '1');
   });
 });
 
@@ -1319,6 +1972,138 @@ describe('REQ-BE-1.8.5', () => {
     expect(h.assets.deleteDocument).not.toHaveBeenCalled();
     expect(h.db.dump('document_versions').filter((v) => v.docId === DOC_A)).toHaveLength(1);
     expect(doc.purged).toBe(false);
+  });
+
+  it('T-PR3-DEL-1 내용 다시 올리기 중 삭제·데이터 삭제가 끝난 뒤 풀리면 새 버전 데이터까지 다시 지운다', async () => {
+    await seedDoc({ docId: DOC_A });
+    const { gate, outcome } = await holdUpload();
+    await removeAndPurge();
+    expect(versionRows(DOC_A)).toBe(0);
+
+    gate.resolve(PREPARED);
+    expect(await outcome).toBe('resolved');
+    await h.drain();
+
+    // ★ 풀린 뒤 쓴 버전 2 레코드·표·이미지가 남으면 안 된다 (청크 삭제 뒤 데이터 삭제)
+    const doc = docOf(h.db, DOC_A);
+    expect(doc.purged).toBe(true);
+    expect(h.assets.deleteDocument).toHaveBeenCalledTimes(2);
+    expect(versionRows(DOC_A)).toBe(0);
+  });
+
+  it('T-PR3-DEL-2 재색인 중 삭제·데이터 삭제가 끝난 뒤 풀려도 같다', async () => {
+    await seedDoc({ docId: DOC_A });
+    const { gate, outcome } = await holdReindex();
+    await removeAndPurge();
+    expect(versionRows(DOC_A)).toBe(0);
+
+    gate.resolve();
+    expect(await outcome).toBe('resolved');
+    await h.drain();
+
+    expect(docOf(h.db, DOC_A).purged).toBe(true);
+    expect(h.assets.deleteDocument).toHaveBeenCalledTimes(2);
+    expect(versionRows(DOC_A)).toBe(0);
+  });
+
+  it('T-PR3-DEL-5 요약·캡션 편집 중 삭제·데이터 삭제가 끝난 뒤 풀려도 새 버전 데이터까지 다시 지운다', async () => {
+    await seedDoc({ docId: DOC_A });
+    h.assets.listViews.mockResolvedValue([tableView('t1', '기존')]);
+    const { gate, outcome } = await holdEdit();
+    await removeAndPurge();
+    expect(versionRows(DOC_A)).toBe(0);
+
+    gate.resolve();
+    await outcome;
+    await h.drain();
+
+    // ★ edit 경로도 풀린 뒤 쓴 버전 2 레코드·표·이미지가 남으면 안 된다
+    expect(docOf(h.db, DOC_A).purged).toBe(true);
+    expect(h.assets.deleteDocument).toHaveBeenCalledTimes(2);
+    expect(versionRows(DOC_A)).toBe(0);
+  });
+
+  it('T-PR3-DEL-6 요약·캡션 편집의 새 버전 만들기가 실패하는 경로에서도 다시 지우고 원래 오류로 거부된다', async () => {
+    await seedDoc({ docId: DOC_A });
+    h.assets.listViews.mockResolvedValue([tableView('t1', '기존')]);
+    const { gate, outcome } = await holdEdit();
+    await removeAndPurge();
+
+    gate.reject(new Error('inherit boom'));
+    expect(await outcome).toMatchObject({ message: 'inherit boom' });
+    await h.drain();
+
+    expect(docOf(h.db, DOC_A).purged).toBe(true);
+    expect(h.assets.deleteDocument).toHaveBeenCalledTimes(2);
+    expect(versionRows(DOC_A)).toBe(0);
+  });
+
+  it('T-PR3-DEL-3 새 버전 만들기가 실패하는 경로에서도 다시 지우고 원래 오류로 거부된다', async () => {
+    await seedDoc({ docId: DOC_A });
+    const { gate, outcome } = await holdUpload();
+    await removeAndPurge();
+
+    gate.reject(new Error('prepare boom'));
+    expect(await outcome).toMatchObject({ message: 'prepare boom' });
+    await h.drain();
+
+    expect(docOf(h.db, DOC_A).purged).toBe(true);
+    expect(h.assets.deleteDocument).toHaveBeenCalledTimes(2);
+    expect(versionRows(DOC_A)).toBe(0);
+  });
+});
+
+describe('REQ-BE-1.2.8', () => {
+  /** 사유 없이 쓰인 새 버전을 두고 멈춘 동안 문서를 교체·실패 상태로 바꾼다. */
+  async function replaceWhileHeld(): Promise<void> {
+    await seedDoc({ docId: DOC_A });
+    const { gate, outcome } = await holdUpload();
+    // ★ 선점 직후 같은 판 문서가 검색 가능해져 교체된 순간이다
+    await h.db
+      .collection('documents')
+      .updateOne(
+        { docId: DOC_A },
+        { $set: { searchState: 'replaced', processingState: 'failed' } },
+      );
+    gate.resolve(PREPARED);
+    expect(await outcome).toBe('resolved');
+  }
+
+  it('T-PR3-REPL-1 멈춘 동안 교체·실패가 되면 새 버전 사유는 REPLACED다', async () => {
+    await replaceWhileHeld();
+    expect(versionOf(h.db, DOC_A, '2')?.failure?.code).toBe('REPLACED');
+  });
+
+  it('T-PR3-REPL-1 이미 사유가 있으면 덮지 않는다', async () => {
+    const original = h.repo.replaceVersion.bind(h.repo);
+    jest.spyOn(h.repo, 'replaceVersion').mockImplementation((record) =>
+      original({
+        ...record,
+        failure: { code: 'OTHER', message: '다른 사유', headingPath: null, placeholderId: null },
+      }),
+    );
+    await replaceWhileHeld();
+    expect(versionOf(h.db, DOC_A, '2')?.failure?.code).toBe('OTHER');
+  });
+
+  it('T-PR3-F3-3 선점 뒤 교체되고 준비가 실패하면 되돌려진 버전 1에 REPLACED 사유가 남는다', async () => {
+    const { gate, outcome } = await holdReplacedUpload();
+    gate.reject(new Error('prepare boom'));
+    await outcome;
+    await h.drain();
+    expect(versionOf(h.db, DOC_A, '1')?.failure?.code).toBe('REPLACED');
+  });
+
+  it('T-PR3-F3-3 버전 1에 이미 다른 사유가 있으면 그대로 둔다', async () => {
+    const { gate, outcome } = await holdReplacedUpload();
+    const other = { code: 'OTHER', message: '다른 사유', headingPath: null, placeholderId: null };
+    await h.db
+      .collection('document_versions')
+      .updateOne({ docId: DOC_A, version: '1' }, { $set: { failure: other } });
+    gate.reject(new Error('prepare boom'));
+    await outcome;
+    await h.drain();
+    expect(versionOf(h.db, DOC_A, '1')?.failure).toEqual(other);
   });
 });
 

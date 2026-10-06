@@ -179,6 +179,7 @@ classDiagram
 
 **`REQ-BE-1.1.1`** MD마다 문서 하나
 
+- 실패: 문서를 만드는 도중 오류가 나면 그 요청에서 만든 문서·버전·표·이미지·파일을 모두 지우고(하나를 지우다 실패해도 나머지는 계속 지운다) 원래 오류를 낸다. 업로드 기록은 모든 문서를 만든 뒤에 남기고, 처리는 모두 만든 뒤에만 시작한다(`REQ-BE-1.1.9`)
 - 충족 기준: MD 셋과 이미지들을 한 요청으로 올리면 문서 셋과 각 첫 버전이 생긴다
 
 **`REQ-BE-1.1.2`** 받지 않는 형식이면 요청 전체 거부
@@ -416,7 +417,7 @@ classDiagram
 
 **`REQ-BE-1.8.6`** 이름·판 표기 남김
 
-- 처리 계약: `Document` 레코드는 지우지 않고 이름·판을 남긴다. `getRef`가 삭제된 문서의 이름·판을 준다
+- 처리 계약: 삭제한 문서의 `Document` 레코드는 지우지 않고 이름·판을 남긴다(만드는 도중 실패한 업로드의 레코드는 `REQ-BE-1.1.1`대로 지운다). `getRef`가 삭제된 문서의 이름·판을 준다
 - 충족 기준: 삭제한 문서의 `getRef`가 이름·판 표기를 주고, 그 문서의 로그 기록에 이름이 남아 있다
 
 ### 상태 반영 — `REQ-BE-1.9`
@@ -534,7 +535,7 @@ stateDiagram-v2
 
 2에서 `queued`를 색인 요청보다 먼저 써야, 요청 도중 Backend가 멈췄을 때 기동 처리(`REQ-BE-1.9.10`)가 작업 ID 없는 색인 대기를 찾아 다시 요청할 수 있다.
 
-내용 다시 올리기·요약·캡션 변경·재색인은 먼저 조건부 갱신 하나로 문서를 선점한다(처리 상태가 `completed`·`failed`이고 `latestVersion`·`updatedAt`이 읽은 값일 때만 처리 상태와 `latestVersion`을 바꾼다). 그다음 `prepareVersion` 또는 `inheritVersion`으로 새 버전의 표·이미지를 만들고 버전 레코드를 쓴다. 그 사이 실패하면 선점을 되돌린다. 재색인은 `queued`로 선점하고 임시 설명이 있으면 `captioning`으로 바꾼다. 기동 처리는 처리 중인데 마지막 버전 레코드가 없는 문서를 이전 버전으로 되돌린다(이전 버전에 결과가 있으면 `completed`, 아니면 `failed`).
+내용 다시 올리기·요약·캡션 변경·재색인은 먼저 조건부 갱신 하나로 문서를 선점한다(처리 상태가 `completed`·`failed`이고 `latestVersion`·`updatedAt`이 읽은 값일 때만 처리 상태와 `latestVersion`을 바꾼다). 그다음 `prepareVersion` 또는 `inheritVersion`으로 새 버전의 표·이미지를 만들고 버전 레코드를 쓴다. 그 사이 실패하면 선점을 되돌린다. 재색인은 `queued`로 선점하고 임시 설명이 있으면 `captioning`으로 바꾼다. 기동 처리는 처리 중인데 마지막 버전 레코드가 없는 문서를 이전 버전으로 되돌린다(이전 버전에 결과가 있으면 `completed`, 아니면 `failed`). 선점한 뒤 새 버전 레코드를 쓰기 전까지 문서 조회·원본 조회는 레코드가 있는 직전 버전의 파일 이름·원본·표·이미지로 응답한다. 새 버전을 쓴 뒤(실패해 선점을 되돌린 뒤 포함) 문서를 다시 읽어, 삭제됨이면 `purged`를 거짓으로 되돌리고 청크 삭제를 다시 요청하며(그 사이 지워진 데이터를 다시 지운다), 교체로 실패했고 새 버전에 실패 사유가 없으면 `REPLACED` 사유를 쓴다.
 
 ### 교체
 
@@ -576,6 +577,7 @@ stateDiagram-v2
 | `documents.processing_stopped` | 삭제·교체·새 버전·종료·상태 변경으로 처리를 멈춤 | info | `docId`, `version`, `reason`(`deleted`·`replaced`·`superseded`·`shutdown`·`state_changed`) | `REQ-BE-1.8.3` |
 | `documents.resume` | 기동 처리 | info | `captioning`, `requeued`, `reconciled`, `recovered`(마지막 버전 레코드가 없어 이전 버전으로 되돌린 문서 수) | `REQ-BE-1.9.9` |
 | `documents.task_failed` | 백그라운드 작업 실패 | warning | `task`(`process`·`index`·`delete_chunks`·`metadata`·`resume`·`reconcile`·`rag_retry`), `docId`(문서와 무관하면 `null`), `errorName` | `REQ-BE-1.1.9` |
+| `documents.event_dropped` | 작업 상태 이벤트를 3번 시도해도 조건이 어긋나 반영하지 못함 | warning | `docId`, `version`, `jobState` | `REQ-BE-1.9.5` |
 
 원본 MD, 색인용 MD, 요약·캡션은 로그에 넣지 않는다.
 

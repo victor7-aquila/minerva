@@ -34,6 +34,16 @@ export interface DocumentRecord {
   updatedAt: Date;
 }
 
+/** 판 칸·최신판 계산에 쓰는 문서 필드다. */
+export type EditionRow = Pick<
+  DocumentRecord,
+  'docId' | 'name' | 'edition' | 'searchState' | 'deleted'
+>;
+/** 목록 정렬 조건이다. 키 순서가 정렬 우선순위다. */
+export type ListSortSpec = Partial<Record<'name' | 'uploadedAt' | 'updatedAt' | 'docId', 1 | -1>>;
+/** 상태 열 정렬에서 값 하나로 좁히는 조건이다. */
+export type ListStateFilter = { searchState: SearchState } | { processingState: ProcessingState };
+
 /** 버전을 만든 계기다. */
 export type VersionOrigin = 'upload' | 'content' | 'hints' | 'reindex';
 

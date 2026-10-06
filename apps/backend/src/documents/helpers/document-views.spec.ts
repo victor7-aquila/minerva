@@ -1,12 +1,13 @@
 import type { AssetViewData } from '../../assets';
-import type { ProcessingState, SearchState } from '../../common';
 import type { RagDocumentChunk } from '../../rag';
 import { docRecord, versionRecord } from '../../../test/support/documents-fixtures';
 import {
-  compareDocuments,
-  isLatestOrNoEdition,
+  bucketWindows,
   latestEditionDates,
+  latestEditionPairs,
+  listSortSpec,
   siblingEditions,
+  stateBucketOrder,
   toAssetView,
   toChunkView,
   toDetail,
@@ -26,40 +27,10 @@ function withEdition(
   return docRecord({ docId, name, edition: { label, editionDate }, ...over });
 }
 
-/** 정렬 결과의 docId 목록이다. */
-function sortedIds(
-  docs: DocumentRecord[],
-  column: Parameters<typeof compareDocuments>[0],
-  order: 'asc' | 'desc',
-): string[] {
-  return [...docs].sort(compareDocuments(column, order)).map((doc) => doc.docId);
+/** 쌍 목록을 이름 순으로 정렬한 복사본이다. ★ 쌍의 순서는 명세가 정하지 않아 정렬해 비교한다 */
+function byName(pairs: Array<{ name: string; editionDate: string }>) {
+  return [...pairs].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
-
-describe('REQ-BE-1.2.2', () => {
-  it('T-VIEW-1 최신판만 거르기는 이름별 가장 늦은 검색 가능 판과 판 없는 문서를 남긴다', () => {
-    const old = withEdition('old', 'N', 'v2022', '2022-01-01');
-    const latest = withEdition('new', 'N', 'v2025', '2025-01-01');
-    let latestMap = latestEditionDates([old, latest]);
-    expect(isLatestOrNoEdition(latest, latestMap)).toBe(true);
-    expect(isLatestOrNoEdition(old, latestMap)).toBe(false);
-
-    // 2025판이 검색 안 됨이면 2022판이 최신이다
-    const hidden = withEdition('new', 'N', 'v2025', '2025-01-01', {
-      searchState: 'not_searchable',
-    });
-    latestMap = latestEditionDates([old, hidden]);
-    expect(isLatestOrNoEdition(old, latestMap)).toBe(true);
-
-    // 같은 날짜 판 둘은 모두 남는다
-    const twin = withEdition('twin', 'N', 'v2025b', '2025-01-01');
-    latestMap = latestEditionDates([latest, twin]);
-    expect(isLatestOrNoEdition(latest, latestMap)).toBe(true);
-    expect(isLatestOrNoEdition(twin, latestMap)).toBe(true);
-
-    // 판 정보가 없는 문서는 언제나 남는다
-    expect(isLatestOrNoEdition(docRecord({ edition: null }), new Map())).toBe(true);
-  });
-});
 
 describe('REQ-BE-1.3.5', () => {
   const self = withEdition('self', 'N', 'v2022', '2022-01-01');
@@ -101,68 +72,135 @@ describe('REQ-BE-1.3.5', () => {
 });
 
 describe('REQ-BE-1.3.2', () => {
-  it('T-VIEW-3 search_state 열은 검색 가능 < 검색 안 됨 < 교체됨 순이다', () => {
-    const states: SearchState[] = ['replaced', 'searchable', 'not_searchable'];
-    const docs = states.map((state) => docRecord({ docId: state, searchState: state }));
-    expect(sortedIds(docs, 'search_state', 'asc')).toEqual([
-      'searchable',
-      'not_searchable',
-      'replaced',
-    ]);
-    expect(sortedIds(docs, 'search_state', 'desc')).toEqual([
-      'replaced',
-      'not_searchable',
-      'searchable',
-    ]);
+  it.each([
+    ['name', 'asc', ['name', 'updatedAt', 'docId'], { name: 1, updatedAt: -1, docId: 1 }],
+    ['name', 'desc', ['name', 'updatedAt', 'docId'], { name: -1, updatedAt: -1, docId: 1 }],
+    [
+      'uploaded_at',
+      'asc',
+      ['uploadedAt', 'updatedAt', 'docId'],
+      { uploadedAt: 1, updatedAt: -1, docId: 1 },
+    ],
+    [
+      'uploaded_at',
+      'desc',
+      ['uploadedAt', 'updatedAt', 'docId'],
+      { uploadedAt: -1, updatedAt: -1, docId: 1 },
+    ],
+    ['updated_at', 'asc', ['updatedAt', 'docId'], { updatedAt: 1, docId: 1 }],
+    ['updated_at', 'desc', ['updatedAt', 'docId'], { updatedAt: -1, docId: 1 }],
+  ] as const)(
+    'T-PR3-VIEW-1 listSortSpec(%s, %s)는 키 순서가 정렬 우선순위이고 동점은 방향과 무관하다',
+    (column, order, keys, expected) => {
+      const spec = listSortSpec(column, order);
+      // ★ 키 순서가 곧 DB 정렬 우선순위다 — toEqual은 순서를 보지 않으므로 키 목록을 따로 비교한다
+      expect(Object.keys(spec)).toEqual([...keys]);
+      expect(spec).toEqual(expected);
+    },
+  );
+
+  it('T-PR3-VIEW-2 stateBucketOrder는 열별 값 순서를 주고 desc는 뒤집는다', () => {
+    const searchAsc = ['searchable', 'not_searchable', 'replaced'];
+    const processingAsc = ['uploaded', 'captioning', 'queued', 'indexing', 'completed', 'failed'];
+    expect(stateBucketOrder('search_state', 'asc')).toEqual(searchAsc);
+    expect(stateBucketOrder('search_state', 'desc')).toEqual([...searchAsc].reverse());
+    expect(stateBucketOrder('processing_state', 'asc')).toEqual(processingAsc);
+    expect(stateBucketOrder('processing_state', 'desc')).toEqual([...processingAsc].reverse());
   });
 
-  it('T-VIEW-3 processing_state 열은 업로드됨부터 실패까지의 순서다', () => {
-    const order: ProcessingState[] = [
-      'uploaded',
-      'captioning',
-      'queued',
-      'indexing',
-      'completed',
-      'failed',
-    ];
-    const docs = [...order]
-      .reverse()
-      .map((state) => docRecord({ docId: state, processingState: state }));
-    expect(sortedIds(docs, 'processing_state', 'asc')).toEqual(order);
-    expect(sortedIds(docs, 'processing_state', 'desc')).toEqual([...order].reverse());
-  });
-
-  it('T-VIEW-3 name 열은 코드 포인트 순이다', () => {
-    const names = ['가', 'b', 'a', 'A'];
-    const docs = names.map((name) => docRecord({ docId: name, name }));
-    expect(sortedIds(docs, 'name', 'asc')).toEqual(['A', 'a', 'b', '가']);
-    expect(sortedIds(docs, 'name', 'desc')).toEqual(['가', 'b', 'a', 'A']);
-  });
-
-  it('T-VIEW-3 uploaded_at·updated_at 열은 시각 순이다', () => {
-    const t = (hour: number): Date => new Date(Date.UTC(2026, 9, 1, hour));
-    const docs = [
-      docRecord({ docId: 'x', uploadedAt: t(3), updatedAt: t(1) }),
-      docRecord({ docId: 'y', uploadedAt: t(1), updatedAt: t(3) }),
-      docRecord({ docId: 'z', uploadedAt: t(2), updatedAt: t(2) }),
-    ];
-    expect(sortedIds(docs, 'uploaded_at', 'asc')).toEqual(['y', 'z', 'x']);
-    expect(sortedIds(docs, 'uploaded_at', 'desc')).toEqual(['x', 'z', 'y']);
-    expect(sortedIds(docs, 'updated_at', 'asc')).toEqual(['x', 'z', 'y']);
-    expect(sortedIds(docs, 'updated_at', 'desc')).toEqual(['y', 'z', 'x']);
-  });
-
-  it('T-VIEW-3 동점은 방향과 무관하게 updatedAt 늦은 순, 같으면 docId 오름차순이다', () => {
-    const early = new Date('2026-10-01T00:00:00Z');
-    const late = new Date('2026-10-02T00:00:00Z');
-    const docs = [
-      docRecord({ docId: 'b', name: 'same', updatedAt: early }),
-      docRecord({ docId: 'c', name: 'same', updatedAt: late }),
-      docRecord({ docId: 'a', name: 'same', updatedAt: early }),
-    ];
-    for (const order of ['asc', 'desc'] as const) {
-      expect(sortedIds(docs, 'name', order)).toEqual(['c', 'a', 'b']);
+  it('T-PR3-VIEW-2 반환값을 바꿔도 다음 호출에 영향이 없다', () => {
+    for (const column of ['search_state', 'processing_state'] as const) {
+      for (const order of ['asc', 'desc'] as const) {
+        const expected = [...stateBucketOrder(column, order)];
+        // ★ 모듈 상수를 그대로 돌려주면 호출자의 변경이 전역으로 번진다
+        const first = stateBucketOrder(column, order) as string[];
+        first.reverse();
+        first.push('오염');
+        expect(stateBucketOrder(column, order)).toEqual(expected);
+      }
     }
+  });
+
+  it('T-PR3-VIEW-3 bucketWindows는 값 구간마다 가져올 범위를 준다', () => {
+    // 값 0은 3건, 값 1은 0건, 값 2는 5건이다. skip 2, limit 4 → 값 0의 마지막 1건 + 값 2의 앞 3건
+    expect(bucketWindows([3, 0, 5], 2, 4)).toEqual([
+      { index: 0, skip: 2, limit: 1 },
+      { index: 2, skip: 0, limit: 3 },
+    ]);
+    // 개수가 0인 값은 건너뛴다
+    expect(bucketWindows([0, 4, 0], 0, 10)).toEqual([{ index: 1, skip: 0, limit: 4 }]);
+    // 한 값 안에서 끝난다
+    expect(bucketWindows([3, 5], 1, 2)).toEqual([{ index: 0, skip: 1, limit: 2 }]);
+    // skip이 앞 값을 모두 넘어 뒤 값으로 들어간다
+    expect(bucketWindows([3, 5], 3, 5)).toEqual([{ index: 1, skip: 0, limit: 5 }]);
+    expect(bucketWindows([3, 5], 4, 2)).toEqual([{ index: 1, skip: 1, limit: 2 }]);
+  });
+
+  it('T-PR3-VIEW-3 범위를 넘는 skip은 빈 목록이다', () => {
+    expect(bucketWindows([3, 0, 5], 8, 4)).toEqual([]);
+    expect(bucketWindows([3, 0, 5], 100, 4)).toEqual([]);
+    expect(bucketWindows([0, 0], 0, 4)).toEqual([]);
+    expect(bucketWindows([], 0, 4)).toEqual([]);
+  });
+
+  it('T-PR3-VIEW-3 limit이 딱 맞으면 거기서 멈추고 남으면 끝까지 간다', () => {
+    // limit을 값 0에서 다 채우면 값 1은 보지 않는다
+    expect(bucketWindows([3, 5], 0, 3)).toEqual([{ index: 0, skip: 0, limit: 3 }]);
+    // 앞 값 끝과 limit이 정확히 맞물려도 다음 값에서 0건짜리 구간을 만들지 않는다
+    expect(bucketWindows([2, 2, 2], 2, 2)).toEqual([{ index: 1, skip: 0, limit: 2 }]);
+    // limit이 전체보다 크면 가진 만큼만 준다
+    expect(bucketWindows([3, 5], 2, 100)).toEqual([
+      { index: 0, skip: 2, limit: 1 },
+      { index: 1, skip: 0, limit: 5 },
+    ]);
+  });
+});
+
+describe('REQ-BE-1.3.3', () => {
+  it('T-PR3-VIEW-4 latestEditionPairs는 이름별 가장 늦은 검색 가능 판 날짜를 쌍으로 준다', () => {
+    const old = withEdition('old', 'N', 'v2022', '2022-01-01');
+    const latest = withEdition('new', 'N', 'v2025', '2025-01-01');
+    expect(latestEditionPairs([old, latest])).toEqual([{ name: 'N', editionDate: '2025-01-01' }]);
+
+    // 2025판이 검색 안 됨이면 2022판이 최신이다
+    const hidden = withEdition('new', 'N', 'v2025', '2025-01-01', {
+      searchState: 'not_searchable',
+    });
+    expect(latestEditionPairs([old, hidden])).toEqual([{ name: 'N', editionDate: '2022-01-01' }]);
+
+    // 같은 날짜 판 둘은 쌍 하나로 합쳐진다(둘 다 남기는 일은 조건 쪽이 한다)
+    const twin = withEdition('twin', 'N', 'v2025b', '2025-01-01');
+    expect(latestEditionPairs([latest, twin])).toEqual([{ name: 'N', editionDate: '2025-01-01' }]);
+  });
+
+  it('T-PR3-VIEW-4 판 없는 문서·삭제된 문서는 쌍에 들지 않고 이름마다 쌍이 하나다', () => {
+    const rows = [
+      docRecord({ docId: 'a', name: 'N', edition: null }),
+      withEdition('b', 'N', 'v2030', '2030-01-01', { deleted: true }),
+      withEdition('c', 'M', 'v2024', '2024-01-01'),
+      withEdition('d', 'M', 'v2023', '2023-01-01'),
+      withEdition('e', 'N', 'v2021', '2021-01-01'),
+    ];
+    expect(byName(latestEditionPairs(rows))).toEqual([
+      { name: 'M', editionDate: '2024-01-01' },
+      { name: 'N', editionDate: '2021-01-01' },
+    ]);
+    expect(latestEditionPairs([])).toEqual([]);
+    // 판이 없는 문서만 있으면 쌍이 없다
+    expect(latestEditionPairs([docRecord({ edition: null })])).toEqual([]);
+  });
+
+  it('T-PR3-VIEW-4 latestEditionDates와 같은 판단을 쌍으로 낸다', () => {
+    const rows = [
+      withEdition('a', 'N', 'v1', '2025-01-01'),
+      withEdition('b', 'M', 'v1', '2024-01-01'),
+      withEdition('c', 'M', 'v2', '2026-01-01', { searchState: 'not_searchable' }),
+    ];
+    const fromDates = [...latestEditionDates(rows)].map(([name, editionDate]) => ({
+      name,
+      editionDate,
+    }));
+    expect(byName(latestEditionPairs(rows))).toEqual(byName(fromDates));
   });
 });
 

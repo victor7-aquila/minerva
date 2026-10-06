@@ -15,6 +15,7 @@ import {
   uid,
   versionOf,
   versionRecord,
+  waitUntil,
 } from '../../../test/support/documents-fixtures';
 import type { DocumentsHarness } from '../../../test/support/documents-fixtures';
 import { createLogCapture } from '../../../test/support/log-capture';
@@ -1310,5 +1311,244 @@ describe('REQ-BE-1.8.5', () => {
     const doc = docOf(h.db, DOC_A);
     expect(doc.pendingRag.deleteChunks).toBe(false);
     expect(doc.purged).toBe(true);
+  });
+
+  it('T-PR3-DEL-4a 새 버전을 쓴 뒤 문서가 삭제됐으면 purged를 거짓으로 되돌렸다가 데이터를 다시 지운다', async () => {
+    // ★ 그사이 데이터 삭제(purge)가 끝나 purged가 true인 상태에서 새 버전의 데이터가 남은 경우다
+    await seedDoc({ docId: DOC_A, deleted: true, purged: true });
+    const sets: unknown[] = [];
+    const real = h.repo.updateDocument.bind(h.repo);
+    jest.spyOn(h.repo, 'updateDocument').mockImplementation(async (filter, set) => {
+      sets.push(set);
+      return real(filter, set);
+    });
+    await h.lifecycle.recheckAfterVersionWrite(DOC_A);
+    expect(sets).toContainEqual({ purged: false });
+    // 청크 삭제는 백그라운드로 걸리므로 이 시점에는 아직 거짓이다
+    expect(docOf(h.db, DOC_A).purged).toBe(false);
+    await h.drain();
+    expect(docOf(h.db, DOC_A).purged).toBe(true);
+    expect(h.assets.deleteDocument).toHaveBeenCalledWith(DOC_A);
+    expect(h.db.dump('document_versions').filter((v) => v.docId === DOC_A)).toHaveLength(0);
+  });
+
+  it('T-PR3-DEL-4b 삭제되지 않은 문서와 없는 문서는 아무것도 바꾸지 않는다', async () => {
+    await seedDoc({ docId: DOC_A });
+    const before = snapshot();
+    await h.lifecycle.recheckAfterVersionWrite(DOC_A);
+    await h.lifecycle.recheckAfterVersionWrite(DOC_B);
+    await h.drain();
+    expect(snapshot()).toEqual(before);
+    expect(h.indexing.deleteChunks).not.toHaveBeenCalled();
+    expect(h.assets.deleteDocument).not.toHaveBeenCalled();
+  });
+
+  it('T-PR3-DEL-4c 문서 조회가 실패해도 예외를 던지지 않는다', async () => {
+    await seedDoc({ docId: DOC_A, deleted: true, purged: true });
+    jest.spyOn(h.repo, 'findDocument').mockRejectedValue(new Error('boom'));
+    // ★ 삼킨다 — 호출자의 결과·오류가 우선이다
+    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_A)).resolves.toBeUndefined();
+  });
+});
+
+describe('REQ-BE-1.2.8', () => {
+  /** 교체됨·실패 상태의 문서를 만든다. */
+  function seedReplacedFailed(latestVersion = '1'): Promise<DocumentRecord> {
+    return seedDoc({
+      docId: DOC_A,
+      searchState: 'replaced',
+      processingState: 'failed',
+      latestVersion,
+    });
+  }
+
+  it('T-PR3-REPL-2a 교체·실패 문서의 마지막 버전에 사유가 없으면 REPLACED 사유를 쓴다', async () => {
+    await seedReplacedFailed();
+    await patchVersion(DOC_A, '1', { failure: null });
+    await h.lifecycle.recheckAfterVersionWrite(DOC_A);
+    const failure = versionOf(h.db, DOC_A, '1')?.failure;
+    expect(failure).toMatchObject({ code: 'REPLACED' });
+    expectSafeKoreanMessage(failure?.message ?? '');
+  });
+
+  it('T-PR3-REPL-2b 이미 사유가 있으면 덮지 않는다', async () => {
+    await seedReplacedFailed();
+    const existing = failureOf('PARSE_FAILED', '먼저 쓴 사유');
+    await patchVersion(DOC_A, '1', { failure: existing });
+    await h.lifecycle.recheckAfterVersionWrite(DOC_A);
+    expect(versionOf(h.db, DOC_A, '1')?.failure).toEqual(existing);
+  });
+
+  it('T-PR3-REPL-2c 다시 읽은 문서의 마지막 버전에만 쓰고 다른 버전에는 쓰지 않는다', async () => {
+    await seedReplacedFailed('2');
+    await patchVersion(DOC_A, '1', { failure: null });
+    await patchVersion(DOC_A, '2', { failure: null });
+    // ★ 인자 없이 다시 읽은 문서의 latestVersion(2) 버전에 쓴다. 버전 1은 건드리지 않는다
+    await h.lifecycle.recheckAfterVersionWrite(DOC_A);
+    expect(versionOf(h.db, DOC_A, '1')?.failure).toBeNull();
+    expect(versionOf(h.db, DOC_A, '2')?.failure).toMatchObject({ code: 'REPLACED' });
+  });
+
+  it('T-PR3-REPL-2d 교체되지 않았거나 실패가 아닌 문서에는 쓰지 않는다', async () => {
+    await seedDoc({
+      docId: DOC_A,
+      name: 'a',
+      searchState: 'searchable',
+      processingState: 'failed',
+    });
+    await seedDoc({
+      docId: DOC_B,
+      name: 'b',
+      searchState: 'replaced',
+      processingState: 'completed',
+    });
+    await h.lifecycle.recheckAfterVersionWrite(DOC_A);
+    await h.lifecycle.recheckAfterVersionWrite(DOC_B);
+    expect(versionOf(h.db, DOC_A, '1')?.failure).toBeNull();
+    expect(versionOf(h.db, DOC_B, '1')?.failure).toBeNull();
+  });
+});
+
+describe('REQ-BE-1.9.5', () => {
+  it('T-PR3-DROP-1 반영을 세 번 모두 못 하면 documents.event_dropped가 한 번 남는다', async () => {
+    await seedDoc({ docId: DOC_A, processingState: 'queued' });
+    const spy = jest.spyOn(h.repo, 'updateDocument').mockResolvedValue(false);
+    await h.lifecycle.onJobStateChanged(jobEvent({ docId: DOC_A, jobState: 'succeeded' }));
+    expect(spy).toHaveBeenCalledTimes(3);
+    const lines = logLines('documents.event_dropped');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ docId: DOC_A, version: '1', jobState: 'succeeded' });
+    // ★ 필드는 정확히 docId·version·jobState뿐이다 (pino 기본 필드는 뺀다)
+    const pinoBase = ['level', 'time', 'pid', 'hostname', 'context', 'msg', 'name'];
+    const keys = Object.keys(lines[0])
+      .filter((key) => !pinoBase.includes(key))
+      .sort();
+    expect(keys).toEqual(['docId', 'jobState', 'version']);
+  });
+
+  it('T-PR3-DROP-1b 반영하거나 반영할 것이 없으면 event_dropped를 남기지 않는다', async () => {
+    await seedDoc({ docId: DOC_A, processingState: 'queued' });
+    await h.lifecycle.onJobStateChanged(jobEvent({ docId: DOC_A }));
+    // 이미 반영된 같은 이벤트와 오래된 버전의 이벤트는 반영할 것이 없다
+    await h.lifecycle.onJobStateChanged(jobEvent({ docId: DOC_A }));
+    await h.lifecycle.onJobStateChanged(jobEvent({ docId: DOC_A, version: '9' }));
+    expect(logLines('documents.event_dropped')).toHaveLength(0);
+  });
+});
+
+describe('REQ-BE-1.1.9', () => {
+  /** 멈춘 표·이미지 처리의 결과 타입이다. */
+  type HintResult = { generated: number; temporary: number; stopped: boolean };
+
+  /** 테스트가 중간에 실패해도 멈춘 처리를 풀어 afterEach의 drain이 끝나게 한다. */
+  let release: (() => void) | null = null;
+  afterEach(() => {
+    release?.();
+    release = null;
+  });
+
+  /** captioning 전이 기록(uploaded → captioning)의 수를 센다. */
+  function captioningRecords(docId: string): number {
+    return transitionsOf(docId).filter(([, to]) => to === 'captioning').length;
+  }
+
+  it('T-PR3-DUP-1 같은 버전의 처리가 겹쳐 시작돼도 한 번만 돈다', async () => {
+    await seedDoc({ docId: DOC_A, processingState: 'uploaded' });
+    const gate = deferred<HintResult>();
+    release = () => gate.resolve({ generated: 0, temporary: 0, stopped: false });
+    h.assets.generateHints.mockImplementation(() => gate.promise);
+    // ★ 호출 즉시 키를 잡으므로 둘째 호출은 작업이 시작되기 전이라도 건너뛴다
+    h.lifecycle.startProcessing(DOC_A, '1', START_HINTS);
+    h.lifecycle.startProcessing(DOC_A, '1', START_HINTS);
+    await waitUntil(() => h.assets.generateHints.mock.calls.length >= 1);
+    await tick();
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+    expect(captioningRecords(DOC_A)).toBe(1);
+
+    gate.resolve({ generated: 0, temporary: 0, stopped: false });
+    await h.drain();
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+
+    // 키가 풀린 뒤에는 처리가 시작되지만 처리 상태가 이미 captioning이 아니라 전이에서 멈춘다
+    h.lifecycle.startProcessing(DOC_A, '1', START_HINTS);
+    await h.drain();
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+    expect(captioningRecords(DOC_A)).toBe(1);
+    expect(logLines('documents.processing_stopped')).toHaveLength(1);
+  });
+});
+
+describe('REQ-BE-1.9.10', () => {
+  /** 테스트가 중간에 실패해도 멈춘 요청을 풀어 afterEach의 drain이 끝나게 한다. */
+  let release: (() => void) | null = null;
+  afterEach(() => {
+    release?.();
+    release = null;
+  });
+
+  /** 색인 대기 문서를 시드한다. 작업 ID는 기본이 없음(null)이다. */
+  async function seedQueued(jobId: string | null): Promise<void> {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, processingState: 'queued' })],
+      [versionRecord({ docId: DOC_A, jobId })],
+    );
+  }
+
+  it('T-PR3-DUP-2a 같은 버전의 색인 요청이 진행 중이면 요청하지 않고 거짓을 준다', async () => {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, processingState: 'captioning' })],
+      [versionRecord({ docId: DOC_A, jobId: null })],
+    );
+    const gate = deferred<{ kind: 'accepted'; jobId: string }>();
+    release = () => gate.resolve({ kind: 'accepted', jobId: 'job-late' });
+    h.indexing.requestIndex.mockImplementation(() => gate.promise);
+    h.lifecycle.startProcessing(DOC_A, '1', { startAt: 'index', force: false });
+    await waitUntil(() => h.indexing.requestIndex.mock.calls.length === 1);
+    expect(await h.lifecycle.requestIndexIfIdle(DOC_A, '1', false)).toBe(false);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+    gate.resolve({ kind: 'accepted', jobId: 'job-late' });
+    await h.drain();
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+  });
+
+  it('T-PR3-DUP-2b 버전에 작업 ID가 이미 있으면 요청하지 않고 거짓을 준다', async () => {
+    await seedQueued('job-1');
+    expect(await h.lifecycle.requestIndexIfIdle(DOC_A, '1', false)).toBe(false);
+    expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+  });
+
+  it('T-PR3-DUP-2c 작업 ID 없는 색인 대기면 요청하고 참을 준다', async () => {
+    await seedQueued(null);
+    expect(await h.lifecycle.requestIndexIfIdle(DOC_A, '1', true)).toBe(true);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+    expect(h.indexing.requestIndex.mock.calls[0][0]).toMatchObject({
+      docId: DOC_A,
+      version: '1',
+      force: true,
+    });
+    expect(versionOf(h.db, DOC_A, '1')?.jobId).toBe('job-new');
+  });
+
+  it('T-PR3-DUP-2d 문서가 그 버전의 queued가 아니면 요청하지 않는다', async () => {
+    await seed(
+      h.db,
+      [
+        docRecord({ docId: DOC_A, name: 'a', processingState: 'completed' }),
+        docRecord({ docId: DOC_B, name: 'b', processingState: 'queued', latestVersion: '2' }),
+      ],
+      [
+        versionRecord({ docId: DOC_A, jobId: null }),
+        versionRecord({ docId: DOC_B, version: '1', jobId: null }),
+        versionRecord({ docId: DOC_B, version: '2', jobId: null }),
+      ],
+    );
+    expect(await h.lifecycle.requestIndexIfIdle(DOC_A, '1', false)).toBe(false);
+    // ★ 확인하는 버전(1)이 마지막 버전(2)이 아니다
+    expect(await h.lifecycle.requestIndexIfIdle(DOC_B, '1', false)).toBe(false);
+    expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });
 });

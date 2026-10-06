@@ -36,7 +36,13 @@ beforeEach(async () => {
   await boot();
 });
 
+/** 멈춰 둔 표·이미지 처리를 푸는 함수다. afterEach가 부른다. */
+let releaseHints: (() => void) | null = null;
+
 afterEach(async () => {
+  // ★ 닫기(drain) 전에 먼저 푼다
+  releaseHints?.();
+  releaseHints = null;
   if (alive) {
     alive = false;
     await h.close();
@@ -98,10 +104,112 @@ describe('REQ-BE-1.9.9', () => {
     expect(forced.has(DOC_C)).toBe(false);
     expect(forced.has(DOC_D)).toBe(false);
   });
+
+  it('T-PR3-RES-1 한 문서의 조회가 던져도 나머지 문서는 처리하고 task_failed를 남긴다', async () => {
+    await seed(
+      h.db,
+      [
+        docRecord({ docId: DOC_A, name: 'a', processingState: 'captioning' }),
+        docRecord({ docId: DOC_B, name: 'b', processingState: 'captioning' }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: null }), versionRecord({ docId: DOC_B, jobId: null })],
+    );
+    const real = h.repo.findVersion.bind(h.repo);
+    jest.spyOn(h.repo, 'findVersion').mockImplementation(async (docId, version) => {
+      // ★ A의 버전 조회만 던진다
+      if (docId === DOC_A) throw new Error('boom');
+      return real(docId, version);
+    });
+    await expect(h.scheduler.resume()).resolves.toBeUndefined();
+    await h.drain();
+    const hinted = h.assets.generateHints.mock.calls.map((call) => call[0]);
+    expect(hinted).toContain(DOC_B);
+    expect(hinted).not.toContain(DOC_A);
+    const failed = logLines('documents.task_failed').filter((line) => line.task === 'resume');
+    expect(failed.length).toBeGreaterThanOrEqual(1);
+    expect(failed.every((line) => line.docId === DOC_A)).toBe(true);
+    // 기동 처리 요약 로그는 끝까지 남는다
+    expect(logLines('documents.resume')).toHaveLength(1);
+  });
+
+  it('T-PR3-RES-3 상태 맞추기가 던져도 resume 로그가 남고 표·이미지 처리를 잇는다', async () => {
+    await seed(
+      h.db,
+      [
+        docRecord({ docId: DOC_A, name: 'a', processingState: 'captioning' }),
+        docRecord({ docId: DOC_B, name: 'b', processingState: 'indexing' }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: null }), versionRecord({ docId: DOC_B })],
+    );
+    h.indexing.reconcile.mockRejectedValue(new Error('boom'));
+    await expect(h.scheduler.resume()).resolves.toBeUndefined();
+    await h.drain();
+    expect(h.indexing.reconcile).toHaveBeenCalledTimes(1);
+    expect(logLines('documents.resume')).toHaveLength(1);
+    expect(h.assets.generateHints.mock.calls.map((call) => call[0])).toContain(DOC_A);
+    const failed = logLines('documents.task_failed').filter((line) => line.task === 'resume');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].docId).toBeNull();
+  });
+
+  it('T-PR3-DUP-3 요청 처리가 도는 중에 기동 처리가 겹쳐도 같은 버전을 두 번 처리하지 않는다', async () => {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, processingState: 'uploaded', searchState: 'not_searchable' })],
+      [versionRecord({ docId: DOC_A, jobId: null })],
+    );
+    const gate = deferred<{ generated: number; temporary: number; stopped: boolean }>();
+    // ★ 테스트가 중간에 실패해도 afterEach의 drain이 끝나도록 해제 함수를 남긴다
+    releaseHints = () => gate.resolve({ generated: 0, temporary: 0, stopped: false });
+    h.assets.generateHints.mockImplementation(() => gate.promise);
+    // 업로드 직후 처리가 표·이미지 처리에서 멈춰 있다
+    h.lifecycle.startProcessing(DOC_A, '1', { startAt: 'hints', force: false });
+    await waitUntil(() => h.assets.generateHints.mock.calls.length === 1);
+    // ★ 그동안 기동 처리를 끝까지 돌린다 — 7단계가 같은 버전의 처리를 다시 시작하려 한다
+    await h.scheduler.resume();
+    await tick();
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+
+    gate.resolve({ generated: 0, temporary: 0, stopped: false });
+    await h.drain();
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+    const captioning = h.logs
+      .recordsOf('processing_state')
+      .filter((input) => input.detail?.toState === 'captioning');
+    expect(captioning).toHaveLength(1);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('REQ-BE-1.9.10', () => {
+  it('T-PR3-RES-2 한 문서의 색인 요청이 던져도 둘째 문서를 요청하고 task_failed를 남긴다', async () => {
+    // ★ 요청 직전에 문서·버전을 다시 읽는 조건: queued, 작업 ID 없음, 마지막 버전
+    await seed(
+      h.db,
+      [
+        docRecord({ docId: DOC_A, name: 'a', processingState: 'queued', latestVersion: '1' }),
+        docRecord({ docId: DOC_B, name: 'b', processingState: 'queued', latestVersion: '1' }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: null }), versionRecord({ docId: DOC_B, jobId: null })],
+    );
+    h.indexing.requestIndex.mockImplementation(async (input) => {
+      if (input.docId === DOC_A) throw new Error('boom');
+      return { kind: 'accepted', jobId: 'job-b' };
+    });
+    await expect(h.scheduler.resume()).resolves.toBeUndefined();
+    await h.drain();
+    const requested = h.indexing.requestIndex.mock.calls.map((call) => call[0].docId);
+    expect(new Set(requested)).toEqual(new Set([DOC_A, DOC_B]));
+    expect(versionOf(h.db, DOC_B, '1')?.jobId).toBe('job-b');
+    const failed = logLines('documents.task_failed').filter((line) => line.task === 'resume');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].docId).toBe(DOC_A);
+    // ★ 요청에 성공한 문서만 requeued로 센다
+    expect(logLines('documents.resume')[0].requeued).toBe(1);
+  });
+
   it('T-RES-2 작업 ID 없는 queued 문서만 색인을 다시 요청하고 reindex 버전은 force다', async () => {
+    // ★ 시드는 요청 직전 다시 읽기 조건(queued·jobId null·latestVersion 일치)을 만족한다 (P36)
     await seed(
       h.db,
       [

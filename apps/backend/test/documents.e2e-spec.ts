@@ -306,7 +306,84 @@ function at(iso: string): Date {
   return new Date(iso);
 }
 
+/** 표 칸에 짝 있는 이미지(img/z.png)가 든 GFM 표 문서다. ID는 t1, i1이다. */
+const NEST_TABLE_MD = '| 키 | 값 |\n| --- | --- |\n| ![i](img/z.png) | b |';
+
+/** 표 안 이미지 문서를 z.png와 함께 올리고 doc_id를 돌려준다. */
+async function uploadNestedTable(name: string): Promise<string> {
+  const res = await upload(
+    [
+      { name: 'a.md', content: NEST_TABLE_MD },
+      { name: 'z.png', content: PNG },
+    ],
+    [{ file_name: 'a.md', name }],
+  );
+  expect(res.status).toBe(201);
+  return (res.body as { documents: Array<{ doc_id: string }> }).documents[0].doc_id;
+}
+
+/**
+ * 표 안 이미지 문서를 올려 완료·검색 가능까지 흘리고 doc_id를 돌려준다.
+ * withChunk면 가짜 RAG의 청크 본문을 표 자리표시 하나로 둔다.
+ */
+async function makeNestedCompleted(name: string, withChunk = false): Promise<string> {
+  const docId = await uploadNestedTable(name);
+  await waitIndexRequest(docId);
+  if (withChunk) {
+    chunksBody = {
+      version: '1',
+      items: [
+        {
+          chunk_id: 'c1',
+          order: 1,
+          kind: 'text',
+          heading_path: ['H'],
+          title: null,
+          summary: null,
+          text: '[[minerva:table:t1 | a]]',
+          placeholder_ids: ['t1'],
+          split_index: null,
+          split_total: null,
+        },
+      ],
+    };
+  }
+  await notify(docId, '1', 'succeeded', '1', 1);
+  await waitFor(async () => {
+    const body = (await getDoc(docId)).body as { processing_state: string; search_state: string };
+    return body.processing_state === 'completed' && body.search_state === 'searchable';
+  });
+  return docId;
+}
+
+/** 응답 본문을 바이트로 받는다. */
+async function getBytes(url: string): Promise<{ status: number; body: Buffer }> {
+  const res = await request(baseUrl)
+    .get(url)
+    .buffer(true)
+    .parse((r, cb) => {
+      const chunks: Buffer[] = [];
+      r.on('data', (c: Buffer) => chunks.push(c));
+      r.on('end', () => cb(null, Buffer.concat(chunks)));
+    });
+  return { status: res.status, body: res.body as Buffer };
+}
+
+/** 컬렉션의 인덱스를 이름으로 찾는다. */
+async function findIndex(
+  collection: string,
+  name: string,
+): Promise<{ name?: string; unique?: boolean } | undefined> {
+  const list = await harness.db.collection(collection).indexes();
+  return list.find((index) => index.name === name);
+}
+
 describe('REQ-BE-1.1.1', () => {
+  it('T-PR3-MOVE-1a documents_doc_id는 고유 인덱스라 같은 ID의 문서가 둘 생기지 않는다', async () => {
+    // ★ 근거: MD 하나마다 문서 하나(REQ-BE-1.1.1) — 이 고유 인덱스가 같은 doc_id의 이중 삽입을 막는다
+    expect((await findIndex('documents', 'documents_doc_id'))?.unique).toBe(true);
+  });
+
   it('T-E2E-UP-1 MD 둘과 이미지 하나를 올리면 201이고 문서 둘이 생긴다', async () => {
     const res = await upload(
       [
@@ -371,9 +448,42 @@ describe('REQ-BE-1.1.3', () => {
     expect(image.status).toBe(200);
     expect((image.body as Buffer).equals(PNG)).toBe(true);
   });
+
+  it('T-PR3-E2E-TBL-1 GFM 칸 안 이미지도 짝지어져 원본의 이미지 주소로 내려받을 수 있다', async () => {
+    const res = await upload(
+      [
+        { name: 'a.md', content: NEST_TABLE_MD },
+        { name: 'z.png', content: PNG },
+      ],
+      [{ file_name: 'a.md', name: uniq('tbl1') }],
+    );
+    expect(res.status).toBe(201);
+    const doc = (res.body as { documents: Array<{ doc_id: string; unmatched_images: string[] }> })
+      .documents[0];
+    expect(doc.unmatched_images).toEqual([]);
+    const original = await request(baseUrl).get(`/v1/documents/${doc.doc_id}/original`);
+    const url = (original.body as { images: Record<string, string | null> }).images['img/z.png'];
+    expect(url).toBe(`/v1/documents/${doc.doc_id}/versions/1/assets/i1`);
+    const image = await getBytes(url as string);
+    expect(image.status).toBe(200);
+    expect(image.body.equals(PNG)).toBe(true);
+  });
 });
 
 describe('REQ-BE-1.1.4', () => {
+  it('T-PR3-E2E-TBL-2 HTML 표 안 짝 없는 이미지는 응답에 담기고 원본에서는 null이다', async () => {
+    const res = await upload(
+      [{ name: 'a.md', content: '<table><tr><td><img src="b.png"></td></tr></table>' }],
+      [{ file_name: 'a.md', name: uniq('tbl2') }],
+    );
+    expect(res.status).toBe(201);
+    const doc = (res.body as { documents: Array<{ doc_id: string; unmatched_images: string[] }> })
+      .documents[0];
+    expect(doc.unmatched_images).toEqual(['b.png']);
+    const original = await request(baseUrl).get(`/v1/documents/${doc.doc_id}/original`);
+    expect((original.body as { images: Record<string, unknown> }).images['b.png']).toBeNull();
+  });
+
   it('T-E2E-UP-4 짝 없는 이미지 참조는 응답에 담기고 원본에서는 null이다', async () => {
     const res = await upload(
       [{ name: 'a.md', content: '![m](missing.png)' }],
@@ -551,6 +661,43 @@ describe('REQ-BE-1.3.2', () => {
     const byDefault = await listDocs(window);
     expect(byDefault.items.map((i) => i.doc_id)).toEqual([A, B, C, D]);
   });
+
+  it('T-PR3-E2E-LIST-1 처리 상태 25개를 섞어도 상태 열 정렬의 쪽과 total이 맞다', async () => {
+    const name = uniq('e2e-state');
+    const states = ['uploaded', 'captioning', 'queued', 'indexing', 'completed', 'failed'] as const;
+    // ★ 상태가 쪽 경계에 걸리도록 25개를 6종에 돌려 가며 배정한다. 수정 시각은 모두 달라 동점 순서가 정해진다
+    const docs = Array.from({ length: 25 }, (_, i) =>
+      docRecord({
+        docId: randomUUID(),
+        name,
+        processingState: states[(i * 5) % states.length],
+        updatedAt: new Date(Date.UTC(2036, 0, 1, i)),
+      }),
+    );
+    await harness.db.collection('documents').insertMany(docs.map((doc) => ({ ...doc })));
+    // 독립 계산: 상태 차례 → 수정 최근순 → 문서 ID 오름차순
+    const expected = [...docs]
+      .sort(
+        (a, b) =>
+          states.indexOf(a.processingState as (typeof states)[number]) -
+            states.indexOf(b.processingState as (typeof states)[number]) ||
+          b.updatedAt.getTime() - a.updatedAt.getTime() ||
+          (a.docId < b.docId ? -1 : 1),
+      )
+      .map((doc) => doc.docId);
+    const first = await listDocs({ name, sort: 'processing_state', order: 'asc', page_size: 20 });
+    const second = await listDocs({
+      name,
+      sort: 'processing_state',
+      order: 'asc',
+      page_size: 20,
+      page: 2,
+    });
+    expect(first.total).toBe(25);
+    expect(second.total).toBe(25);
+    expect(first.items.map((i) => i.doc_id)).toEqual(expected.slice(0, 20));
+    expect(second.items.map((i) => i.doc_id)).toEqual(expected.slice(20));
+  });
 });
 
 describe('REQ-BE-1.3.3', () => {
@@ -642,6 +789,26 @@ describe('REQ-BE-1.3.7', () => {
     const bad = await request(baseUrl).get('/v1/document-names').query({ limit: 51 });
     expectError(bad, 400, 'INVALID_REQUEST');
   });
+
+  it('T-PR3-E2E-NAMES-1 같은 이름이 120개여도 세 이름이 코드 포인트 순으로 나온다', async () => {
+    const p = uniq('nmx');
+    const make = (name: string) => ({ ...docRecord({ docId: randomUUID(), name }) });
+    // ★ 가운데 이름이 묶음 크기(100)를 넘게 이어져도 다음 이름까지 읽어야 한다
+    const docs = [
+      make(`${p}-c`),
+      make(`${p}-a`),
+      ...Array.from({ length: 120 }, () => make(`${p}-b`)),
+    ];
+    await harness.db.collection('documents').insertMany(docs);
+    const res = await request(baseUrl).get('/v1/document-names').query({ prefix: p });
+    expect(res.status).toBe(200);
+    expect((res.body as { items: string[] }).items).toEqual([`${p}-a`, `${p}-b`, `${p}-c`]);
+  });
+
+  it('T-PR3-MOVE-1b documents_name 인덱스가 있어 이름 목록이 이름순으로 조회된다', async () => {
+    // ★ 근거: 이름 목록은 이름순 묶음 조회(P15)로 이 인덱스를 쓴다 (REQ-BE-1.3.7)
+    expect(await findIndex('documents', 'documents_name')).toBeDefined();
+  });
 });
 
 describe('REQ-BE-1.4.1', () => {
@@ -675,6 +842,20 @@ describe('REQ-BE-1.4.3', () => {
     const original = await request(baseUrl).get(`/v1/documents/${docId}/original`);
     const markdown = (original.body as { markdown: string }).markdown;
     expect(Buffer.from(markdown, 'utf8').equals(bytes)).toBe(true);
+  });
+});
+
+describe('REQ-BE-1.4.4', () => {
+  it('T-PR3-E2E-TBL-3 상세의 assets에는 표 하나뿐이고 표 안 이미지 경로가 이미지 주소로 바뀌어 있다', async () => {
+    const docId = await uploadNestedTable(uniq('tbl3'));
+    const detail = (await getDoc(docId)).body as {
+      assets: Array<{ placeholder_id: string; kind: string; table_markdown: string | null }>;
+    };
+    expect(detail.assets).toHaveLength(1);
+    expect(detail.assets[0].kind).toBe('table');
+    const markdown = detail.assets[0].table_markdown as string;
+    expect(markdown).toContain(`/v1/documents/${docId}/versions/1/assets/i1`);
+    expect(markdown).not.toContain('img/z.png');
   });
 });
 
@@ -717,6 +898,13 @@ describe('REQ-BE-1.5.5', () => {
 });
 
 describe('REQ-BE-1.6.1', () => {
+  it('T-PR3-MOVE-1c document_versions_doc_version은 고유 인덱스라 같은 번호의 버전이 둘 생기지 않는다', async () => {
+    // ★ 근거: 새 버전 만들기(REQ-BE-1.6.1)는 같은 번호 버전을 이중으로 쓰지 않는다 — replaceVersion의 전제다
+    expect((await findIndex('document_versions', 'document_versions_doc_version'))?.unique).toBe(
+      true,
+    );
+  });
+
   it('T-E2E-CONT-1 내용 다시 올리기: 잘못된 요청은 거부하고 올바른 요청은 202로 새 원본을 만든다', async () => {
     const docId = await makeCompleted(uniq('cont1'));
     const url = `/v1/documents/${docId}/contents`;
@@ -834,6 +1022,44 @@ describe('REQ-BE-1.8.1', () => {
       const row = await harness.db.collection('documents').findOne({ docId });
       return row?.purged === true;
     }, 10_000);
+  });
+});
+
+describe('REQ-BE-1.8.5', () => {
+  it('T-PR3-E2E-FS-1 문서 데이터를 지운 뒤 그 문서의 파일 폴더까지 없다', async () => {
+    // ★ 표 안 이미지 기능과 무관하게 폴더가 생기도록 일반 이미지 문서를 쓴다
+    const res = await upload(
+      [
+        { name: 'a.md', content: '![a](a.png)' },
+        { name: 'a.png', content: PNG },
+      ],
+      [{ file_name: 'a.md', name: uniq('fs1') }],
+    );
+    expect(res.status).toBe(201);
+    const docId = (res.body as { documents: Array<{ doc_id: string }> }).documents[0].doc_id;
+    await waitIndexRequest(docId);
+    await notify(docId, '1', 'succeeded', '1', 1);
+    await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
+    // ★ 지우기 전에는 폴더가 있어야 "없다"가 의미를 갖는다
+    await expect(fs.stat(path.join(tmpDir, docId))).resolves.toBeDefined();
+    expect((await request(baseUrl).delete(`/v1/documents/${docId}`)).status).toBe(204);
+    await waitFor(async () => {
+      const row = await harness.db.collection('documents').findOne({ docId });
+      return row?.purged === true;
+    }, 10_000);
+    await expect(fs.stat(path.join(tmpDir, docId))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('REQ-BE-2.5.4', () => {
+  it('T-PR3-E2E-TBL-4 청크 복원의 표 안 이미지 경로가 이미지 주소로 바뀐다', async () => {
+    const docId = await makeNestedCompleted(uniq('tbl4'), true);
+    const chunks = await request(baseUrl).get(`/v1/documents/${docId}/chunks`);
+    expect(chunks.status).toBe(200);
+    const markdown = (chunks.body as { items: Array<{ markdown: string }> }).items[0].markdown;
+    expect(markdown).toContain(`/v1/documents/${docId}/versions/1/assets/i1`);
+    expect(markdown).not.toContain('img/z.png');
+    expect(markdown).not.toContain('[[minerva');
   });
 });
 
@@ -995,18 +1221,6 @@ describe('REQ-BE-7.1.2', () => {
       .get('/v1/documents/replacement-check')
       .query({ name: 'x' });
     expect(check.status).toBe(200);
-  });
-});
-
-describe('REQ-BE-1.6.3', () => {
-  it('T-E2E-DB-1 기동하면 문서·버전 컬렉션 인덱스가 만들어져 있다', async () => {
-    const docs = await harness.db.collection('documents').indexes();
-    const versions = await harness.db.collection('document_versions').indexes();
-    const byName = (list: Array<{ name?: string; unique?: boolean }>, name: string) =>
-      list.find((index) => index.name === name);
-    expect(byName(docs, 'documents_doc_id')?.unique).toBe(true);
-    expect(byName(docs, 'documents_name')).toBeDefined();
-    expect(byName(versions, 'document_versions_doc_version')?.unique).toBe(true);
   });
 });
 
