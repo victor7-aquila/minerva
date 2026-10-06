@@ -421,16 +421,19 @@ export async function waitUntil(
   }
 }
 
-/** 끝나지 않는 Promise를 만든다. resolve()로 푼다. */
+/** 끝나지 않는 Promise를 만든다. resolve()로 풀거나 reject()로 거부시킨다. */
 export function deferred<T = void>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (error: Error) => void;
 } {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 /**
