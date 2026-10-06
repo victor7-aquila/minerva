@@ -87,6 +87,21 @@ export class LocalFileStore implements FileStore {
       throw new InvalidRequestError(INVALID_KEY_MESSAGE);
     }
 
+    if (namePart === '') {
+      // ★ 접두사가 폴더 전체면 폴더째 지운다 — 문서·버전마다 빈 폴더가 쌓이지 않게 한다
+      try {
+        // ★ 파일을 폴더처럼 쓴 접두사('a.png/')는 그 파일을 지우지 않는다 — 폴더일 때만 지운다
+        const info = await nodeFs.promises.lstat(dir);
+        if (info.isDirectory()) {
+          await nodeFs.promises.rm(dir, { recursive: true, force: true });
+        }
+      } catch (error) {
+        if (isMissing(error)) return;
+        throw error;
+      }
+      return;
+    }
+
     let names: string[];
     try {
       names = await nodeFs.promises.readdir(dir);

@@ -320,6 +320,41 @@ describe('REQ-BE-9.1.2', () => {
       expect((await store.read(key))?.equals(BYTES)).toBe(true);
     }
     await expect(listFiles(path.join(root, 'doc1'))).resolves.toEqual([]);
+    // ★ 빈 폴더도 남기지 않는다(파일 목록이 비는 것만으로는 폴더가 남았는지 알 수 없다)
+    await expect(exists(path.join(root, 'doc1'))).resolves.toBe(false);
+    await expect(exists(path.join(root, 'doc10'))).resolves.toBe(true);
+  });
+
+  it('T-PR3-FS-1 폴더 접두사는 폴더째 지우고 하위 폴더 접두사는 그 폴더만 지운다', async () => {
+    for (const key of ['doc1/3/a.png', 'doc1/3/sub/b.png', 'doc1/4/c.png']) {
+      await store.put(key, BYTES);
+    }
+
+    await store.deletePrefix('doc1/3/');
+
+    await expect(exists(path.join(root, 'doc1', '3'))).resolves.toBe(false);
+    // ★ 같은 문서의 다른 버전 폴더와 문서 폴더는 남는다
+    expect((await store.read('doc1/4/c.png'))?.equals(BYTES)).toBe(true);
+    await expect(exists(path.join(root, 'doc1'))).resolves.toBe(true);
+
+    await store.deletePrefix('doc1/');
+
+    await expect(exists(path.join(root, 'doc1'))).resolves.toBe(false);
+    await expect(store.read('doc1/4/c.png')).resolves.toBeNull();
+  });
+
+  it('T-PR3-FS-2 없는 폴더·파일을 폴더처럼 쓴 접두사는 예외 없이 끝나고 저장 위치 자체는 거부한다', async () => {
+    await store.put('doc2/1/a.png', BYTES);
+
+    await expect(store.deletePrefix('nope/')).resolves.toBeUndefined();
+    await expect(store.deletePrefix('doc2/1/a.png/')).resolves.toBeUndefined();
+    await expect(store.deletePrefix('doc2/1/a.png/x/')).resolves.toBeUndefined();
+    // 파일은 그대로다
+    expect((await store.read('doc2/1/a.png'))?.equals(BYTES)).toBe(true);
+
+    // ★ 저장 위치 자체를 가리키는 접두사는 폴더째 지우는 분기보다 먼저 거부한다
+    await expect(store.deletePrefix('./')).rejects.toBeInstanceOf(InvalidRequestError);
+    expect((await store.read('doc2/1/a.png'))?.equals(BYTES)).toBe(true);
   });
 
   it('T-FS-9 문자열 접두사로 지운다', async () => {
