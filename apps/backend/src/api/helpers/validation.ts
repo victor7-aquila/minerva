@@ -27,7 +27,8 @@ export function collectFieldPaths(errors: readonly ValidationError[], parent?: s
       paths.push(path);
     }
     if (e.children !== undefined && e.children.length > 0) {
-      paths.push(...collectFieldPaths(e.children, path));
+      // ★ 배열 항목마다 오류가 나면 경로가 입력 크기만큼 많아지므로 펼침 push를 쓰지 않는다
+      for (const childPath of collectFieldPaths(e.children, path)) paths.push(childPath);
     }
   }
   return [...new Set(paths)];

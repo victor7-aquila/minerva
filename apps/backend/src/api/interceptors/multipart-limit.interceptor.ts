@@ -15,6 +15,29 @@ export const UPLOAD_FIELD = 'files';
 /** 내부 FilesInterceptor 인스턴스의 주입 토큰이다. */
 export const UPLOAD_FILES_INTERCEPTOR = Symbol('UPLOAD_FILES_INTERCEPTOR');
 
+/** 업로드 요청 형식 오류 메시지다. */
+const UPLOAD_FORMAT_MESSAGE = '업로드 요청 형식이 올바르지 않습니다';
+
+/** multipart Content-Type이다. */
+const MULTIPART_TYPE = /^multipart\//i;
+
+/** RFC 7231 token이다. */
+const TOKEN = "[!#$%&'*+.^_`|~0-9A-Za-z-]+";
+
+/** 매개변수 값(token 또는 quoted-string)이다. */
+const PARAM_VALUE = `(?:${TOKEN}|"(?:[^"\\\\]|\\\\.)*")`;
+
+/** 받는 업로드 Content-Type이다. ★ busboy가 읽을 수 있는 모양만 통과시킨다 */
+const FORM_DATA_TYPE = new RegExp(
+  `^multipart/form-data(?:[ \\t]*;[ \\t]*${TOKEN}[ \\t]*=[ \\t]*${PARAM_VALUE})*[ \\t]*;?[ \\t]*$`,
+  'i',
+);
+
+/** 업로드로 읽을 Content-Type인가를 본다. */
+function isAcceptedFormData(contentType: string): boolean {
+  return FORM_DATA_TYPE.test(contentType);
+}
+
 /** multipart 요청에서 쓰는 요청 멤버다. */
 interface UploadRequest {
   headers: Record<string, string | string[] | undefined>;
@@ -33,8 +56,16 @@ function toUploadError(error: unknown): unknown {
       return new PayloadTooLargeError();
     }
     if (status >= 400 && status < 500) {
-      return new InvalidRequestError('업로드 요청 형식이 올바르지 않습니다');
+      return new InvalidRequestError(UPLOAD_FORMAT_MESSAGE);
     }
+  }
+  // ★ busboy 1.6의 생성 오류 문구에 기댄다. 엄격 검사가 놓친 모양만 여기로 온다
+  if (
+    error instanceof Error &&
+    (error.message === 'Malformed content type' ||
+      error.message.startsWith('Unsupported content type:'))
+  ) {
+    return new InvalidRequestError(UPLOAD_FORMAT_MESSAGE);
   }
   return error;
 }
@@ -58,8 +89,14 @@ export class MultipartLimitInterceptor implements NestInterceptor {
     const res = http.getResponse<ClosableResponse>();
 
     const contentType = req.headers['content-type'];
-    if (!/^multipart\//i.test(typeof contentType === 'string' ? contentType : '')) {
+    const type = typeof contentType === 'string' ? contentType : '';
+    if (!MULTIPART_TYPE.test(type)) {
       return next.handle();
+    }
+    if (!isAcceptedFormData(type)) {
+      // ★ 본문을 읽지 않는다
+      res.setHeader('Connection', 'close');
+      throw new InvalidRequestError(UPLOAD_FORMAT_MESSAGE);
     }
 
     const { maxTotalBytes } = this.limits;

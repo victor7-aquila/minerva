@@ -595,6 +595,43 @@ describe('REQ-BE-7.1.2', () => {
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ ok: true, body: { name: 'a', count: 2 } });
   });
+
+  it.each([
+    ['POST', '/v1/documents', 'multipart/mixed; boundary=x'],
+    ['POST', '/v1/search', 'multipart/related; boundary=x'],
+    ['POST', '/v1/golden-sets', 'multipart/related; boundary=x'],
+  ])(
+    'T-PR3-E2E-MP-1 form-data가 아닌 multipart는 %s %s에서 400 INVALID_REQUEST다',
+    async (method, urlPath, contentType) => {
+      const res = await rawRequest(harness.port, {
+        method,
+        path: urlPath,
+        headers: { 'content-type': contentType },
+        body: Buffer.from('--x--\r\n'),
+        endRequest: true,
+        timeoutMs: 5000,
+      });
+      expect(res.status).toBe(400);
+      // ★ 500이 아니라 한국어 고정 문장의 400이어야 한다
+      expectErrorShape(res.json(), 'INVALID_REQUEST', '업로드 요청 형식이 올바르지 않습니다');
+    },
+  );
+
+  it.each(['multipart/', 'multipart/form-data; =x'])(
+    'T-PR3-E2E-MP-2 형식이 깨진 multipart Content-Type %j는 500이 아니라 400 INVALID_REQUEST다',
+    async (contentType) => {
+      const res = await rawRequest(harness.port, {
+        method: 'POST',
+        path: '/v1/documents',
+        headers: { 'content-type': contentType },
+        body: Buffer.from('--x--\r\n'),
+        endRequest: true,
+        timeoutMs: 5000,
+      });
+      expect(res.status).toBe(400);
+      expectErrorShape(res.json(), 'INVALID_REQUEST', '업로드 요청 형식이 올바르지 않습니다');
+    },
+  );
 });
 
 describe('REQ-BE-7.1.3', () => {

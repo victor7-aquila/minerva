@@ -82,7 +82,7 @@ export class AppModule {}
 
 **`REQ-BE-7.1.1`** HTTP로 호출
 
-- 처리 계약: `main.ts`가 `AppModule`로 앱을 만들고, 전역 접두사 없이 각 컨트롤러가 `/v1` 경로를 가진다. `AppModule`이 전역 파이프·필터·업로드 인터셉터를 등록하고, 모듈 사이 이벤트(`EventEmitterModule.forRoot()`)와 주기 작업(`ScheduleModule.forRoot()`)을 앱 전체에 한 번 가져오고(기능 모듈은 `forRoot`를 부르지 않는다), `main.ts`는 로거를 붙이고 `PORT`에서 듣는다. 파일 업로드는 multipart로 받는다. api의 전역 업로드 인터셉터가 multipart 요청의 `files` 필드를 메모리로 읽어 `req.files`에 두고(파일 이름은 UTF-8), 업로드를 받는 컨트롤러는 `@UploadedFiles()`·`@Body()`로 받는다. 파일 수는 `UPLOAD_MAX_FILES`, 파일 하나는 `max(UPLOAD_MAX_MD_BYTES, UPLOAD_MAX_IMAGE_BYTES)`, 요청 전체(HTTP 본문 바이트)는 `UPLOAD_MAX_TOTAL_BYTES`를 넘으면 본문을 끝까지 읽지 않고 그 순간 `PayloadTooLargeError`로 응답한 뒤 연결을 닫는다. `Content-Length`가 이미 한도를 넘으면 본문을 읽기 전에 막는다(`REQ-BE-1.1.10`)
+- 처리 계약: `main.ts`가 `AppModule`로 앱을 만들고, 전역 접두사 없이 각 컨트롤러가 `/v1` 경로를 가진다. `AppModule`이 전역 파이프·필터·업로드 인터셉터를 등록하고, 모듈 사이 이벤트(`EventEmitterModule.forRoot()`)와 주기 작업(`ScheduleModule.forRoot()`)을 앱 전체에 한 번 가져오고(기능 모듈은 `forRoot`를 부르지 않는다), `main.ts`는 로거를 붙이고 `PORT`에서 듣는다. 파일 업로드는 `multipart/form-data`로 받는다. api의 전역 업로드 인터셉터가 `multipart/form-data` 요청의 `files` 필드를 메모리로 읽어 `req.files`에 두고(파일 이름은 UTF-8), 그 밖의 `multipart/*` 요청은 본문을 읽지 않고 `InvalidRequestError`로 거부한다. 업로드를 받는 컨트롤러는 `@UploadedFiles()`·`@Body()`로 받는다. 파일 수는 `UPLOAD_MAX_FILES`, 파일 하나는 `max(UPLOAD_MAX_MD_BYTES, UPLOAD_MAX_IMAGE_BYTES)`, 요청 전체(HTTP 본문 바이트)는 `UPLOAD_MAX_TOTAL_BYTES`를 넘으면 본문을 끝까지 읽지 않고 그 순간 `PayloadTooLargeError`로 응답한 뒤 연결을 닫는다. `Content-Length`가 이미 한도를 넘으면 본문을 읽기 전에 막는다(`REQ-BE-1.1.10`)
 - 충족 기준: 앱이 뜨면 `API.md`의 모든 엔드포인트가 응답하고, 파일 수 한도를 넘는 업로드가 `413`이다
 
 **`REQ-BE-7.1.2`** 형식이 잘못된 요청 거부

@@ -193,3 +193,82 @@ describe('REQ-BE-7.1.1', () => {
     expect(await run(req, res).catch((e: unknown) => e)).toBe(cause);
   });
 });
+
+/** 업로드 요청 형식 오류 메시지다. */
+const FORMAT_MESSAGE = '업로드 요청 형식이 올바르지 않습니다';
+
+/** Content-Type 하나로 가짜 요청·응답을 만들어 인터셉터를 돌리고 결과(거부 오류 또는 방출 값)를 돌려준다. */
+async function runWithType(contentType: string | undefined): Promise<{
+  outcome: unknown;
+  req: FakeReq;
+  res: { headersSent: boolean; setHeader: jest.Mock };
+}> {
+  const req = fakeReq(contentType === undefined ? {} : { 'content-type': contentType });
+  const res = { headersSent: false, setHeader: jest.fn() };
+  const outcome = await run(req, res).catch((e: unknown) => e);
+  return { outcome, req, res };
+}
+
+/** form-data가 아니거나 형식이 깨진 multipart의 거부를 확인한다. */
+function expectFormatRejected(result: Awaited<ReturnType<typeof runWithType>>): void {
+  expect(result.outcome).toBeInstanceOf(InvalidRequestError);
+  expect((result.outcome as Error).message).toBe(FORMAT_MESSAGE);
+  // ★ 본문을 읽기 전에 거부한다 — 내부 인터셉터를 부르지 않고 연결을 닫게 하며 data 리스너도 달지 않는다
+  expect(inner.intercept).not.toHaveBeenCalled();
+  expect(result.res.setHeader).toHaveBeenCalledWith('Connection', 'close');
+  expect(result.req.listenerCount('data')).toBe(0);
+}
+
+describe('REQ-BE-7.1.2', () => {
+  it('T-PR3-MP-1 multipart/mixed는 본문을 읽지 않고 InvalidRequestError로 거부한다', async () => {
+    expectFormatRejected(await runWithType('multipart/mixed; boundary=x'));
+  });
+
+  it.each([
+    'Multipart/Form-Data; boundary=x',
+    'multipart/form-data; boundary="a b"',
+    'multipart/form-data',
+  ])('T-PR3-MP-2 받는 형식 %j는 내부 인터셉터로 넘어간다', async (contentType) => {
+    inner.intercept.mockResolvedValue(of('handled'));
+    // ★ run은 통과하면 방출 값('handled')을 돌려준다 — 거부 오류가 아니라 방출 값으로 확인한다
+    const { outcome: emitted } = await runWithType(contentType);
+    expect(emitted).toBe('handled');
+    expect(inner.intercept).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['multipart/form-datax; boundary=x', 'multipart/related; boundary=x'])(
+    'T-PR3-MP-3 form-data가 아닌 multipart %j는 T-PR3-MP-1과 같이 거부한다',
+    async (contentType) => {
+      expectFormatRejected(await runWithType(contentType));
+    },
+  );
+
+  it.each(['application/json', undefined])(
+    'T-PR3-MP-4 multipart가 아닌 Content-Type(%j)은 그대로 통과한다',
+    async (contentType) => {
+      // ★ 통과 경로는 방출 값('handled')이 돌아온다
+      const { outcome: emitted, res } = await runWithType(contentType);
+      expect(emitted).toBe('handled');
+      expect(inner.intercept).not.toHaveBeenCalled();
+      expect(res.setHeader).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['multipart/', 'multipart/form-data; =x', 'multipart/form-data; boundary="x'])(
+    'T-PR3-MP-5 형식이 깨진 multipart %j는 T-PR3-MP-1과 같이 거부한다',
+    async (contentType) => {
+      expectFormatRejected(await runWithType(contentType));
+    },
+  );
+
+  it.each(['Malformed content type', 'Unsupported content type: x'])(
+    'T-PR3-MP-5 방어선: 내부 인터셉터의 busboy 생성 오류 %j는 원래 메시지 없이 InvalidRequestError가 된다',
+    async (message) => {
+      inner.intercept.mockRejectedValue(new Error(message));
+      const { outcome } = await runWithType('multipart/form-data; boundary=x');
+      expect(outcome).toBeInstanceOf(InvalidRequestError);
+      expect((outcome as Error).message).toBe(FORMAT_MESSAGE);
+      expect((outcome as Error).message).not.toContain(message);
+    },
+  );
+});
