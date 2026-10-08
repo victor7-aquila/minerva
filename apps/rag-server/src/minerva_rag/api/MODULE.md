@@ -6,7 +6,7 @@ Backend의 HTTP 요청을 받아 service로 넘기는 진입점이다. `API.md`�
 
 **핵심 계약**
 
-- 라우터는 service만 부른다. 기능 단위나 store·models를 직접 부르지 않는다 (`ARCHITECT.md` 「의존 규칙」)
+- 라우터는 service만 부른다. 기능 단위나 resource를 직접 부르지 않는다 (`ARCHITECT.md` 「의존 규칙」)
 - 모든 실패 응답은 `API.md` 「공통 규약」의 본문이고, 예외는 전역 처리기 한 곳에서 바꾼다. 응답에 스택 트레이스, 쿼리, 파일 경로, 예외 문자열이 나가지 않는다 (`REQ-RAG-11.3`, `AGENTS.md`)
 - 형식이 잘못된 요청은 FastAPI 기본값(422)이 아니라 `400 INVALID_REQUEST`다 (`REQ-RAG-9.1.2`)
 - 상태 확인은 준비 전에도, 다른 요청은 준비 뒤에만 처리된다 (`REQ-RAG-10.1.2`)

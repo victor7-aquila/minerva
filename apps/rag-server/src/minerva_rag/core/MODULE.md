@@ -21,7 +21,7 @@ RAG Server의 모든 단위가 기대는 공통 기반이다. 설정, 로깅, �
 **비범위**
 
 - 오류를 HTTP 상태와 응답 본문으로 바꾸는 일 — api
-- 공유 타입의 필드와 불변 조건 — `INTERFACES.md`의 `IF-RAG-1`, `IF-RAG-2`. core는 그 타입을 코드로 둘 뿐이다
+- 청크 레코드 타입의 필드와 불변 조건 — `INTERFACES.md`의 `IF-RAG-1`. core는 그 타입을 코드로 둘 뿐이다
 - 자리표시 형식의 정의 — 루트 `INTERFACES.md`의 `IF-1`. core는 그 형식을 읽는 함수만 둔다
 
 ## 구조
@@ -56,8 +56,8 @@ tests/unit/core/
 | 로그 | `configure_logging()`, `get_logger()` | 「로그 — REQ-RAG-11.2」 | `REQ-RAG-11.2.1` |
 | 오류 응답 | `MinervaError`와 하위 클래스, `JobFailureCode` | 「오류 응답 — REQ-RAG-11.3」, 「예외」 | `REQ-RAG-11.3.1`, `REQ-RAG-11.3.2` |
 | 공유 타입 | `ChunkKind`, `Chunk`, `ChunkingResult`, `Edition`, `ChunkRecord` | `IF-RAG-1` | `REQ-RAG-2`, `REQ-RAG-3`, `REQ-RAG-4` |
-| 공유 타입 | `JobState`, `JobStage`, `IndexOutcome`, `FailureLocation`, `JobFailure`, `ProgressReporter`, `IndexRunner`, `RecoverFn` | `IF-RAG-2` | `REQ-RAG-7` |
 | 공유 타입 | `Placeholder`, `find_placeholders()` | 「자리표시 읽기」 | `REQ-RAG-2.2`, `REQ-RAG-3.1` |
+| 공유 타입 | `FailureLocation` | 「실패 위치」 | `REQ-RAG-7.2.5`, `REQ-RAG-10.3.3` |
 | 공유 타입 | `SparseVector` | 「키워드 벡터 타입」 | `REQ-RAG-3.2.2`, `REQ-RAG-4.1.1` |
 
 ## 기능 그룹별 요구사항
@@ -115,7 +115,7 @@ class JobFailureCode(StrEnum):
     INTERNAL_ERROR = "INTERNAL_ERROR"
 ```
 
-하위 클래스와 코드는 「예외」 표가 소유한다. `JobFailureCode`는 `IF-RAG-2`의 `JobFailure.code`와 API의 `JobFailure.code`에 들어가는 값의 전체 목록이며, 뜻은 `apps/rag-server/API.md`의 `JobFailure`가 소유한다.
+하위 클래스와 코드는 「예외」 표가 소유한다. `JobFailureCode`는 service `MODULE.md`의 `JobFailure.code`와 API의 `JobFailure.code`에 들어가는 값의 전체 목록이며, 뜻은 `apps/rag-server/API.md`의 `JobFailure`가 소유한다.
 
 **`REQ-RAG-11.3.1`** 오류 코드와 한국어 메시지
 
@@ -148,9 +148,21 @@ def find_placeholders(text: str) -> tuple[Placeholder, ...]:
 - 처리 계약: 루트 `IF-1`의 형식(`[[minerva:{kind}:{placeholder_id} | {description}]]`)에 맞는 문자열만 자리표시로 읽는다. `raw`는 원문과 한 글자도 다르지 않다
 - 충족 기준: 형식에 맞는 자리표시가 든 텍스트에서 모든 자리표시를 차례대로 찾고, `text[start:end] == raw`이며, 형식에 맞지 않는 `[[...]]`는 찾지 않는다
 
+### 실패 위치
+
+이 그룹은 REQ를 직접 담당하지 않고, chunking이 `ChunkingFailedError`에 담은 위치를 service가 작업 실패에 옮기게 한다(`REQ-RAG-7.2.5`, `REQ-RAG-10.3.3`). API의 형식은 `API.md`의 `JobFailure`가 소유한다.
+
+```python
+@dataclass(frozen=True)
+class FailureLocation:
+    """실패가 생긴 문서 안 위치다."""
+    heading_path: tuple[str, ...] | None
+    placeholder_id: str | None
+```
+
 ### 키워드 벡터 타입
 
-이 그룹은 REQ를 직접 담당하지 않고, models가 만든 BM25 키워드 벡터를 store가 models를 import하지 않고 받게 한다(`REQ-RAG-3.2.2`, `REQ-RAG-4.1.1`).
+이 그룹은 REQ를 직접 담당하지 않고, resource가 만든 BM25 키워드 벡터를 indexing과 resource가 같은 타입으로 주고받게 한다(`REQ-RAG-3.2.2`, `REQ-RAG-4.1.1`).
 
 ```python
 @dataclass(frozen=True)
@@ -209,17 +221,18 @@ class SparseVector:
 | `InvalidRequestError` | 요청 내용이 계약에 맞지 않는다 | `INVALID_REQUEST` | 발생: service. 변환: api | `REQ-RAG-9.1.2` |
 | `UnauthorizedError` | API 토큰이 없거나 다르다 | `UNAUTHORIZED` | 발생·변환: api | `REQ-RAG-9.3.1` |
 | `PayloadTooLargeError` | 요청이 크기 한도를 넘는다 | `PAYLOAD_TOO_LARGE` | 발생·변환: api | `REQ-RAG-9.1.3` |
-| `JobNotFoundError` | 그 ID의 작업이 없다 | `JOB_NOT_FOUND` | 발생: jobs. 변환: api | `REQ-RAG-7.2.2` |
+| `JobNotFoundError` | 그 ID의 작업이 없다 | `JOB_NOT_FOUND` | 발생: service. 변환: api | `REQ-RAG-7.2.2` |
 | `DocumentNotSearchableError` | 정답 문서가 검색되지 않는다 | `DOCUMENT_NOT_SEARCHABLE` | 발생: evaluation. 변환: api | `REQ-RAG-6.3.2` |
-| `CaptionFailedError` | 요약·캡션을 만들지 못했다 | `CAPTION_FAILED` | 발생: caption. 변환: api | `REQ-RAG-1.1.3`, `REQ-RAG-1.2.3` |
-| `ModelUnavailableError` | 모델 서버에 연결할 수 없다 | `MODEL_UNAVAILABLE` | 발생: models. 변환: api, 작업에서는 service | `REQ-RAG-12.1.2` |
-| `PromptTooLongError` | 생성 입력이 컨텍스트에서 출력 몫을 뺀 크기를 넘는다 | 경계 밖으로 나가지 않는다 | 발생: models. 처리: caption은 `CaptionFailedError`로, chunking은 `ChunkingFailedError`로 바꾼다 | `REQ-RAG-2.5.2.2` |
-| `ModelLoadError` | 설정한 모델을 불러오지 못했다 | 경계 밖으로 나가지 않는다 | 발생: models. 처리: service가 기동을 멈춘다 | `REQ-RAG-12.1.1` |
-| `StoreUnavailableError` | Qdrant에 연결할 수 없다 | `STORE_UNAVAILABLE` | 발생: store. 변환: api, 작업에서는 service | `REQ-RAG-13.1.1` |
-| `VectorDimensionMismatchError` | 저장된 벡터 차원이 임베딩 모델과 다르다 | `VECTOR_DIMENSION_MISMATCH` | 발생: store. 변환: api, 작업에서는 service | `REQ-RAG-13.1.2` |
+| `CaptionFailedError` | 요약·캡션을 만들지 못했다 | `CAPTION_FAILED` | 발생: service. 변환: api | `REQ-RAG-1.1.3`, `REQ-RAG-1.2.3` |
+| `ModelUnavailableError` | 모델 서버에 연결할 수 없다 | `MODEL_UNAVAILABLE` | 발생: resource. 변환: api, 작업에서는 service | `REQ-RAG-12.1.2` |
+| `PromptTooLongError` | 생성 입력이 컨텍스트에서 출력 몫을 뺀 크기를 넘는다 | 경계 밖으로 나가지 않는다 | 발생: resource. 처리: service(요약·캡션)는 `CaptionFailedError`로, chunking은 `ChunkingFailedError`로 바꾼다 | `REQ-RAG-2.5.2.2` |
+| `GlossaryError` | 용어집 파일이 형식에 맞지 않는다 | 경계 밖으로 나가지 않는다 | 발생: search. 처리: 기동 때는 service가 기동을 멈추고, 다시 읽을 때는 search가 직전 용어집을 계속 쓴다 | `REQ-RAG-5.1.1`, `REQ-RAG-5.1.2`, `REQ-RAG-5.1.3` |
+| `ModelLoadError` | 설정한 모델을 불러오지 못했다 | 경계 밖으로 나가지 않는다 | 발생: resource. 처리: service가 기동을 멈춘다 | `REQ-RAG-12.1.1` |
+| `StoreUnavailableError` | Qdrant에 연결할 수 없다 | `STORE_UNAVAILABLE` | 발생: resource. 변환: api, 작업에서는 service | `REQ-RAG-13.1.1` |
+| `VectorDimensionMismatchError` | 저장된 벡터 차원이 임베딩 모델과 다르다 | `VECTOR_DIMENSION_MISMATCH` | 발생: resource. 변환: api, 작업에서는 service | `REQ-RAG-13.1.2` |
 | `ChunkingFailedError` | 청킹을 끝내지 못했다. 위치(`FailureLocation`)를 가질 수 있다 | 작업 실패 사유 `CHUNKING_FAILED` | 발생: chunking. 변환: service가 `JobFailure`로 | `REQ-RAG-10.3.3` |
 | `ServerNotReadyError` | 준비가 끝나기 전에 요청이 왔다 | `SERVER_NOT_READY` | 발생: service. 변환: api | `REQ-RAG-10.1.2` |
-| `ShuttingDownError` | 종료 중에 색인 요청이 왔다 | `SHUTTING_DOWN` | 발생: jobs. 변환: api | `REQ-RAG-10.1.3` |
+| `ShuttingDownError` | 종료 중에 색인 요청이 왔다 | `SHUTTING_DOWN` | 발생: service. 변환: api | `REQ-RAG-10.1.3` |
 
 HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 

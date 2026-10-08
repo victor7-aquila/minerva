@@ -1,6 +1,6 @@
 # indexing 모듈 명세 (REQ-RAG-3)
 
-chunking이 만든 청크를 검색할 수 있게 저장하고, 버전·판·삭제·중복 방지를 정한다. 자리표시를 요약·캡션으로 바꾼 색인 텍스트로 dense·키워드 벡터를 만들어 `ChunkRecord`(`IF-RAG-1`)와 함께 store로 저장하며, Qdrant의 청크를 바꾸는 유일한 단위다. 폴더는 `apps/rag-server/src/minerva_rag/indexing`다.
+chunking이 만든 청크를 검색할 수 있게 저장하고, 버전·판·삭제·중복 방지를 정한다. 자리표시를 요약·캡션으로 바꾼 색인 텍스트로 dense·키워드 벡터를 만들어 `ChunkRecord`(`IF-RAG-1`)와 함께 resource로 저장하며, Qdrant의 청크를 바꾸는 유일한 단위다. 폴더는 `apps/rag-server/src/minerva_rag/indexing`다.
 
 ## 요약
 
@@ -25,7 +25,7 @@ chunking이 만든 청크를 검색할 수 있게 저장하고, 버전·판·삭
 **비범위**
 
 - 같은 판 문서 중 무엇을 남길지 — Backend (`REQ-RAG-3.6.6`, `REQ-BE-1.2.5`)
-- 체크섬 비교에 쓸 열린 작업과 현재 색인의 작업 정보 — jobs가 갖고, service가 가져와 넘긴다
+- 체크섬 비교에 쓸 열린 작업과 현재 색인의 작업 정보 — service가 갖고 넘긴다
 - 색인 중인 작업을 기다린 뒤 삭제·이름 변경을 하는 순서 — service (`REQ-RAG-10.5`, `REQ-RAG-10.6`)
 - `assets`에 자리표시 ID가 빠진 요청을 거절하는 일 — service
 
@@ -49,9 +49,8 @@ flowchart LR
     subgraph Boundary["indexing — REQ-RAG-3"]
         Indexer["Indexer"]
     end
-    Indexer --> Models["models"]
-    Indexer --> Store["store"]
-    Store -.-> Qdrant[/"Qdrant"/]
+    Indexer --> Resource["resource"]
+    Resource -.-> Qdrant[/"Qdrant"/]
 ```
 
 실선은 import 호출, 점선은 프로세스 밖 자원이다. core 의존은 생략했다.
@@ -62,11 +61,10 @@ flowchart LR
 
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| models | import | `embed_documents`, `encode_sparse_documents`, `embedding_model_name` | models `MODULE.md` | `REQ-RAG-3.2`, `REQ-RAG-3.5.2` |
-| store | import | 쓰기 메서드, `active_records`, `active_editions` | store `MODULE.md` | `REQ-RAG-3.3`, `REQ-RAG-3.4`, `REQ-RAG-3.6` |
+| resource | import | `ModelHub`의 `embed_documents`, `encode_sparse_documents`, `embedding_model_name`. `ChunkStore`의 쓰기 메서드, `active_records`, `active_editions`, `job_records` | resource `MODULE.md` | `REQ-RAG-3.2`, `REQ-RAG-3.3`, `REQ-RAG-3.4`, `REQ-RAG-3.5.2`, `REQ-RAG-3.6`, `REQ-RAG-7.5.3` |
 | core | import | `Chunk`, `ChunkingResult`, `ChunkRecord`, `Edition`, `SparseVector`, `find_placeholders`, `Settings`, `get_logger` | `IF-RAG-1`, core `MODULE.md` | `REQ-RAG-3` |
 
-**금지 의존** — chunking·jobs·service를 import하지 않는다. 청킹 방식은 문자열 값으로 받는다(`ARCHITECT.md` 「의존 규칙」).
+**금지 의존** — chunking·service를 import하지 않는다. 청킹 방식은 문자열 값으로 받는다(`ARCHITECT.md` 「의존 규칙」).
 
 ### 공개 표면
 
@@ -141,7 +139,7 @@ classDiagram
 class Indexer:
     """청크를 색인하고 버전·판·삭제를 관리한다."""
 
-    def __init__(self, models: ModelHub, store: ChunkStore, settings: Settings) -> None: ...
+    def __init__(self, model_hub: ModelHub, chunk_store: ChunkStore, settings: Settings) -> None: ...
     def checksum(self, markdown: str, assets: Mapping[str, str], chunking_mode: str) -> str: ...
     async def embed(self, inp: IndexInput, result: ChunkingResult) -> EmbeddedChunks: ...
     async def write(self, embedded: EmbeddedChunks) -> int: ...
@@ -160,7 +158,7 @@ def decide_index(
 ) -> IndexDecision: ...
 ```
 
-store·models의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `ModelUnavailableError`)는 그대로 낸다.
+resource의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `ModelUnavailableError`)는 그대로 낸다.
 
 ### 색인 텍스트 — `REQ-RAG-3.1`
 
@@ -168,7 +166,7 @@ store·models의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`,
 
 - 입력·선행 조건: `IndexInput.assets`가 모든 자리표시 ID를 갖는다(루트 `IF-1`의 Backend 보장, service가 확인)
 - 처리 계약: 청크의 색인 텍스트는 `text`의 자리표시 `raw` 전체를 그 ID의 요약·캡션 문장으로 바꾼 것이다. `ASSET` 청크의 색인 텍스트는 그 요약·캡션 문장이다
-- 충족 기준: `embed`가 models에 넘긴 텍스트에 자리표시가 없고 그 자리에 요약·캡션 문장이 있다
+- 충족 기준: `embed`가 resource에 넘긴 텍스트에 자리표시가 없고 그 자리에 요약·캡션 문장이 있다
 
 **`REQ-RAG-3.1.2`** 저장 원문은 자리표시 유지
 
@@ -215,7 +213,7 @@ store·models의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`,
 
 **`REQ-RAG-3.4.3`** 청크가 없는 문서 삭제
 
-- 충족 기준: 레코드가 없는 문서를 지우면 오류 없이 끝나고 store에 쓰기가 일어나지 않는다
+- 충족 기준: 레코드가 없는 문서를 지우면 오류 없이 끝나고 resource에 쓰기가 일어나지 않는다
 
 ### 중복 색인 방지 — `REQ-RAG-3.5`
 
@@ -266,7 +264,7 @@ store·models의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`,
 **`REQ-RAG-3.6.5`** 다시 색인하지 않고 이름·판 정보 변경
 
 - 처리 계약: `update_metadata`는 그 문서의 모든 레코드의 `name`·`edition`을 바꾸고, 바뀌기 전과 후 이름의 최신판 표시를 다시 맞춘다. 벡터는 만들지 않는다
-- 충족 기준: 이름을 바꾸면 모든 레코드의 `name`이 새 값이고 models 호출이 없으며, 옛 이름과 새 이름의 최신판 표시가 각각 맞다
+- 충족 기준: 이름을 바꾸면 모든 레코드의 `name`이 새 값이고 모델 호출이 없으며, 옛 이름과 새 이름의 최신판 표시가 각각 맞다
 
 **`REQ-RAG-3.6.6`** 같은 이름·판의 다른 문서를 지우지 않음
 
@@ -278,7 +276,7 @@ store·models의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`,
 
 ### 기동 복구
 
-이 그룹은 jobs가 `REQ-RAG-7.5.3`을 지키게 하는 확인 함수(`IF-RAG-2`의 `RecoverFn`)다. service가 `JobQueue.start`에 넘긴다.
+이 그룹은 service의 색인 작업 관리가 `REQ-RAG-7.5.3`을 지키게 하는 확인 함수(service `MODULE.md`의 `RecoverFn`)다. service가 기동할 때 작업 관리에 넘긴다.
 
 - 처리 계약: `recover(doc_id, job_id)`는 `job_records`로 그 작업의 레코드를 읽는다. active 레코드가 있으면 「핵심 흐름」의 4·5를 마저 하고(그 작업의 레코드 말고는 지우고 최신판 표시를 맞춘다) 참을 돌려준다. active 레코드가 없으면 남은 레코드를 지우고 거짓을 돌려준다. 여러 번 불러도 결과가 같다
 - 충족 기준: 활성화 뒤 이전 레코드를 지우기 전 상태에서 부르면 참이고 이전 레코드가 지워지며, 저장만 하고 활성화하지 않은 상태에서 부르면 거짓이고 그 레코드가 지워진다. 레코드가 없으면 거짓이다
@@ -300,7 +298,7 @@ flowchart TB
 4. **이전 레코드 삭제** — 그 문서에서 새 레코드 말고는 모두 지운다. (`REQ-RAG-3.3.3`)
 5. **최신판 표시** — 이전 레코드의 이름과 새 이름의 최신판 표시를 맞춘다. (`REQ-RAG-3.6.3`)
 
-3을 4보다 먼저 해야 문서가 검색되지 않는 순간이 없다. 그 대가로 3과 4 사이에는 이전·새 레코드가 함께 active다(store `MODULE.md` 「실패 모드」). 3 뒤에 프로세스가 멈추면 다시 시작할 때 `recover`가 4·5를 마저 한다.
+3을 4보다 먼저 해야 문서가 검색되지 않는 순간이 없다. 그 대가로 3과 4 사이에는 이전·새 레코드가 함께 active다(resource `MODULE.md` 「실패 모드」). 3 뒤에 프로세스가 멈추면 다시 시작할 때 `recover`가 4·5를 마저 한다.
 
 ## 실행 계약
 
@@ -331,27 +329,27 @@ flowchart TB
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-3.1.1` | unit | 색인 텍스트의 자리표시 치환, `ASSET` 청크는 요약·캡션 문장 | models (mock) | `tests/unit/indexing/` |
-| `REQ-RAG-3.1.2` | unit | 레코드 원문 보존 | models (mock) | `tests/unit/indexing/` |
-| `REQ-RAG-3.2.1` | unit | 청크마다 dense 벡터, 색인 텍스트로 생성 | models (mock) | `tests/unit/indexing/` |
-| `REQ-RAG-3.2.2` | unit | 청크마다 키워드 벡터, 색인 텍스트로 생성 | models (mock) | `tests/unit/indexing/` |
-| `REQ-RAG-3.3.1` | unit | 저장 → 활성화 순서 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.3.2` | unit | 활성화 전 실패 시 이전 레코드 active 유지, 새 레코드 정리 시도 | store (가짜, 실패 주입) | `tests/unit/indexing/` |
-| `REQ-RAG-3.3.3` | unit | 끝난 뒤 새 레코드만 남음, 반환값 | store (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.1.1` | unit | 색인 텍스트의 자리표시 치환, `ASSET` 청크는 요약·캡션 문장 | resource (mock) | `tests/unit/indexing/` |
+| `REQ-RAG-3.1.2` | unit | 레코드 원문 보존 | resource (mock) | `tests/unit/indexing/` |
+| `REQ-RAG-3.2.1` | unit | 청크마다 dense 벡터, 색인 텍스트로 생성 | resource (mock) | `tests/unit/indexing/` |
+| `REQ-RAG-3.2.2` | unit | 청크마다 키워드 벡터, 색인 텍스트로 생성 | resource (mock) | `tests/unit/indexing/` |
+| `REQ-RAG-3.3.1` | unit | 저장 → 활성화 순서 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.3.2` | unit | 활성화 전 실패 시 이전 레코드 active 유지, 새 레코드 정리 시도 | resource (가짜, 실패 주입) | `tests/unit/indexing/` |
+| `REQ-RAG-3.3.3` | unit | 끝난 뒤 새 레코드만 남음, 반환값 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.3.3` | integration | 실제 Qdrant에서 버전 교체 뒤 active 레코드가 새 버전뿐 | | `tests/integration/indexing/` |
-| `REQ-RAG-3.4.1` | unit | 모든 버전 삭제와 최신판 재계산 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.4.2` | unit | 삭제 뒤 active 레코드 없음, 다른 판이 최신판 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.4.3` | unit | 레코드 없는 문서 삭제가 쓰기 없이 끝남 | store (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.4.1` | unit | 모든 버전 삭제와 최신판 재계산 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.4.2` | unit | 삭제 뒤 active 레코드 없음, 다른 판이 최신판 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.4.3` | unit | 레코드 없는 문서 삭제가 쓰기 없이 끝남 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.1` | unit | 현재 체크섬과 같으면 `reuse` | | `tests/unit/indexing/` |
-| `REQ-RAG-3.5.2` | unit | 체크섬 재료별 변화, `assets` 순서 무관 | models (mock, 모델 이름) | `tests/unit/indexing/` |
+| `REQ-RAG-3.5.2` | unit | 체크섬 재료별 변화, `assets` 순서 무관 | resource (mock, 모델 이름) | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.3` | unit | 열린 작업이 있으면 `join` (`force`여도) | | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.4` | unit | `reuse`에 현재 작업 ID | | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.5` | unit | `force`면 같은 체크섬도 `submit` | | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.1` | unit | 모든 레코드의 이름·판 정보 | models (mock) | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.2` | unit | 다른 판 문서 레코드 유지 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.3` | unit | 최신판 계산, 같은 날짜 여럿, 삭제 뒤 이동, 같은 이름 재계산 직렬화 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.4` | unit | 판 정보 없는 문서 색인과 최신판 아님 | models (mock), store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.5` | unit | 이름·판 변경, 모델 호출 없음, 옛·새 이름 재계산 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.6` | unit | 같은 이름·판 다른 문서 레코드 유지 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.7` | unit | 레코드 없는 문서 이름 변경이 오류 없음 | store (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-7.5.3` | unit | `recover`의 참·거짓과 남은 정리, 여러 번 불러도 같음 (기동 복구) | store (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.1` | unit | 모든 레코드의 이름·판 정보 | resource (mock) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.2` | unit | 다른 판 문서 레코드 유지 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.3` | unit | 최신판 계산, 같은 날짜 여럿, 삭제 뒤 이동, 같은 이름 재계산 직렬화 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.4` | unit | 판 정보 없는 문서 색인과 최신판 아님 | resource (모델 mock, 저장소 가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.5` | unit | 이름·판 변경, 모델 호출 없음, 옛·새 이름 재계산 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.6` | unit | 같은 이름·판 다른 문서 레코드 유지 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.7` | unit | 레코드 없는 문서 이름 변경이 오류 없음 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-7.5.3` | unit | `recover`의 참·거짓과 남은 정리, 여러 번 불러도 같음 (기동 복구) | resource (가짜) | `tests/unit/indexing/` |

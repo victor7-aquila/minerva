@@ -44,7 +44,7 @@ tests/unit/evaluation/
 | search | import | `Searcher.search`, `Searcher.document_chunks`, `SearchQuery`, `SearchHit` | search `MODULE.md` | `REQ-RAG-6.2.1`, `REQ-RAG-6.3.2` |
 | core | import | `Settings`, `get_logger`, `DocumentNotSearchableError` | core `MODULE.md` | `REQ-RAG-6.3.2` |
 
-**금지 의존** — store·models를 직접 부르지 않는다. 검색 한 번의 처리 순서는 search 안에서 지킨다(`ARCHITECT.md` 「의존 규칙」).
+**금지 의존** — resource를 직접 부르지 않는다. 검색 한 번의 처리 순서는 search 안에서 지킨다(`ARCHITECT.md` 「의존 규칙」).
 
 ### 공개 표면
 
@@ -160,7 +160,7 @@ class Evaluator:
 | :--- | :--- | :--- | :--- | :--- |
 | `DocumentNotSearchableError` | 정답 문서에 검색되는 버전이 없다 | `DOCUMENT_NOT_SEARCHABLE` | 발생: evaluation. 변환: api | `REQ-RAG-6.3.2` |
 
-search가 내는 store·models 예외는 그대로 전파한다.
+search가 내는 resource 예외는 그대로 전파한다.
 
 ### 로그
 
