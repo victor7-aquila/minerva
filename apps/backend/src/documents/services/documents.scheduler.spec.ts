@@ -435,6 +435,32 @@ describe('REQ-BE-1.9.9', () => {
     await expect(h.service.reindex(DOC_A)).rejects.toThrow('db');
     expect(h.lifecycle.isClaiming(DOC_A, '2')).toBe(false);
   });
+
+  it('T-FU-CLAIM-6 기동 복구가 버전 레코드를 조회하는 사이 같은 버전이 다시 선점되면 되돌리지 않는다', async () => {
+    // ★ 버전 2 레코드가 없는 선점 상태 — 실패한 요청의 되돌리기와 재시도 선점 사이에 스냅샷이 찍힌 경우다
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, latestVersion: '2', processingState: 'uploaded' })],
+      [versionRecord({ docId: DOC_A, version: '1' })],
+    );
+    const reached = deferred<void>();
+    const gate = deferred<void>();
+    const real = h.repo.findVersion.bind(h.repo);
+    jest.spyOn(h.repo, 'findVersion').mockImplementationOnce(async (docId, version) => {
+      reached.resolve();
+      await gate.promise;
+      return real(docId, version);
+    });
+    const resuming = h.scheduler.resume();
+    await reached.promise;
+    // ★ 첫 확인(표시 없음)을 지난 뒤 재시도 요청이 같은 버전을 선점한다
+    h.lifecycle.beginClaim(DOC_A, '2');
+    gate.resolve();
+    await resuming;
+    expect(logLines('documents.resume')[0].recovered).toBe(0);
+    expect(docOf(h.db, DOC_A).latestVersion).toBe('2');
+    h.lifecycle.endClaim(DOC_A, '2');
+  });
 });
 
 describe('REQ-BE-1.9.11', () => {

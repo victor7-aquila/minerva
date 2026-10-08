@@ -398,11 +398,11 @@ export class DocumentLifecycle {
         const written = { jobId: outcome.jobId, result, failure: null };
         await this.repo.updateVersion(docId, version, written);
         if (!(await this.transition(docId, version, ['queued'], 'completed'))) {
-          // ★ 내가 쓴 값이 그대로일 때만 되돌린다
+          // ★ 내가 쓴 값이 그대로일 때만 되돌린다. 작업 ID는 요청 전에 비운 값(null)으로 돌린다
           await this.repo.updateVersion(
             docId,
             version,
-            { jobId: ver.jobId, result: ver.result, failure: ver.failure },
+            { jobId: null, result: ver.result, failure: ver.failure },
             writtenCondition(written),
           );
         }

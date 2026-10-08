@@ -1336,13 +1336,14 @@ describe('REQ-BE-1.9.4', () => {
     h.indexing.requestIndex.mockResolvedValue({ kind: 'reused', jobId: 'job-r' });
   }
 
-  it('T-TRN-3 reused 반영 뒤 completed 전이가 어긋나면 jobId·result·failure가 처음과 같다', async () => {
+  it('T-TRN-3 reused 반영 뒤 completed 전이가 어긋나면 result·failure는 처음과 같고 jobId는 요청 전에 비운 값이다', async () => {
     await seedReused();
     const before = recordedOf(DOC_A, '2');
+    expect(before).toEqual({ jobId: 'job-old', result: null, failure: failureOf('OLD') });
     failAfterFirstUpdate();
     await h.lifecycle.requestIndexFor(DOC_A, '2', true);
-    expect(recordedOf(DOC_A, '2')).toEqual(before);
-    expect(before).toEqual({ jobId: 'job-old', result: null, failure: failureOf('OLD') });
+    // ★ 같은 버전을 다시 요청하며 비운 작업 ID를 이전 작업으로 되살리지 않는다 (documents MODULE.md 「버전 처리」)
+    expect(recordedOf(DOC_A, '2')).toEqual({ ...before, jobId: null });
     expect(docOf(h.db, DOC_A).processingState).toBe('queued');
   });
 

@@ -159,6 +159,8 @@ export class DocumentsScheduler implements OnApplicationBootstrap {
     const prevRecord = prev === null ? null : await this.repo.findVersion(doc.docId, prev);
     if (prev === null || prevRecord === null) return false;
     const to: ProcessingState = prevRecord.result !== null ? 'completed' : 'failed';
+    // ★ 조회를 기다리는 사이 같은 버전을 다시 선점했을 수 있다 — 되돌리기 직전에(동기로) 한 번 더 본다
+    if (this.lifecycle.isClaiming(doc.docId, doc.latestVersion)) return false;
     const ok = await this.repo.updateDocument(
       {
         docId: doc.docId,
