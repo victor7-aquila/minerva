@@ -70,6 +70,11 @@ export class DocumentLifecycle {
    * ★ 기동 처리와 요청 처리가 같은 버전을 두 번 돌리지 않게 한다
    */
   private readonly active = new Set<string>();
+  /**
+   * 이 프로세스에서 선점한 뒤 새 버전 레코드를 쓰는(또는 되돌리는) 중인 버전의 건수다. 키는 active와 같다.
+   * ★ 기동 처리가 쓰기 전의 선점을 이전 버전으로 되돌리지 않게 한다. 같은 키를 두 요청이 잡을 수 있어 건수로 센다
+   */
+  private readonly claiming = new Map<string, number>();
   /** 기동 처리의 색인 확인(requestIndexIfIdle)이 잡고 있는 키다. */
   private readonly idleChecking = new Set<string>();
   /** 기동 처리의 색인 확인 중에 들어와 미뤄 둔 처리 시작 요청이다. 키는 active와 같다. */
@@ -183,30 +188,58 @@ export class DocumentLifecycle {
     this.logger.info({ docId, version, reason }, 'documents.processing_stopped');
   }
 
-  /** 새 버전을 쓴 뒤 그사이 삭제·교체가 남긴 것을 맞춘다. ★ 실패는 삼킨다 — 호출자의 결과·오류가 우선이다 */
-  async recheckAfterVersionWrite(docId: string): Promise<void> {
+  /** 새 버전을 쓴 뒤 그사이 삭제·교체가 남긴 것을 맞추고 그 결과를 돌려준다. */
+  async recheckAfterVersionWrite(docId: string): Promise<'deleted' | 'replaced' | null> {
+    // ★ 삭제됐으면 'deleted', 교체됐으면 'replaced', 아니면 null이다. 실패는 삼키고 null이다 — 호출자의 결과·오류가 우선이다
     try {
       const cur = await this.repo.findDocument(docId);
-      if (cur === null) return;
+      if (cur === null) return 'deleted';
       if (cur.deleted) {
+        // ★ 진행 중인 데이터 삭제가 있으면 purged:true를 쓰기 전에 다시 돌도록 먼저(동기로) 표시한다.
+        //   아래 purged:false가 그 삭제의 purged:true에 덮여도 다시 돌기가 새 버전 데이터까지 지운다 (REQ-BE-1.8.5)
+        if (this.deleting.has(docId)) this.deletingDirty.add(docId);
         // ★ 그사이 데이터 삭제가 끝났으면 방금 쓴 표·이미지·버전이 남는다. 다시 지우게 한다 (REQ-BE-1.8.5)
         await this.repo.updateDocument({ docId, deleted: true }, { purged: false });
         this.scheduleChunkDeletion(docId);
-        return;
+        return 'deleted';
       }
-      if (cur.searchState === 'replaced' && cur.processingState === 'failed') {
-        // ★ 선점 직후 교체되면 교체가 쓴 사유가 빈 버전 레코드에 덮였다 (REQ-BE-1.2.8)
-        // ★ 다시 읽은 문서의 마지막 버전에 쓴다 — 롤백 뒤에는 되돌아간 버전이다
-        await this.repo.updateVersion(
-          docId,
-          cur.latestVersion,
-          { failure: { ...REPLACED_FAILURE } },
-          { failure: null },
-        );
+      if (cur.searchState === 'replaced') {
+        if (cur.processingState === 'failed') {
+          // ★ 선점 직후 교체되면 교체가 쓴 사유가 빈 버전 레코드에 덮였다 (REQ-BE-1.2.8)
+          // ★ 다시 읽은 문서의 마지막 버전에 쓴다 — 롤백 뒤에는 되돌아간 버전이다
+          await this.repo.updateVersion(
+            docId,
+            cur.latestVersion,
+            { failure: { ...REPLACED_FAILURE } },
+            { failure: null },
+          );
+        }
+        return 'replaced';
       }
+      return null;
     } catch {
       // ★ 삼킨다 — 삭제는 주기 재요청이, 사유는 조회 때 null로 보일 뿐이다
+      return null;
     }
+  }
+
+  /** 새 버전 선점을 시작했음을 표시한다. */
+  beginClaim(docId: string, version: string): void {
+    const key = activeKey(docId, version);
+    this.claiming.set(key, (this.claiming.get(key) ?? 0) + 1);
+  }
+
+  /** 선점 표시 하나를 푼다. */
+  endClaim(docId: string, version: string): void {
+    const key = activeKey(docId, version);
+    const count = (this.claiming.get(key) ?? 0) - 1;
+    if (count > 0) this.claiming.set(key, count);
+    else this.claiming.delete(key);
+  }
+
+  /** 이 프로세스에서 진행 중인 선점인가를 돌려준다. */
+  isClaiming(docId: string, version: string): boolean {
+    return this.claiming.has(activeKey(docId, version));
   }
 
   /**
@@ -258,7 +291,10 @@ export class DocumentLifecycle {
         return false;
       }
       // ★ queued에서만 바꾼다 — 그사이 재색인이 captioning으로 바꿨으면 임시 설명을 다시 만들어야 한다
-      requested = await this.requestIndexFor(docId, version, force, ['queued']);
+      // ★ 요청이 돌아온 직후 표시한다 — 결과 반영(작업 ID 저장)이 던져도 미뤄 둔 색인부터의 시작이 같은 작업을 다시 요청하지 않는다
+      await this.requestIndexFor(docId, version, force, ['queued'], () => {
+        requested = true;
+      });
       return requested;
     } finally {
       this.active.delete(key);
@@ -299,12 +335,13 @@ export class DocumentLifecycle {
     await this.requestIndexFor(docId, version, opts.force);
   }
 
-  /** 색인 대기로 바꾸고 색인을 요청해 결과를 반영한다. 색인을 요청했으면 참이다. */
+  /** 색인 대기로 바꾸고 색인을 요청해 결과를 반영한다. 색인을 요청했으면 참이고, 요청이 돌아온 직후 onRequested를 부른다. */
   async requestIndexFor(
     docId: string,
     version: string,
     force: boolean,
     from: readonly ProcessingState[] = ['captioning', 'queued'],
+    onRequested?: () => void,
   ): Promise<boolean> {
     if (this.tasks.stopping) {
       await this.logStopped(docId, version);
@@ -321,6 +358,11 @@ export class DocumentLifecycle {
     if (doc === null || ver === null || ver.indexingMarkdown === null) {
       throw new Error('version record missing');
     }
+    // ★ 같은 버전을 다시 요청한다 — 새 작업 ID를 쓰기 전까지 작업 ID 없는 색인 대기로 둔다.
+    //   저장이 실패해도 기동 처리가 다시 요청하고 새 작업 이벤트가 반영된다 (REQ-BE-1.9.6, REQ-BE-1.9.10)
+    if (ver.jobId !== null) {
+      await this.repo.updateVersion(docId, version, { jobId: null }, { jobId: ver.jobId });
+    }
     const hints = await this.assets.hintsFor(docId, version);
     const outcome = await this.indexing.requestIndex({
       docId,
@@ -333,6 +375,8 @@ export class DocumentLifecycle {
         : null,
       force,
     });
+    // ★ 결과 반영(작업 ID 저장 등)보다 먼저 알린다
+    onRequested?.();
 
     if (outcome.kind === 'accepted') {
       await this.repo.updateVersion(docId, version, { jobId: outcome.jobId });
@@ -401,6 +445,9 @@ export class DocumentLifecycle {
     if (target === null) return true;
 
     const ver = await this.repo.findVersion(event.docId, event.version);
+    // ★ 같은 버전에 작업이 둘 생기면(기동 확인과 재색인이 겹친 경우) 기록된 작업의 이벤트만 반영한다.
+    //   작업 ID를 쓰기 전에 도착한 이벤트는 반영한다 (REQ-BE-1.9.6)
+    if (ver !== null && ver.jobId !== null && ver.jobId !== event.jobId) return true;
     const failureCode = doc.processingState === 'failed' ? (ver?.failure?.code ?? null) : null;
     const changeState = canApplyEvent(doc.processingState, failureCode, target);
     const searchable = newerSearchableVersion(doc.searchableVersion, event.searchableVersion);
@@ -599,7 +646,7 @@ export class DocumentLifecycle {
     if (doc.deleted) await this.purge(docId);
   }
 
-  /** 삭제된 문서의 표·이미지와 버전을 지운다. */
+  /** 삭제된 문서의 표·이미지와 버전을 지운다. ★ syncChunkDeletion 안에서만 부른다 (REQ-BE-1.8.5) */
   async purge(docId: string): Promise<void> {
     // ★ 청크 삭제가 성공한 뒤에만 부른다 (REQ-BE-1.8.5). 셋 다 멱등이다
     await this.assets.deleteDocument(docId);

@@ -197,6 +197,34 @@ async function holdEdit(): Promise<{ gate: Gate<void>; outcome: Promise<unknown>
   return { gate, outcome };
 }
 
+/** 선점 뒤 멈추는 새 버전 요청 경로의 이름이다. */
+type ClaimPath = 'upload' | 'edit' | 'reindex';
+
+/**
+ * 완료 문서에 새 버전 요청(경로별)을 시작해 선점 뒤 새 버전을 쓰기 전에 멈춘다.
+ * ★ 호출 전에 문서를 시드해 둔다. release로 풀면 요청이 이어진다
+ */
+async function holdClaimPath(
+  path: ClaimPath,
+): Promise<{ release: () => void; outcome: Promise<unknown> }> {
+  if (path === 'upload') {
+    const held = await holdUpload();
+    return { release: () => held.gate.resolve(PREPARED), outcome: held.outcome };
+  }
+  if (path === 'edit') {
+    h.assets.listViews.mockResolvedValue([tableView('t1', '기존')]);
+    const held = await holdEdit();
+    return { release: () => held.gate.resolve(), outcome: held.outcome };
+  }
+  const held = await holdReindex();
+  return { release: () => held.gate.resolve(), outcome: held.outcome };
+}
+
+/** 기록 입력 중 이 종류의 개수다. */
+function recordCount(docId: string, kind: string): number {
+  return recordsFor(docId).filter((record) => record.kind === kind).length;
+}
+
 /** 멈춘 동안 문서를 삭제하고 데이터 삭제(purge)까지 끝낸다. */
 async function removeAndPurge(): Promise<void> {
   await h.service.remove(DOC_A);
@@ -2105,6 +2133,82 @@ describe('REQ-BE-1.2.8', () => {
     await h.drain();
     expect(versionOf(h.db, DOC_A, '1')?.failure).toEqual(other);
   });
+
+  it.each([
+    ['내용 다시 올리기', 'upload', 'content_upload'],
+    ['요약·캡션 편집', 'edit', 'edit'],
+    ['임시 설명 없는 재색인', 'reindex', null],
+  ] as const)(
+    'T-FU-ORDER-1 %s 선점 직후 교체되면 처리 상태 기록과 처리 시작 없이 요청은 성공하고 요청 기록은 남는다',
+    async (_label, path, requestKind) => {
+      await seedDoc({ docId: DOC_A });
+      const started = jest.spyOn(h.lifecycle, 'startProcessing');
+      const held = await holdClaimPath(path);
+      // ★ 선점 직후 같은 판 문서가 검색 가능해져 교체된 순간이다
+      await h.db
+        .collection('documents')
+        .updateOne(
+          { docId: DOC_A },
+          { $set: { searchState: 'replaced', processingState: 'failed' } },
+        );
+      held.release();
+      expect(await held.outcome).toBe('resolved');
+      await h.drain();
+      expect(transitionsOf(DOC_A)).toEqual([]);
+      expect(started).not.toHaveBeenCalled();
+      expect(h.assets.generateHints).not.toHaveBeenCalled();
+      expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+      if (requestKind !== null) expect(recordCount(DOC_A, requestKind)).toBe(1);
+    },
+  );
+
+  it('T-FU-ORDER-2 임시 설명이 있는 재색인도 선점 직후 교체되면 captioning 기록과 처리 시작이 없다', async () => {
+    await seedDoc({ docId: DOC_A });
+    h.assets.markTemporaryForRegeneration.mockResolvedValue(1);
+    const started = jest.spyOn(h.lifecycle, 'startProcessing');
+    const held = await holdClaimPath('reindex');
+    await h.db
+      .collection('documents')
+      .updateOne(
+        { docId: DOC_A },
+        { $set: { searchState: 'replaced', processingState: 'failed' } },
+      );
+    held.release();
+    expect(await held.outcome).toBe('resolved');
+    await h.drain();
+    expect(transitionsOf(DOC_A)).toEqual([]);
+    expect(started).not.toHaveBeenCalled();
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+  });
+});
+
+describe('REQ-BE-1.8.3', () => {
+  it.each([
+    ['내용 다시 올리기', 'upload'],
+    ['요약·캡션 편집', 'edit'],
+    ['재색인', 'reindex'],
+  ] as const)(
+    'T-FU-ORDER-3 %s 선점 직후 삭제되면 처리 상태 기록과 처리 시작이 없다',
+    async (_label, path) => {
+      await seedDoc({ docId: DOC_A });
+      const started = jest.spyOn(h.lifecycle, 'startProcessing');
+      const held = await holdClaimPath(path);
+      await h.service.remove(DOC_A);
+      held.release();
+      const outcome = await held.outcome;
+      await h.drain();
+      // ★ 요청 결과는 지금 동작 그대로다: 편집은 마지막 getDetail이 삭제된 문서라 404다
+      // (REQ에 근거가 없는 동작이다. 명세가 정해지면 이 단언을 바꾼다)
+      if (path === 'edit') expect(outcome).toBeInstanceOf(DocumentNotFoundError);
+      else expect(outcome).toBe('resolved');
+      expect(transitionsOf(DOC_A)).toEqual([]);
+      expect(started).not.toHaveBeenCalled();
+      // 새 버전 데이터는 다시 지워진다
+      expect(docOf(h.db, DOC_A).purged).toBe(true);
+      expect(versionRows(DOC_A)).toBe(0);
+    },
+  );
 });
 
 describe('REQ-BE-1.8.6', () => {
@@ -2200,7 +2304,14 @@ async function runLogFlow(): Promise<FlowIds> {
   const done = async (docId: string, version: string): Promise<void> => {
     await h.drain();
     await h.lifecycle.onJobStateChanged(
-      jobEvent({ docId, version, jobState: 'succeeded', searchableVersion: version }),
+      // ★ 흐름의 가짜 요청은 버전에 'job-new'를 기록한다. 이벤트 jobId가 다르면 무시된다 (REQ-BE-1.9.6)
+      jobEvent({
+        docId,
+        version,
+        jobId: 'job-new',
+        jobState: 'succeeded',
+        searchableVersion: version,
+      }),
     );
   };
   h.assets.listViews.mockResolvedValue([tableView('t1', '기존')]);
@@ -2258,6 +2369,8 @@ async function runLogFlow(): Promise<FlowIds> {
   await h.lifecycle.onJobStateChanged(
     jobEvent({
       docId: fourth,
+      // ★ 흐름의 가짜 요청은 버전에 'job-new'를 기록한다. 이벤트 jobId가 다르면 무시된다 (REQ-BE-1.9.6)
+      jobId: 'job-new',
       jobState: 'failed',
       searchableVersion: null,
       result: null,

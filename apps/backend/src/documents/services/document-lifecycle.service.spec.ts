@@ -2,6 +2,8 @@ import type { ProcessingState } from '../../common';
 import {
   DOC_A,
   DOC_B,
+  DOC_C,
+  DOC_D,
   FAILMSG_SENT,
   buildDocumentsTestModule,
   deferred,
@@ -480,6 +482,147 @@ describe('REQ-BE-1.9.6', () => {
     await h.lifecycle.onJobStateChanged(jobEvent({ docId: DOC_A, jobState: 'running' }));
     await h.lifecycle.onJobStateChanged(jobEvent({ docId: DOC_A, jobState: 'queued' }));
     expect(snapshot()).toEqual(before);
+  });
+
+  /** 기록된 작업 ID와 다른 작업의 이벤트가 오기 전 문서(색인 대기, 검색 불가)와 버전을 시드한다. */
+  async function seedOtherJob(): Promise<void> {
+    await seed(
+      h.db,
+      [
+        docRecord({
+          docId: DOC_A,
+          processingState: 'queued',
+          searchState: 'not_searchable',
+          searchableVersion: null,
+        }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: 'job-2', result: null })],
+    );
+  }
+
+  it('T-FU-JOB-1 버전에 기록된 jobId와 다른 작업의 succeeded 이벤트는 상태·검색 상태·결과·기록을 바꾸지 않는다', async () => {
+    await seedOtherJob();
+    const before = snapshot();
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({ jobId: 'job-1', jobState: 'succeeded', searchableVersion: '1' }),
+    );
+    await h.drain();
+    expect(snapshot()).toEqual(before);
+    expect(transitionsOf(DOC_A)).toEqual([]);
+    expect(h.logs.recordsOf('replace')).toEqual([]);
+  });
+
+  it('T-FU-JOB-2 실패 코드 RAG_UNREACHABLE 문서도 다른 작업의 failed 이벤트로 사유가 바뀌지 않는다', async () => {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, processingState: 'failed', searchState: 'not_searchable' })],
+      [
+        versionRecord({
+          docId: DOC_A,
+          jobId: 'job-2',
+          result: null,
+          failure: {
+            code: 'RAG_UNREACHABLE',
+            message: '대체 사유',
+            headingPath: null,
+            placeholderId: null,
+          },
+        }),
+      ],
+    );
+    const before = snapshot();
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({
+        jobId: 'job-1',
+        jobState: 'failed',
+        searchableVersion: null,
+        result: null,
+        failure: {
+          code: 'PARSE_FAILED',
+          message: FAILMSG_SENT,
+          headingPath: null,
+          placeholderId: null,
+        },
+      }),
+    );
+    expect(snapshot()).toEqual(before);
+    expect(versionOf(h.db, DOC_A, '1')?.failure?.code).toBe('RAG_UNREACHABLE');
+    expect(docOf(h.db, DOC_A).processingState).toBe('failed');
+  });
+
+  it('T-FU-JOB-3 상태 맞추기에서 온 다른 작업의 이벤트도 반영하지 않는다', async () => {
+    await seedOtherJob();
+    const before = snapshot();
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({
+        jobId: 'job-1',
+        jobState: 'succeeded',
+        searchableVersion: '1',
+        source: 'reconcile',
+      }),
+    );
+    expect(snapshot()).toEqual(before);
+  });
+
+  it('T-FU-JOB-4 버전에 jobId가 아직 없으면 그 버전의 이벤트를 반영한다', async () => {
+    await seed(
+      h.db,
+      [
+        docRecord({
+          docId: DOC_A,
+          processingState: 'queued',
+          searchState: 'not_searchable',
+          searchableVersion: null,
+        }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: null, result: null })],
+    );
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({ jobId: 'job-9', jobState: 'succeeded', searchableVersion: '1' }),
+    );
+    expect(docOf(h.db, DOC_A).processingState).toBe('completed');
+    expect(versionOf(h.db, DOC_A, '1')?.result).toEqual({ chunkCount: 5, fallbackUsed: false });
+    expect(transitionsOf(DOC_A)).toHaveLength(1);
+  });
+
+  it('T-FU-JOB-5 기록된 jobId와 같은 작업의 이벤트는 반영한다', async () => {
+    await seedOtherJob();
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({ jobId: 'job-2', jobState: 'succeeded', searchableVersion: '1' }),
+    );
+    expect(docOf(h.db, DOC_A).processingState).toBe('completed');
+  });
+
+  it('T-FU-JOB-7 같은 버전을 다시 요청할 때 작업 ID 저장이 실패하면 작업 ID 없는 색인 대기로 남아 새 작업 이벤트가 반영된다', async () => {
+    // ★ 이전 작업(job-1)이 기록된 색인 대기 버전에 새 작업(job-2)이 접수되는데 작업 ID 저장만 실패한다
+    await seed(
+      h.db,
+      [
+        docRecord({
+          docId: DOC_A,
+          processingState: 'queued',
+          searchState: 'not_searchable',
+          searchableVersion: null,
+        }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: 'job-1', result: null })],
+    );
+    h.indexing.requestIndex.mockResolvedValue({ kind: 'accepted', jobId: 'job-2' });
+    const real = h.repo.updateVersion.bind(h.repo);
+    jest.spyOn(h.repo, 'updateVersion').mockImplementation(async (docId, version, set, cond) => {
+      if (set.jobId === 'job-2') throw new Error('jobId write boom');
+      return real(docId, version, set, cond);
+    });
+    await expect(h.lifecycle.requestIndexFor(DOC_A, '1', true, ['queued'])).rejects.toThrow(
+      'jobId write boom',
+    );
+    // 요청 전에 작업 ID를 비웠으므로 기동 처리가 다시 요청할 수 있는 상태다
+    expect(versionOf(h.db, DOC_A, '1')?.jobId).toBeNull();
+    // 새 작업의 이벤트는 반영된다
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({ jobId: 'job-2', jobState: 'succeeded', searchableVersion: '1' }),
+    );
+    expect(docOf(h.db, DOC_A).processingState).toBe('completed');
   });
 });
 
@@ -1347,7 +1490,61 @@ describe('REQ-BE-1.8.5', () => {
     await seedDoc({ docId: DOC_A, deleted: true, purged: true });
     jest.spyOn(h.repo, 'findDocument').mockRejectedValue(new Error('boom'));
     // ★ 삼킨다 — 호출자의 결과·오류가 우선이다
-    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_A)).resolves.toBeUndefined();
+    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_A)).resolves.toBeNull();
+  });
+
+  it('T-FU-PURGE-1 데이터 삭제가 purged를 쓰기 직전에 새 버전이 쓰이고 recheck가 돌아도 새 버전 데이터까지 지운다', async () => {
+    await seedDoc({ docId: DOC_A, deleted: true, purged: false });
+    await patchDoc(DOC_A, { 'pendingRag.deleteChunks': true });
+    // ★ purged: true를 쓰는 호출에서 멈춘다
+    const reached = deferred<void>();
+    const gate = deferred<void>();
+    const real = h.repo.updateDocument.bind(h.repo);
+    jest.spyOn(h.repo, 'updateDocument').mockImplementation(async (filter, set) => {
+      if (set.purged === true) {
+        reached.resolve();
+        await gate.promise;
+      }
+      return real(filter, set);
+    });
+    const running = h.lifecycle.syncChunkDeletion(DOC_A);
+    await reached.promise;
+    // 새 버전 쓰기를 흉내 낸다
+    await h.db
+      .collection('document_versions')
+      .insertOne({ ...versionRecord({ docId: DOC_A, version: '2' }) });
+    await h.lifecycle.recheckAfterVersionWrite(DOC_A);
+    gate.resolve();
+    await running;
+    await h.drain();
+    expect(h.db.dump('document_versions').filter((v) => v.docId === DOC_A)).toHaveLength(0);
+    expect(docOf(h.db, DOC_A).purged).toBe(true);
+    expect(h.assets.deleteDocument.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('T-FU-ORDER-4 recheckAfterVersionWrite는 삭제됨·교체됨·그대로를 돌려준다', async () => {
+    await seed(
+      h.db,
+      [
+        docRecord({ docId: DOC_A, name: 'a', deleted: true, purged: true }),
+        docRecord({ docId: DOC_B, name: 'b', searchState: 'replaced', processingState: 'failed' }),
+        docRecord({ docId: DOC_C, name: 'c' }),
+      ],
+      [
+        versionRecord({ docId: DOC_A }),
+        versionRecord({ docId: DOC_B }),
+        versionRecord({ docId: DOC_C }),
+      ],
+    );
+    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_A)).resolves.toBe('deleted');
+    // 없는 문서는 이을 처리가 없으므로 삭제된 것과 같다
+    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_D)).resolves.toBe('deleted');
+    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_B)).resolves.toBe('replaced');
+    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_C)).resolves.toBeNull();
+    await h.drain();
+    // 조회 실패는 삼키고 null이다
+    jest.spyOn(h.repo, 'findDocument').mockRejectedValue(new Error('boom'));
+    await expect(h.lifecycle.recheckAfterVersionWrite(DOC_C)).resolves.toBeNull();
   });
 });
 
@@ -1655,5 +1852,75 @@ describe('REQ-BE-1.9.10', () => {
     );
     expect(docOf(h.db, DOC_A)?.processingState).toBe('queued');
     expect(versionOf(h.db, DOC_A, '2')?.jobId).toBe('job-second');
+  });
+
+  it('T-FU-JOB-6 확인과 재색인이 겹쳐 같은 버전 작업이 둘 생기면 먼저 보낸 작업의 성공 이벤트는 무시하고 나중 작업 이벤트로 끝난다', async () => {
+    // ★ T-PR3-IDLE-4와 같은 준비: 같은 버전 2에 job-first, job-second가 차례로 접수된다
+    await seedReindexClaim();
+    const reached = deferred<void>();
+    const gate = deferred<void>();
+    release = () => gate.resolve();
+    h.assets.hintsFor.mockImplementationOnce(async () => {
+      reached.resolve();
+      await gate.promise;
+      return [];
+    });
+    h.indexing.requestIndex
+      .mockResolvedValueOnce({ kind: 'accepted', jobId: 'job-first' })
+      .mockResolvedValueOnce({ kind: 'accepted', jobId: 'job-second' });
+    const checking = h.lifecycle.requestIndexIfIdle(DOC_A, '2', true);
+    await reached.promise;
+    await patchDoc(DOC_A, { processingState: 'captioning' });
+    h.lifecycle.startProcessing(DOC_A, '2', { startAt: 'hints', force: true });
+    gate.resolve();
+    expect(await checking).toBe(true);
+    await h.drain();
+    expect(versionOf(h.db, DOC_A, '2')?.jobId).toBe('job-second');
+    const resultBefore = versionOf(h.db, DOC_A, '2')?.result;
+
+    // ① 먼저 보낸 작업의 성공 이벤트는 무시한다
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({ version: '2', jobId: 'job-first', jobState: 'succeeded', searchableVersion: '2' }),
+    );
+    expect(docOf(h.db, DOC_A).processingState).toBe('queued');
+    expect(docOf(h.db, DOC_A).searchableVersion).toBe('1');
+    expect(versionOf(h.db, DOC_A, '2')?.result).toEqual(resultBefore);
+
+    // ② 나중 작업의 성공 이벤트로 끝난다
+    await h.lifecycle.onJobStateChanged(
+      jobEvent({
+        version: '2',
+        jobId: 'job-second',
+        jobState: 'succeeded',
+        searchableVersion: '2',
+      }),
+    );
+    expect(docOf(h.db, DOC_A).processingState).toBe('completed');
+    expect(docOf(h.db, DOC_A).searchableVersion).toBe('2');
+  });
+
+  it('T-FU-IDLE-5 색인이 접수된 뒤 작업 ID 저장이 실패해도 그사이 들어온 색인부터의 시작은 다시 요청하지 않는다', async () => {
+    await seedQueued(null);
+    const hold = holdNext('findVersion');
+    const checking = h.lifecycle.requestIndexIfIdle(DOC_A, '1', false);
+    // 거부를 값으로 바꿔 처리되지 않은 거부를 막는다
+    const settled = checking.then(
+      () => null as unknown,
+      (error: unknown) => error,
+    );
+    await hold.reached;
+    // 확인이 키를 잡고 있는 동안 색인부터의 시작이 들어와 미뤄진다
+    h.lifecycle.startProcessing(DOC_A, '1', { startAt: 'index', force: false });
+    // ★ 색인은 접수되지만 작업 ID 저장이 실패한다
+    const real = h.repo.updateVersion.bind(h.repo);
+    jest.spyOn(h.repo, 'updateVersion').mockImplementation(async (docId, version, set, cond) => {
+      if ('jobId' in set) throw new Error('jobId write boom');
+      return real(docId, version, set, cond);
+    });
+    hold.open();
+    expect(await settled).toMatchObject({ message: 'jobId write boom' });
+    await h.drain();
+    // ★ 요청은 돌아온 직후 표시됐으므로 미뤄 둔 시작은 같은 작업을 다시 요청하지 않는다
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
   });
 });

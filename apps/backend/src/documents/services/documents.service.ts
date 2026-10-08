@@ -131,25 +131,35 @@ export class DocumentsService implements OnModuleInit {
     return new DocumentLockedError(CONCURRENT_EDIT_MESSAGE);
   }
 
-  /** 새 버전 번호를 선점한다. 조건부 갱신 하나로 처리 상태와 마지막 버전을 바꾼다. */
+  /**
+   * 새 버전 번호를 선점한다. 조건부 갱신 하나로 처리 상태와 마지막 버전을 바꾼다.
+   * ★ 성공하면 선점 표시를 잡은 채 돌려준다. 호출자가 endClaim으로 푼다
+   */
   private async claimNewVersion(
     doc: DocumentRecord,
     to: ProcessingState,
     extraSet: DocumentUpdate,
   ): Promise<string> {
     const next = nextVersion(doc.latestVersion);
-    const ok = await this.repo.updateDocument(
-      {
-        docId: doc.docId,
-        deleted: false,
-        searchState: { $ne: 'replaced' },
-        processingState: { $in: [...EDITABLE_STATES] },
-        latestVersion: doc.latestVersion,
-        updatedAt: doc.updatedAt,
-      },
-      { processingState: to, latestVersion: next, ...extraSet },
-    );
-    if (!ok) throw await this.lockedOrNotFound(doc.docId);
+    // ★ 조건부 갱신 전에 표시한다 — 기동 처리가 쓰기 전의 선점을 되돌리지 않게 한다
+    this.lifecycle.beginClaim(doc.docId, next);
+    try {
+      const ok = await this.repo.updateDocument(
+        {
+          docId: doc.docId,
+          deleted: false,
+          searchState: { $ne: 'replaced' },
+          processingState: { $in: [...EDITABLE_STATES] },
+          latestVersion: doc.latestVersion,
+          updatedAt: doc.updatedAt,
+        },
+        { processingState: to, latestVersion: next, ...extraSet },
+      );
+      if (!ok) throw await this.lockedOrNotFound(doc.docId);
+    } catch (error) {
+      this.lifecycle.endClaim(doc.docId, next);
+      throw error;
+    }
     return next;
   }
 
@@ -553,12 +563,18 @@ export class DocumentsService implements OnModuleInit {
         await this.rollbackClaim(doc, next, 'queued');
         await this.lifecycle.recheckAfterVersionWrite(docId);
         throw error;
+      } finally {
+        // ★ 롤백·recheck가 끝난 뒤에 푼다
+        this.lifecycle.endClaim(docId, next);
       }
-      // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다
-      await this.lifecycle.recheckAfterVersionWrite(docId);
+      // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록·처리 시작을 건너뛴다 —
+      //   교체가 남긴 실패 기록 뒤에 선점 기록이 남아 순서가 뒤집히지 않게 한다
+      const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
       await this.logs.record(editLog);
-      await this.lifecycle.recordStateChange(doc, 'queued');
-      this.lifecycle.startProcessing(docId, next, { startAt: 'index', force: false });
+      if (lost === null) {
+        await this.lifecycle.recordStateChange(doc, 'queued');
+        this.lifecycle.startProcessing(docId, next, { startAt: 'index', force: false });
+      }
     } else {
       const ok = await this.repo.updateDocument(
         {
@@ -617,9 +633,12 @@ export class DocumentsService implements OnModuleInit {
       await this.rollbackClaim(doc, next, 'uploaded');
       await this.lifecycle.recheckAfterVersionWrite(docId);
       throw error;
+    } finally {
+      // ★ 롤백·recheck가 끝난 뒤에 푼다
+      this.lifecycle.endClaim(docId, next);
     }
-    // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다
-    await this.lifecycle.recheckAfterVersionWrite(docId);
+    // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록·처리 시작을 건너뛴다
+    const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
     await this.logs.record({
       kind: 'content_upload',
       docId,
@@ -627,9 +646,11 @@ export class DocumentsService implements OnModuleInit {
       editionLabel: doc.edition?.label ?? null,
       outcome: 'success',
     });
-    await this.lifecycle.recordStateChange(doc, 'uploaded');
-    // ★ 검색 상태·searchableVersion은 건드리지 않는다 — 이전 버전이 계속 검색된다 (REQ-BE-1.6.2)
-    this.lifecycle.startProcessing(docId, next, { startAt: 'hints', force: false });
+    if (lost === null) {
+      await this.lifecycle.recordStateChange(doc, 'uploaded');
+      // ★ 검색 상태·searchableVersion은 건드리지 않는다 — 이전 버전이 계속 검색된다 (REQ-BE-1.6.2)
+      this.lifecycle.startProcessing(docId, next, { startAt: 'hints', force: false });
+    }
     return {
       doc_id: docId,
       name: doc.name,
@@ -665,9 +686,13 @@ export class DocumentsService implements OnModuleInit {
       await this.rollbackClaim(doc, next, 'queued');
       await this.lifecycle.recheckAfterVersionWrite(docId);
       throw error;
+    } finally {
+      // ★ 롤백·recheck가 끝난 뒤에 푼다
+      this.lifecycle.endClaim(docId, next);
     }
-    // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다
-    await this.lifecycle.recheckAfterVersionWrite(docId);
+    // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록·처리 시작을 건너뛴다
+    const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
+    if (lost !== null) return;
 
     if (count > 0) {
       // ★ 임시 설명이 있으면 다시 만든다. 기록에는 최종 상태만 남긴다 (D6)
