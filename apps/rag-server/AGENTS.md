@@ -13,7 +13,7 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 
 ## 코딩 규칙
 
-- 로그는 structlog 구조화 이벤트로만 남긴다. 모듈 맨 위에 `log = get_logger(__name__)`를 두고, 이벤트명은 `모듈.동작` 형식으로 쓴다 (예: `log.info("store.upsert", doc_id=doc_id, chunks=len(chunks))`). `print()`나 f-string으로 조립한 메시지를 로그로 남기지 않는다
+- 로그는 structlog 구조화 이벤트로만 남긴다. 모듈 맨 위에 `log = get_logger(__name__)`를 두고, 이벤트명은 `모듈.동작` 형식으로 쓴다 (예: `log.info("resource.upsert", doc_id=doc_id, chunks=len(chunks))`). `print()`나 f-string으로 조립한 메시지를 로그로 남기지 않는다
 - 서비스 계층의 공개 함수는 진입 시 로그 이벤트를 남긴다. 실패해도 정상 응답이 나갈 수 있는 함수(폴백이 있는 함수)는 종료 시에도 남긴다
 - 서비스 계층에서 도메인 예외는 `log.warning`으로 남기고 그대로 전파한다. 그 밖의 예외는 `log.exception`으로 스택을 남긴다. 라우터마다 try/except를 두지 않고 전역 예외 핸들러로 처리한다
 - Ollama·Qdrant 같은 I/O 호출은 `async`로 쓴다. BM25 스코어링·PyTorch 추론 같은 CPU 작업은 `asyncio.to_thread`로 감싼다 — 이벤트 루프를 막지 않기 위해서다
@@ -26,7 +26,7 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 ## 테스트 규칙
 
 - 도구는 pytest를 쓴다
-- 모든 테스트에 검증하는 REQ ID를 `@pytest.mark.req("REQ-RAG-1.2.3")` 마커로 달고, docstring 첫 줄에도 `[REQ-RAG-1.2.3]`으로 적는다. REQ ID 없는 테스트를 추가하지 않는다
+- 모든 테스트에 검증하는 REQ ID를 `@pytest.mark.req("REQ-RAG-4.1.1")` 마커로 달고, docstring 첫 줄에도 `[REQ-RAG-4.1.1]`으로 적는다. REQ ID 없는 테스트를 추가하지 않는다
 - 테스트 함수명은 영문 snake_case로 짧게 쓰고, 무엇을 왜 검증하는지는 한국어 docstring에 쓴다
 - LLM 호출은 mock으로 대체한다. LLM 응답·임베딩 벡터처럼 실행마다 달라지는 값은 정확한 값이 아니라 지켜야 할 성질만 검증한다
 - 검색 품질(정확도 임계값)은 pytest에서 검증하지 않는다 — 품질은 평가 API(`REQ-RAG-6`)로 Console의 골든셋 평가에서 잰다. pytest는 평가 지표의 계산 규칙만 검증한다

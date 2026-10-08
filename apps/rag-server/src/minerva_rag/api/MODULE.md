@@ -6,7 +6,7 @@ Backend의 HTTP 요청을 받아 service로 넘기는 진입점이다. `API.md`�
 
 **핵심 계약**
 
-- 라우터는 service만 부른다. 기능 단위나 store·models를 직접 부르지 않는다 (`ARCHITECT.md` 「의존 규칙」)
+- 라우터는 service만 부른다. 기능 단위나 resource를 직접 부르지 않는다 (`ARCHITECT.md` 「의존 규칙」)
 - 모든 실패 응답은 `API.md` 「공통 규약」의 본문이고, 예외는 전역 처리기 한 곳에서 바꾼다. 응답에 스택 트레이스, 쿼리, 파일 경로, 예외 문자열이 나가지 않는다 (`REQ-RAG-11.3`, `AGENTS.md`)
 - 형식이 잘못된 요청은 FastAPI 기본값(422)이 아니라 `400 INVALID_REQUEST`다 (`REQ-RAG-9.1.2`)
 - 상태 확인은 준비 전에도, 다른 요청은 준비 뒤에만 처리된다 (`REQ-RAG-10.1.2`)
@@ -56,10 +56,10 @@ tests/unit/api/
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
 | 요청 처리 | `create_app()` | 「요청 처리 — REQ-RAG-9.1」 | `REQ-RAG-9.1` |
-| 요청 처리 | `POST /v1/captions/table`, `POST /v1/captions/image` | `API.md` | `REQ-RAG-1`, `REQ-RAG-10.2` |
-| 요청 처리 | `POST /v1/index-jobs`, `GET /v1/index-jobs/{job_id}` | `API.md` | `REQ-RAG-7`, `REQ-RAG-10.3` |
+| 요청 처리 | `POST /v1/captions/table`, `POST /v1/captions/image` | `API.md` | `REQ-RAG-10.2` |
+| 요청 처리 | `POST /v1/index-jobs`, `GET /v1/index-jobs/{job_id}` | `API.md` | `REQ-RAG-10.8`, `REQ-RAG-10.3` |
 | 요청 처리 | `DELETE /v1/documents/{doc_id}`, `PUT /v1/documents/{doc_id}/metadata` | `API.md` | `REQ-RAG-10.5`, `REQ-RAG-10.6` |
-| 요청 처리 | `GET /v1/documents/{doc_id}/index-state`, `POST /v1/documents/index-states` | `API.md` | `REQ-RAG-7.6` |
+| 요청 처리 | `GET /v1/documents/{doc_id}/index-state`, `POST /v1/documents/index-states` | `API.md` | `REQ-RAG-10.8.6` |
 | 요청 처리 | `GET /v1/documents/{doc_id}/chunks`, `POST /v1/search` | `API.md` | `REQ-RAG-4`, `REQ-RAG-10.4` |
 | 요청 처리 | `POST /v1/evaluations` | `API.md` | `REQ-RAG-6`, `REQ-RAG-10.7` |
 | 상태 확인 | `GET /v1/health` (토큰 검사 없음) | `API.md` | `REQ-RAG-9.2.1` |

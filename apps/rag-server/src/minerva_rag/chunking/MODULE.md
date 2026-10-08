@@ -23,7 +23,7 @@ Backend가 보낸 색인용 MD를 검색 단위인 청크(`IF-RAG-1`의 `Chunk`)
 **비범위**
 
 - 자리표시를 요약·캡션으로 바꾼 색인 텍스트 — indexing (`REQ-RAG-3.1`)
-- 청킹 실패를 작업 실패로 기록하는 일 — service, jobs (`REQ-RAG-10.3.3`)
+- 청킹 실패를 작업 실패로 기록하는 일 — service (`REQ-RAG-10.3.3`)
 
 ## 구조
 
@@ -42,8 +42,8 @@ tests/unit/chunking/
 
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| models | import | `ModelHub.generate`(`LlmRole.CHUNKING`), `ModelHub.count_tokens` | models `MODULE.md` | `REQ-RAG-2.1.1`, `REQ-RAG-2.5` |
-| core | import | `Chunk`, `ChunkKind`, `ChunkingResult`, `find_placeholders`, `Placeholder`, `ChunkingFailedError`, `FailureLocation`, `Settings`, `get_logger` | `IF-RAG-1`, `IF-RAG-2`, core `MODULE.md` | `REQ-RAG-2` |
+| resource | import | `ModelHub.generate`(`LlmRole.CHUNKING`), `ModelHub.count_tokens` | resource `MODULE.md` | `REQ-RAG-2.1.1`, `REQ-RAG-2.5` |
+| core | import | `Chunk`, `ChunkKind`, `ChunkingResult`, `find_placeholders`, `Placeholder`, `ChunkingFailedError`, `FailureLocation`, `Settings`, `get_logger` | `IF-RAG-1`, core `MODULE.md` | `REQ-RAG-2` |
 
 ### 공개 표면
 
@@ -65,7 +65,7 @@ class ChunkingMode(StrEnum):
 class Chunker:
     """색인용 MD를 청크로 나눈다."""
 
-    def __init__(self, models: ModelHub, settings: Settings) -> None: ...
+    def __init__(self, model_hub: ModelHub, settings: Settings) -> None: ...
     async def split(self, markdown: str, mode: ChunkingMode) -> ChunkingResult: ...
 ```
 
@@ -74,7 +74,7 @@ class Chunker:
 **`REQ-RAG-2.1.1`** 의미 단위로 나누기
 
 - 처리 계약: `mode`가 `SEMANTIC`이면 `LlmRole.CHUNKING`으로 청크 경계를 정한다. 본문 청크의 `text`는 원문 구간 그대로다(「요약」 핵심 계약)
-- 실패: LLM 응답을 경계로 해석할 수 없거나 models가 `PromptTooLongError`를 내면 `ChunkingFailedError`를 내고, 위치에 그 부분의 헤딩 경로를 담는다. Ollama 연결 실패는 `ModelUnavailableError`를 그대로 낸다
+- 실패: LLM 응답을 경계로 해석할 수 없거나 resource가 `PromptTooLongError`를 내면 `ChunkingFailedError`를 내고, 위치에 그 부분의 헤딩 경로를 담는다. Ollama 연결 실패는 `ModelUnavailableError`를 그대로 낸다
 - 충족 기준: LLM이 정한 경계대로 본문 청크가 만들어지고, 본문 청크의 `text`를 순서대로 이으면 경계 공백을 빼고 입력과 같다. 해석할 수 없는 응답이면 `ChunkingFailedError`가 난다
 
 **`REQ-RAG-2.1.2`** 본문 청크의 제목과 요약
@@ -137,7 +137,7 @@ class Chunker:
 
 **`REQ-RAG-2.3.3`** 대체 분할 사실 남기기
 
-- 처리 계약: 어느 부분이든 대체 분할을 쓰면 `ChunkingResult.fallback_used`가 `True`다. 작업 결과에 옮기는 일은 service가 한다(`IF-RAG-2`의 `IndexOutcome`)
+- 처리 계약: 어느 부분이든 대체 분할을 쓰면 `ChunkingResult.fallback_used`가 `True`다. 작업 결과에 옮기는 일은 service가 한다(service `MODULE.md`의 `IndexOutcome`)
 - 충족 기준: 한 부분이라도 대체 분할로 나뉘면 `fallback_used`가 `True`, 아니면 `False`다
 
 ### 표·이미지 청크 — `REQ-RAG-2.4`
@@ -245,7 +245,7 @@ flowchart TB
 | 예외 | 발생 조건 | 코드·상태 | 처리 책임 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | `ChunkingFailedError` | LLM의 경계·제목·요약 응답을 해석할 수 없다 | 작업 실패 사유 `CHUNKING_FAILED` | 발생: chunking. 변환: service | `REQ-RAG-2.1.1`, `REQ-RAG-2.1.2` |
-| `ModelUnavailableError` | Ollama 연결 실패 | 작업 실패 사유 `MODEL_UNAVAILABLE` | 발생: models. 전파: chunking | `REQ-RAG-12.1.2` |
+| `ModelUnavailableError` | Ollama 연결 실패 | 작업 실패 사유 `MODEL_UNAVAILABLE` | 발생: resource. 전파: chunking | `REQ-RAG-12.1.2` |
 
 ### 로그
 
@@ -267,29 +267,29 @@ LLM 응답은 mock으로 대체하고, 실행마다 달라지는 값은 성질�
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-2.1.1` | unit | LLM 경계대로 나뉨, 원문 보존, 해석 불가 응답 시 `ChunkingFailedError`와 위치 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.1.2` | unit | 세 방식 모두 제목·요약 있음, 조각은 원래 값 유지, 해석 불가 시 실패 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.1.3` | unit | 헤딩 경로, 여러 절에 걸친 청크, 헤딩 앞 본문 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.1.4` | unit | 본문 청크 순서 증가, 조각은 같은 순서 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.1.5` | unit | 코드 블록 중간 경계 없음, 원문 그대로 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.1.6` | unit | 규칙 분할 경계가 헤딩 앞, 경계 LLM 호출 없음 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.1.7` | unit | 헤딩만 있는 청크가 다음 청크에 합쳐짐 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.2.1` | unit | 자리표시 목록이 입력과 같음 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.2.2` | unit | 자리표시 일부만 든 청크 없음 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.2.3` | unit | `placeholder_ids`가 본문과 일치 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.3.1` | unit | 검증 실패 뒤 다시 시도해 성공 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.3.2` | unit | 횟수 소진 시 호출 중단과 규칙 분할 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.3.3` | unit | `fallback_used` 참·거짓 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.4.1` | unit | 자리표시마다 `ASSET` 청크 하나 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.4.2` | unit | `ASSET` 본문이 자리표시 하나 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.4.3` | unit | `ASSET` 헤딩 경로 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.4.4` | unit | `ASSET` 순서가 담은 조각의 순서 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.1.1` | unit | 경계 단계 순서, 상한 이하, 긴 문장 하나 | models (mock, 토큰 수 고정) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.1.2` | unit | 조각의 헤딩 경로·제목 유지 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.1.3` | unit | 조각 번호·조각 수, 나뉘지 않은 청크는 `None` | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.1.4` | unit | 큰 코드 블록의 줄 경계 분할과 펜스·언어 표시 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.1.5` | unit | 재분할 뒤 자리표시 잘림 없음 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.1.6` | unit | 조각 이음이 원래 청크와 같고 겹침 없음 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.2.1` | unit | 한도 초과 문서의 헤딩 기준 사전 분할 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.2.2` | unit | 모든 분할 LLM 입력이 한도 이하 | models (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.3.1` | unit | 조각끼리 같은 `split_group`, 청크끼리 다름 | models (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.1` | unit | LLM 경계대로 나뉨, 원문 보존, 해석 불가 응답 시 `ChunkingFailedError`와 위치 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.2` | unit | 세 방식 모두 제목·요약 있음, 조각은 원래 값 유지, 해석 불가 시 실패 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.3` | unit | 헤딩 경로, 여러 절에 걸친 청크, 헤딩 앞 본문 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.4` | unit | 본문 청크 순서 증가, 조각은 같은 순서 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.5` | unit | 코드 블록 중간 경계 없음, 원문 그대로 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.6` | unit | 규칙 분할 경계가 헤딩 앞, 경계 LLM 호출 없음 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.7` | unit | 헤딩만 있는 청크가 다음 청크에 합쳐짐 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.2.1` | unit | 자리표시 목록이 입력과 같음 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.2.2` | unit | 자리표시 일부만 든 청크 없음 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.2.3` | unit | `placeholder_ids`가 본문과 일치 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.3.1` | unit | 검증 실패 뒤 다시 시도해 성공 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.3.2` | unit | 횟수 소진 시 호출 중단과 규칙 분할 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.3.3` | unit | `fallback_used` 참·거짓 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.4.1` | unit | 자리표시마다 `ASSET` 청크 하나 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.4.2` | unit | `ASSET` 본문이 자리표시 하나 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.4.3` | unit | `ASSET` 헤딩 경로 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.4.4` | unit | `ASSET` 순서가 담은 조각의 순서 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.1.1` | unit | 경계 단계 순서, 상한 이하, 긴 문장 하나 | resource (mock, 토큰 수 고정) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.1.2` | unit | 조각의 헤딩 경로·제목 유지 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.1.3` | unit | 조각 번호·조각 수, 나뉘지 않은 청크는 `None` | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.1.4` | unit | 큰 코드 블록의 줄 경계 분할과 펜스·언어 표시 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.1.5` | unit | 재분할 뒤 자리표시 잘림 없음 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.1.6` | unit | 조각 이음이 원래 청크와 같고 겹침 없음 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.2.1` | unit | 한도 초과 문서의 헤딩 기준 사전 분할 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.2.2` | unit | 모든 분할 LLM 입력이 한도 이하 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.3.1` | unit | 조각끼리 같은 `split_group`, 청크끼리 다름 | resource (mock) | `tests/unit/chunking/` |

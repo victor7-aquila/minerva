@@ -7,7 +7,7 @@
 | ID | 계약 | 참여 단위 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
 | `IF-1` | 자리표시 | Backend assets, RAG Server chunking·indexing·search | `REQ-BE-2.1`, `REQ-BE-2.2`, `REQ-BE-2.3`, `REQ-BE-4.2`, `REQ-RAG-2.2`, `REQ-RAG-2.4`, `REQ-RAG-3.1`, `REQ-RAG-4.3.4` |
-| `IF-2` | 작업 상태 알림 | RAG Server jobs, Backend indexing | `REQ-RAG-7.2`, `REQ-RAG-7.6`, `REQ-RAG-7.7`, `REQ-BE-3.2` |
+| `IF-2` | 작업 상태 알림 | RAG Server service, Backend indexing | `REQ-RAG-10.8.2`, `REQ-RAG-10.8.6`, `REQ-RAG-10.8.7`, `REQ-BE-3.2` |
 
 ## IF-1 자리표시
 
@@ -60,13 +60,13 @@ Backend는 원본 MD의 표·이미지 자리를 자리표시로 바꾼 색인�
 
 ## IF-2 작업 상태 알림
 
-RAG Server의 jobs는 작업 상태가 바뀔 때마다 Backend에 알리고, Backend는 이를 받아 문서 상태를 갱신하며 Console은 Backend를 다시 조회해 상태를 본다. 보내는 쪽이 RAG Server이고 받는 쪽이 Backend라, RAG Server가 제공하는 API(`apps/rag-server/API.md`)에 넣을 수 없다.
+RAG Server의 service는 작업 상태가 바뀔 때마다 Backend에 알리고, Backend는 이를 받아 문서 상태를 갱신하며 Console은 Backend를 다시 조회해 상태를 본다. 보내는 쪽이 RAG Server이고 받는 쪽이 Backend라, RAG Server가 제공하는 API(`apps/rag-server/API.md`)에 넣을 수 없다.
 
 ### 참여 단위
 
 | 단위 | 역할 | 관련 REQ |
 | :--- | :--- | :--- |
-| RAG Server jobs | 정의, 생산 | `REQ-RAG-7.2`, `REQ-RAG-7.6`, `REQ-RAG-7.7` |
+| RAG Server service | 정의, 생산 | `REQ-RAG-10.8.2`, `REQ-RAG-10.8.6`, `REQ-RAG-10.8.7` |
 | Backend indexing | 소비 | `REQ-BE-3.2` |
 
 ### 계약 표면
@@ -79,7 +79,7 @@ RAG Server는 설정한 Backend 알림 주소로 HTTP `POST`를 보낸다. 요�
 | `job_id` | string | 필수 | 상태가 바뀐 작업의 ID |
 | `version` | string | 필수 | 그 작업이 색인하는 문서 버전 |
 | `job_state` | string | 필수 | `queued`·`running`·`succeeded`·`failed`·`superseded` 중 하나 (색인 대기·색인 중·완료·실패·대체됨) |
-| `index_state` | object | 필수 | 알림을 보내는 시점의 문서 색인 상태(`REQ-RAG-7.6.1`) |
+| `index_state` | object | 필수 | 알림을 보내는 시점의 문서 색인 상태(`REQ-RAG-10.8.6.1`) |
 | `index_state.searchable_version` | string 또는 null | 필수 | 현재 검색되는 버전. 없으면 `null` |
 | `index_state.latest_job_id` | string | 필수 | 그 문서의 최신 작업 ID |
 | `index_state.latest_job_state` | string | 필수 | 그 문서의 최신 작업 상태. 값은 `job_state`와 같은 목록 |
@@ -92,20 +92,20 @@ Backend가 2xx로 응답하면 받은 것으로 본다. 알림 토큰이 없거�
 
 ### 의무
 
-- **RAG Server jobs** (정의, 생산) — 보장: 작업 상태가 바뀔 때마다 알림을 하나 보낸다(`REQ-RAG-7.7.1`). 색인 중 단계가 바뀌는 것은 알리지 않는다(`REQ-RAG-7.7.2`). 2xx를 받지 못하면 설정한 횟수(기본 5회)만큼, 1초에서 시작해 두 배씩 늘어나는 간격으로 다시 보낸다(`REQ-RAG-7.7.3`). 같은 알림을 다시 보낼 때는 `sequence`를 바꾸지 않는다(`REQ-RAG-7.7.4`). 모든 알림에 알림 토큰을 담는다(`REQ-RAG-7.7.5`). 알림을 보내기 전에 그 상태와 결과·실패 사유를 기록해, 알림을 받은 뒤의 작업 조회가 알림과 같거나 더 나중의 상태를 돌려준다(`REQ-RAG-7.2.2`, `REQ-RAG-7.2.4`, `REQ-RAG-7.2.6`). 금지: 알림 외에 Backend의 다른 기능을 호출하지 않는다(`apps/rag-server/ARCHITECT.md` 「의존 규칙」).
+- **RAG Server service** (정의, 생산) — 보장: 작업 상태가 바뀔 때마다 알림을 하나 보낸다(`REQ-RAG-10.8.7.1`). 색인 중 단계가 바뀌는 것은 알리지 않는다(`REQ-RAG-10.8.7.2`). 2xx를 받지 못하면 설정한 횟수(기본 5회)만큼, 1초에서 시작해 두 배씩 늘어나는 간격으로 다시 보낸다(`REQ-RAG-10.8.7.3`). 같은 알림을 다시 보낼 때는 `sequence`를 바꾸지 않는다(`REQ-RAG-10.8.7.4`). 모든 알림에 알림 토큰을 담는다(`REQ-RAG-10.8.7.5`). 알림을 보내기 전에 그 상태와 결과·실패 사유를 기록해, 알림을 받은 뒤의 작업 조회가 알림과 같거나 더 나중의 상태를 돌려준다(`REQ-RAG-10.8.2.2`, `REQ-RAG-10.8.2.4`, `REQ-RAG-10.8.2.6`). 금지: 알림 외에 Backend의 다른 기능을 호출하지 않는다(`apps/rag-server/ARCHITECT.md` 「의존 규칙」).
 - **Backend indexing** (소비) — 보장: 알림 토큰이 맞으면 2xx로 응답하고(`REQ-BE-3.2.1`), 없거나 다르면 `401`로 응답하고 반영하지 않는다(`REQ-BE-3.2.5`). 문서마다 이미 반영한 `sequence`보다 작거나 같은 알림은 반영하지 않으며, 같은 알림을 두 번 받아도 결과가 같다(`REQ-BE-3.2.4`). 알림이 끝내 오지 않아도 주기적으로 색인 상태를 조회해 맞춘다(`REQ-BE-3.3.1`). `succeeded` 알림의 결과를 조회하지 못하면 그 알림을 반영하지 않고(순번도 올리지 않는다) 상태 맞추기에 맡기며, `failed` 알림의 실패 사유를 조회하지 못하면 사유 코드 `RAG_UNREACHABLE`로 반영한다(`REQ-BE-3.2.2`·`REQ-BE-3.2.3`을 구체화한 `apps/backend/src/indexing/MODULE.md`의 결정). 받는 주소는 `apps/backend/API.md`의 `POST /v1/internal/rag-events`다. 전제: RAG Server의 `sequence` 보장과 작업 조회 보장.
 
 ### 오류
 
 | 실패 | 발생 단위 | 전달 형태 | 받는 단위의 처리 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| 알림 전송 실패·2xx 아닌 응답(`401`·`400` 포함) | Backend 또는 네트워크 | HTTP 응답·연결 실패 | RAG Server jobs가 설정한 횟수만큼 다시 보낸다 | `REQ-RAG-7.7.3` |
+| 알림 전송 실패·2xx 아닌 응답(`401`·`400` 포함) | Backend 또는 네트워크 | HTTP 응답·연결 실패 | RAG Server service가 설정한 횟수만큼 다시 보낸다 | `REQ-RAG-10.8.7.3` |
 
 ### 검증
 
 | 검증할 것 | 담당 단위 | 종류 | 대체 경계 |
 | :--- | :--- | :--- | :--- |
-| 상태 변경마다 알림, 단계 변경은 알리지 않음, 재전송 횟수, `sequence` 증가·재전송 시 유지, 알림 토큰 헤더 | RAG Server jobs | unit | Backend (가짜 HTTP 수신자) |
-| 알림 전 상태·결과·실패 사유 기록 | RAG Server jobs | unit | `IndexRunner` (가짜), Backend (가짜 HTTP 수신자) |
+| 상태 변경마다 알림, 단계 변경은 알리지 않음, 재전송 횟수, `sequence` 증가·재전송 시 유지, 알림 토큰 헤더 | RAG Server service | unit | Backend (가짜 HTTP 수신자) |
+| 알림 전 상태·결과·실패 사유 기록 | RAG Server service | unit | `IndexRunner` (가짜), Backend (가짜 HTTP 수신자) |
 | 2xx 응답, 오래된 `sequence` 무시, 중복 수신, 토큰 불일치 `401`, 본문 오류 `400`, 결과·실패 사유 조회 실패 처리 | Backend indexing | unit | RAG Server (가짜 알림, 가짜 작업 조회) |
 
