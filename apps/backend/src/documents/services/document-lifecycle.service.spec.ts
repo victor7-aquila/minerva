@@ -1626,4 +1626,34 @@ describe('REQ-BE-1.9.10', () => {
     await h.drain();
     expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
   });
+
+  it('T-PR3-IDLE-4 확인이 상태를 바꾼 뒤 재색인이 captioning으로 바꾸면 표·이미지 처리 뒤 색인을 다시 요청한다', async () => {
+    await seedReindexClaim();
+    // ★ 확인의 상태 전이(queued→queued) 뒤, 색인 요청 전(hintsFor)에서 멈춘다
+    const reached = deferred<void>();
+    const gate = deferred<void>();
+    release = () => gate.resolve();
+    h.assets.hintsFor.mockImplementationOnce(async () => {
+      reached.resolve();
+      await gate.promise;
+      return [];
+    });
+    h.indexing.requestIndex
+      .mockResolvedValueOnce({ kind: 'accepted', jobId: 'job-first' })
+      .mockResolvedValueOnce({ kind: 'accepted', jobId: 'job-second' });
+    const checking = h.lifecycle.requestIndexIfIdle(DOC_A, '2', true);
+    await reached.promise;
+    await patchDoc(DOC_A, { processingState: 'captioning' });
+    h.lifecycle.startProcessing(DOC_A, '2', { startAt: 'hints', force: true });
+    gate.resolve();
+    expect(await checking).toBe(true);
+    await h.drain();
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(2);
+    expect(h.assets.generateHints.mock.invocationCallOrder[0]).toBeLessThan(
+      h.indexing.requestIndex.mock.invocationCallOrder[1],
+    );
+    expect(docOf(h.db, DOC_A)?.processingState).toBe('queued');
+    expect(versionOf(h.db, DOC_A, '2')?.jobId).toBe('job-second');
+  });
 });
