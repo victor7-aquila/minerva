@@ -26,7 +26,7 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 ## 테스트 규칙
 
 - 도구는 pytest를 쓴다
-- 모든 테스트에 검증하는 REQ ID를 `@pytest.mark.req("REQ-RAG-1.2.3")` 마커로 달고, docstring 첫 줄에도 `[REQ-RAG-1.2.3]`으로 적는다. REQ ID 없는 테스트를 추가하지 않는다
+- 모든 테스트에 검증하는 REQ ID를 `@pytest.mark.req("REQ-RAG-4.1.1")` 마커로 달고, docstring 첫 줄에도 `[REQ-RAG-4.1.1]`으로 적는다. REQ ID 없는 테스트를 추가하지 않는다
 - 테스트 함수명은 영문 snake_case로 짧게 쓰고, 무엇을 왜 검증하는지는 한국어 docstring에 쓴다
 - LLM 호출은 mock으로 대체한다. LLM 응답·임베딩 벡터처럼 실행마다 달라지는 값은 정확한 값이 아니라 지켜야 할 성질만 검증한다
 - 검색 품질(정확도 임계값)은 pytest에서 검증하지 않는다 — 품질은 평가 API(`REQ-RAG-6`)로 Console의 골든셋 평가에서 잰다. pytest는 평가 지표의 계산 규칙만 검증한다

@@ -61,7 +61,7 @@ flowchart LR
 
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| resource | import | `ModelHub`의 `embed_documents`, `encode_sparse_documents`, `embedding_model_name`. `ChunkStore`의 쓰기 메서드, `active_records`, `active_editions`, `job_records` | resource `MODULE.md` | `REQ-RAG-3.2`, `REQ-RAG-3.3`, `REQ-RAG-3.4`, `REQ-RAG-3.5.2`, `REQ-RAG-3.6`, `REQ-RAG-7.5.3` |
+| resource | import | `ModelHub`의 `embed_documents`, `encode_sparse_documents`, `embedding_model_name`. `ChunkStore`의 쓰기 메서드, `active_records`, `active_editions`, `job_records` | resource `MODULE.md` | `REQ-RAG-3.2`, `REQ-RAG-3.3`, `REQ-RAG-3.4`, `REQ-RAG-3.5.2`, `REQ-RAG-3.6`, `REQ-RAG-10.8.5.3` |
 | core | import | `Chunk`, `ChunkingResult`, `ChunkRecord`, `Edition`, `SparseVector`, `find_placeholders`, `Settings`, `get_logger` | `IF-RAG-1`, core `MODULE.md` | `REQ-RAG-3` |
 
 **금지 의존** — chunking·service를 import하지 않는다. 청킹 방식은 문자열 값으로 받는다(`ARCHITECT.md` 「의존 규칙」).
@@ -75,7 +75,7 @@ flowchart LR
 | 문서 삭제 | `Indexer.delete_document` | 「문서 삭제 — REQ-RAG-3.4」 | `REQ-RAG-3.4` |
 | 중복 색인 방지 | `Indexer.checksum`, `decide_index`, `IndexDecision` | 「중복 색인 방지 — REQ-RAG-3.5」 | `REQ-RAG-3.5` |
 | 이름·판 정보 | `Indexer.update_metadata` | 「이름·판 정보 — REQ-RAG-3.6」 | `REQ-RAG-3.6` |
-| 기동 복구 | `Indexer.recover` | 「기동 복구」 | `REQ-RAG-7.5.3` |
+| 기동 복구 | `Indexer.recover` | 「기동 복구」 | `REQ-RAG-10.8.5.3` |
 
 ## 데이터 계약
 
@@ -276,7 +276,7 @@ resource의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `Mod
 
 ### 기동 복구
 
-이 그룹은 service의 색인 작업 관리가 `REQ-RAG-7.5.3`을 지키게 하는 확인 함수(service `MODULE.md`의 `RecoverFn`)다. service가 기동할 때 작업 관리에 넘긴다.
+이 그룹은 service의 색인 작업 관리가 `REQ-RAG-10.8.5.3`을 지키게 하는 확인 함수(service `MODULE.md`의 `RecoverFn`)다. service가 기동할 때 작업 관리에 넘긴다.
 
 - 처리 계약: `recover(doc_id, job_id)`는 `job_records`로 그 작업의 레코드를 읽는다. active 레코드가 있으면 「핵심 흐름」의 4·5를 마저 하고(그 작업의 레코드 말고는 지우고 최신판 표시를 맞춘다) 참을 돌려준다. active 레코드가 없으면 남은 레코드를 지우고 거짓을 돌려준다. 여러 번 불러도 결과가 같다
 - 충족 기준: 활성화 뒤 이전 레코드를 지우기 전 상태에서 부르면 참이고 이전 레코드가 지워지며, 저장만 하고 활성화하지 않은 상태에서 부르면 거짓이고 그 레코드가 지워진다. 레코드가 없으면 거짓이다
@@ -352,4 +352,4 @@ flowchart TB
 | `REQ-RAG-3.6.5` | unit | 이름·판 변경, 모델 호출 없음, 옛·새 이름 재계산 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.6.6` | unit | 같은 이름·판 다른 문서 레코드 유지 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.6.7` | unit | 레코드 없는 문서 이름 변경이 오류 없음 | resource (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-7.5.3` | unit | `recover`의 참·거짓과 남은 정리, 여러 번 불러도 같음 (기동 복구) | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-10.8.5.3` | unit | `recover`의 참·거짓과 남은 정리, 여러 번 불러도 같음 (기동 복구) | resource (가짜) | `tests/unit/indexing/` |

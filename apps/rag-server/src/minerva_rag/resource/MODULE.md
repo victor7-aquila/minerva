@@ -1,4 +1,4 @@
-# resource 모듈 명세 (REQ-RAG-12, REQ-RAG-13)
+# resource 모듈 명세 (REQ-RAG-12)
 
 RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한 통로다. Ollama의 LLM·VLM(청킹, 표 요약, 이미지 캡션)과 프로세스 안의 sentence-transformers 모델(임베딩, 재정렬)을 감싸고, 색인과 질의가 같은 방식으로 만들어야 하는 dense·키워드 벡터를 한 곳에서 만든다. 또 Qdrant에 연결해 청크 레코드(`IF-RAG-1`의 `ChunkRecord`)와 dense·키워드 벡터를 저장·삭제·조회한다. 레코드의 필드를 스스로 채우거나 바꾸지 않고 받은 그대로 저장하며, 저장된 벡터 차원이 지금 임베딩 모델과 다르면 저장도 조회도 하지 않는다. 폴더는 `apps/rag-server/src/minerva_rag/resource`다.
 
@@ -9,18 +9,18 @@ RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한
 - 문서와 질의의 dense 벡터는 같은 임베딩 모델로, 키워드 벡터는 같은 토큰화로 만든다. 한쪽만 바뀌면 오류 없이 검색 결과가 틀어진다 (`REQ-RAG-3.2`, `REQ-RAG-4.1.1`)
 - 설정한 모델을 하나라도 불러오지 못하면 기동하지 않는다 (`REQ-RAG-12.1.1`)
 - 생성 요청은 Ollama의 기본 컨텍스트에 맡기지 않는다. 요청마다 `RAG_LLM_CONTEXT_TOKENS`를 지정하고, 넘치는 입력은 보내지 않고 오류를 낸다. Ollama는 컨텍스트를 넘는 입력을 오류 없이 잘라 쓰기 때문이다 (`REQ-RAG-2.5.2.2`)
-- 생각 모드를 끄고 생성한다. 생각 과정이 응답에 섞이면 부른 단위의 응답 해석이 깨진다 (`REQ-RAG-2.1.1`, `REQ-RAG-1.1.1`)
+- 생각 모드를 끄고 생성한다. 생각 과정이 응답에 섞이면 부른 단위의 응답 해석이 깨진다 (`REQ-RAG-2.1.1`, `REQ-RAG-10.2.2.1`)
 - 외부에서 호스팅하는 모델 API를 부르지 않는다. LLM·VLM은 설정한 Ollama, 임베딩·재정렬은 프로세스 안에서만 실행한다 (`AGENTS.md`)
 - 레코드는 받은 그대로 저장하고 그대로 돌려준다. 버전 전환, 최신판 표시 같은 판단은 하지 않고 indexing이 지시한 대로만 바꾼다 (`IF-RAG-1`)
 - 조회 메서드는 `active`가 `True`인 레코드만 돌려준다(기동 복구용 `job_records`만 예외). search가 이전 버전·색인 중인 버전을 보지 않게 하는 경계다 (`REQ-RAG-3.3.1`, `REQ-RAG-3.3.2`)
-- 차원이 맞지 않으면 모든 저장·조회가 오류를 낸다. 틀린 공간의 벡터로 조용히 검색하지 않는다 (`REQ-RAG-13.1.2`)
+- 차원이 맞지 않으면 모든 저장·조회가 오류를 낸다. 틀린 공간의 벡터로 조용히 검색하지 않는다 (`REQ-RAG-12.2.2`)
 
 **기능 그룹**
 
 | REQ | 기능 그룹 | 책임 |
 | :--- | :--- | :--- |
 | `REQ-RAG-12.1` | 모델 준비와 호출 | 기동 때 모델을 준비하고, 생성·임베딩·키워드 벡터·재정렬·토큰 세기를 제공한다 |
-| `REQ-RAG-13.1` | 저장소 연결 | Qdrant에 연결해 컬렉션을 맞추고, 청크 레코드를 저장·삭제·조회한다 |
+| `REQ-RAG-12.2` | 저장소 연결 | Qdrant에 연결해 컬렉션을 맞추고, 청크 레코드를 저장·삭제·조회한다 |
 
 **비범위**
 
@@ -34,12 +34,12 @@ RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한
 
 ### 예상 배치
 
-`ARCHITECT.md` 「폴더 구조와 배치 규칙」에 따라 depth-1마다 파일을 나눈다. 한 파일이 모델 연동과 저장소를 함께 담지 않는다.
+기능(`REQ-RAG-12.1` 모델 준비와 호출, `REQ-RAG-12.2` 저장소 연결)마다 파일을 나눈다. 한 파일이 모델 연동과 저장소를 함께 담지 않는다.
 
 ```text
 src/minerva_rag/resource/
 ├── model_hub.py      # REQ-RAG-12 모델 연동
-├── chunk_store.py    # REQ-RAG-13 저장소
+├── chunk_store.py    # REQ-RAG-12.2 저장소
 └── MODULE.md
 
 tests/unit/resource/
@@ -57,7 +57,7 @@ flowchart LR
     Search --> Store
     Service["service"] --> Hub
     Service --> Store
-    subgraph Boundary["resource — REQ-RAG-12, REQ-RAG-13"]
+    subgraph Boundary["resource — REQ-RAG-12, REQ-RAG-12.2"]
         Hub["ModelHub"]
         Store["ChunkStore"]
         Local[("임베딩·재정렬 모델")]
@@ -77,11 +77,11 @@ flowchart LR
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | core | import | `Settings`, `get_logger`, `ModelLoadError`, `ModelUnavailableError`, `PromptTooLongError`, `SparseVector` | core `MODULE.md` | `REQ-RAG-12.1` |
-| core | import | `ChunkRecord`, `Chunk`, `Edition`, `SparseVector`, `Settings`, `get_logger`, `StoreUnavailableError`, `VectorDimensionMismatchError` | `IF-RAG-1`, core `MODULE.md` | `REQ-RAG-13.1` |
+| core | import | `ChunkRecord`, `Chunk`, `Edition`, `SparseVector`, `Settings`, `get_logger`, `StoreUnavailableError`, `VectorDimensionMismatchError` | `IF-RAG-1`, core `MODULE.md` | `REQ-RAG-12.2` |
 | Ollama | HTTP | 생성, 모델 목록 | Ollama | `REQ-RAG-12.1.1`, `REQ-RAG-12.1.2` |
 | sentence-transformers | import | 임베딩·재정렬 모델 실행 | sentence-transformers | `REQ-RAG-12.1.1` |
 | 모델 파일 위치 | 파일 읽기 | `RAG_MODELS_DIR` | core 「설정」 | `REQ-RAG-12.1.1` |
-| Qdrant | HTTP (qdrant-client) | 컬렉션·포인트 API | Qdrant | `REQ-RAG-13.1` |
+| Qdrant | HTTP (qdrant-client) | 컬렉션·포인트 API | Qdrant | `REQ-RAG-12.2` |
 
 **금지 의존** — Qdrant와 Ollama·sentence-transformers에는 resource만 접근한다. `ChunkStore`의 저장·삭제 메서드는 indexing만 부르고, search는 조회 메서드만 부른다. service는 조립, 기동·종료, 상태 확인, 표 요약·이미지 캡션 생성에만 resource를 쓴다(`ARCHITECT.md` 「의존 규칙」). 외부 호스팅 모델 API를 부르지 않는다(`AGENTS.md`).
 
@@ -93,9 +93,9 @@ flowchart LR
 | 모델 준비와 호출 | `ModelHub.generate`, `LlmRole` | 같은 절 | `REQ-RAG-12.1.2` |
 | 모델 준비와 호출 | `ModelHub.embed_documents`, `embed_query`, `encode_sparse_documents`, `encode_sparse_query`, `rerank`, `count_tokens`, `embedding_dimension`, `embedding_model_name` | 같은 절 | `REQ-RAG-12.1` |
 | 모델 준비와 호출 | `ModelHub.ollama_available` | 같은 절 | `REQ-RAG-9.2.1` |
-| 저장소 연결 | `ChunkStore.connect`, `close`, `ping` | 「저장소 연결 — REQ-RAG-13.1」 | `REQ-RAG-13.1.1`, `REQ-RAG-13.1.2` |
-| 저장소 연결 (쓰기) | `ChunkStore.upsert`, `activate_records`, `delete_records_except`, `delete_records`, `delete_document`, `set_document_metadata`, `set_latest_editions` | 같은 절 | `REQ-RAG-13.1` |
-| 저장소 연결 (조회) | `ChunkStore.search_dense`, `search_sparse`, `active_records`, `active_editions`, `job_records`, `ChunkFilter`, `ScoredRecord` | 같은 절 | `REQ-RAG-13.1` |
+| 저장소 연결 | `ChunkStore.connect`, `close`, `ping` | 「저장소 연결 — REQ-RAG-12.2」 | `REQ-RAG-12.2.1`, `REQ-RAG-12.2.2` |
+| 저장소 연결 (쓰기) | `ChunkStore.upsert`, `activate_records`, `delete_records_except`, `delete_records`, `delete_document`, `set_document_metadata`, `set_latest_editions` | 같은 절 | `REQ-RAG-12.2` |
+| 저장소 연결 (조회) | `ChunkStore.search_dense`, `search_sparse`, `active_records`, `active_editions`, `job_records`, `ChunkFilter`, `ScoredRecord` | 같은 절 | `REQ-RAG-12.2` |
 
 ## 데이터 계약
 
@@ -192,7 +192,7 @@ class ModelHub:
 - 처리 계약: `prepare`가 끝난 뒤 `generate`가 Ollama에 연결할 수 없으면 `ModelUnavailableError`를 낸다. 연결은 됐지만 생성이 실패한 경우는 그 오류를 그대로 내며, 해석은 부른 단위가 한다
 - 충족 기준: Ollama가 연결을 거부하면 `generate`가 `ModelUnavailableError`를 내고, `ollama_available()`이 `False`다
 
-### 저장소 연결 — `REQ-RAG-13.1`
+### 저장소 연결 — `REQ-RAG-12.2`
 
 ```python
 @dataclass(frozen=True)
@@ -251,13 +251,13 @@ class ChunkStore:
 - `search_dense`·`search_sparse`는 점수 내림차순으로 최대 `limit`개를 돌려준다
 - `job_records`는 그 문서에서 `job_id`가 같은 레코드를 active 여부와 관계없이 돌려준다. 이 메서드만 active가 아닌 레코드를 돌려준다
 
-**`REQ-RAG-13.1.1`** Qdrant 연결 실패 알림
+**`REQ-RAG-12.2.1`** Qdrant 연결 실패 알림
 
 - 처리 계약: `connect` 뒤 모든 쓰기·조회 메서드는 Qdrant에 연결할 수 없으면 `StoreUnavailableError`를 낸다. `ping`은 오류를 내지 않고 연결 여부를 돌려준다
-- 실패: `connect` 자체가 Qdrant에 연결하지 못하면 `StoreUnavailableError`를 내고, service가 기동을 멈춘다(service `MODULE.md` 「수명주기 서비스」)
+- 실패: `connect` 자체가 Qdrant에 연결하지 못하면 `StoreUnavailableError`를 내고, service가 기동을 멈춘다(service `MODULE.md` 「수명주기 서비스 — `REQ-RAG-10.1`」)
 - 충족 기준: Qdrant가 연결을 거부하면 쓰기·조회 메서드가 모두 `StoreUnavailableError`를 내고 `ping()`이 `False`다
 
-**`REQ-RAG-13.1.2`** 벡터 차원 불일치 거부
+**`REQ-RAG-12.2.2`** 벡터 차원 불일치 거부
 
 - 처리 계약: `connect`는 컬렉션이 없으면 `dense_dimension` 차원으로 만든다. 있으면 저장된 `dense` 차원을 비교하고, 다르면 기동은 막지 않되 그 뒤 모든 쓰기·조회 메서드가 `VectorDimensionMismatchError`를 낸다. `ping`과 `close`는 영향을 받지 않는다
 - 충족 기준: 다른 차원으로 만든 컬렉션에 `connect`한 뒤 `upsert`·`search_dense`·`active_records`가 `VectorDimensionMismatchError`를 내고, 같은 차원이면 정상 동작한다
@@ -266,7 +266,7 @@ class ChunkStore:
 
 ### 설정
 
-정의는 core 「설정」이 소유한다. 이 모듈이 읽는 키: `RAG_OLLAMA_URL`, `RAG_LLM_CONTEXT_TOKENS`, `RAG_LLM_OUTPUT_RESERVE_TOKENS`, `RAG_MODELS_DIR`, `RAG_CHUNKING_LLM`, `RAG_TABLE_LLM`, `RAG_CAPTION_VLM`, `RAG_EMBEDDING_MODEL`, `RAG_RERANKER_MODEL`(이상 `REQ-RAG-12.1`), `RAG_QDRANT_URL`(`REQ-RAG-13.1`).
+정의는 core 「설정」이 소유한다. 이 모듈이 읽는 키: `RAG_OLLAMA_URL`, `RAG_LLM_CONTEXT_TOKENS`, `RAG_LLM_OUTPUT_RESERVE_TOKENS`, `RAG_MODELS_DIR`, `RAG_CHUNKING_LLM`, `RAG_TABLE_LLM`, `RAG_CAPTION_VLM`, `RAG_EMBEDDING_MODEL`, `RAG_RERANKER_MODEL`(이상 `REQ-RAG-12.1`), `RAG_QDRANT_URL`(`REQ-RAG-12.2`).
 
 ### 예외
 
@@ -275,8 +275,8 @@ class ChunkStore:
 | `ModelLoadError` | `prepare`에서 모델을 불러오거나 확인하지 못했다 | core 「예외」 | 발생: resource. 처리: service | `REQ-RAG-12.1.1` |
 | `ModelUnavailableError` | 기동 뒤 Ollama에 연결할 수 없다 | `MODEL_UNAVAILABLE` | 발생: resource. 전파: 부른 단위 | `REQ-RAG-12.1.2` |
 | `PromptTooLongError` | 프롬프트가 컨텍스트에서 출력 몫을 뺀 크기를 넘는다 | core 「예외」 | 발생: resource. 처리: 부른 단위 | `REQ-RAG-2.5.2.2` |
-| `StoreUnavailableError` | Qdrant에 연결할 수 없다 | `STORE_UNAVAILABLE` | 발생: resource. 전파: indexing·search를 거쳐 service | `REQ-RAG-13.1.1` |
-| `VectorDimensionMismatchError` | 저장된 차원이 `connect`에 준 차원과 다르다 | `VECTOR_DIMENSION_MISMATCH` | 발생: resource. 전파: indexing·search를 거쳐 service | `REQ-RAG-13.1.2` |
+| `StoreUnavailableError` | Qdrant에 연결할 수 없다 | `STORE_UNAVAILABLE` | 발생: resource. 전파: indexing·search를 거쳐 service | `REQ-RAG-12.2.1` |
+| `VectorDimensionMismatchError` | 저장된 차원이 `connect`에 준 차원과 다르다 | `VECTOR_DIMENSION_MISMATCH` | 발생: resource. 전파: indexing·search를 거쳐 service | `REQ-RAG-12.2.2` |
 
 ### 로그
 
@@ -285,9 +285,9 @@ class ChunkStore:
 | `resource.prepare_failed` | `prepare` 실패 | error | `model`, `reason` | `REQ-RAG-12.1.1` |
 | `resource.generate` | `generate` 끝 | info | `role`, `model`, `prompt_chars`, `elapsed_ms` | `REQ-RAG-12.1.2` |
 | `resource.model_unavailable` | Ollama 연결 실패 | warning | `role`, `model` | `REQ-RAG-12.1.2` |
-| `resource.dimension_mismatch` | `connect`에서 차원이 다를 때 | error | `stored_dimension`, `model_dimension` | `REQ-RAG-13.1.2` |
-| `resource.store_unavailable` | Qdrant 연결 실패 | warning | `operation` | `REQ-RAG-13.1.1` |
-| `resource.upsert` | 저장 끝 | info | `doc_id`, `version`, `chunks` | `REQ-RAG-13.1` |
+| `resource.dimension_mismatch` | `connect`에서 차원이 다를 때 | error | `stored_dimension`, `model_dimension` | `REQ-RAG-12.2.2` |
+| `resource.store_unavailable` | Qdrant 연결 실패 | warning | `operation` | `REQ-RAG-12.2.1` |
+| `resource.upsert` | 저장 끝 | info | `doc_id`, `version`, `chunks` | `REQ-RAG-12.2` |
 
 프롬프트와 생성 결과는 문서 본문을 담으므로 로그에 넣지 않는다. 청크 본문(`text`)과 제목·요약은 레코드 안에 있으므로, 레코드를 통째로 로그에 넘기지 않는다.
 
@@ -298,7 +298,7 @@ class ChunkStore:
 
 ### 실패 모드
 
-- **임베딩 모델 교체** (`REQ-RAG-3.2.1`) — 증상: 설정의 임베딩 모델을 바꾸면 기존 벡터와 새 질의 벡터의 공간이 달라 검색이 틀어진다. 탐지: 차원이 다르면 `ChunkStore`가 거부한다(`REQ-RAG-13.1.2`). 같은 차원의 다른 모델은 체크섬이 달라지므로(`REQ-RAG-3.5.2`) 강제 재색인으로 바로잡는다. 방어: `embedding_model_name`을 체크섬에 넣는다(indexing)
+- **임베딩 모델 교체** (`REQ-RAG-3.2.1`) — 증상: 설정의 임베딩 모델을 바꾸면 기존 벡터와 새 질의 벡터의 공간이 달라 검색이 틀어진다. 탐지: 차원이 다르면 `ChunkStore`가 거부한다(`REQ-RAG-12.2.2`). 같은 차원의 다른 모델은 체크섬이 달라지므로(`REQ-RAG-3.5.2`) 강제 재색인으로 바로잡는다. 방어: `embedding_model_name`을 체크섬에 넣는다(indexing)
 - **여러 호출에 걸친 쓰기** (`REQ-RAG-3.3`) — 증상: `activate_records`와 `delete_records_except` 사이에 조회하면 한 문서의 이전 레코드와 새 레코드가 함께 나올 수 있다. 탐지: 결과에 같은 `doc_id`의 이전·새 레코드가 섞인다. 방어: 두 호출을 indexing이 연달아 부른다. 순서의 소유자는 indexing이다(indexing `MODULE.md` 「핵심 흐름」)
 
 ## 테스트와 추적성
@@ -311,6 +311,6 @@ class ChunkStore:
 | `REQ-RAG-2.5.2.2` | unit | 모든 생성 요청에 컨텍스트 크기 지정, 넘치는 프롬프트는 보내지 않고 `PromptTooLongError` (컨텍스트) | Ollama (가짜 HTTP) | `tests/unit/resource/` |
 | `REQ-RAG-2.1.1` | unit | 생각 모드 끔 요청, 응답의 생각 블록 제거 (생각 모드) | Ollama (가짜 HTTP) | `tests/unit/resource/` |
 | `REQ-RAG-4.1.1` | unit | 키워드 토큰화의 정규화·2글자 조각, 문서·질의 인코딩 일치 (키워드 토큰화) | | `tests/unit/resource/` |
-| `REQ-RAG-13.1.1` | unit | 연결 거부 시 모든 쓰기·조회가 `StoreUnavailableError`, `ping` 거짓, `connect` 실패 | Qdrant 클라이언트 (가짜) | `tests/unit/resource/` |
-| `REQ-RAG-13.1.2` | integration | 차원이 다른 기존 컬렉션에서 쓰기·조회 거부, 같은 차원이면 정상 | | `tests/integration/resource/` |
-| `REQ-RAG-13.1.2` | integration | 레코드 필드 왕복 보존, active 레코드만 조회, `ChunkFilter` 조건별 범위 (`IF-RAG-1` 검증) | | `tests/integration/resource/` |
+| `REQ-RAG-12.2.1` | unit | 연결 거부 시 모든 쓰기·조회가 `StoreUnavailableError`, `ping` 거짓, `connect` 실패 | Qdrant 클라이언트 (가짜) | `tests/unit/resource/` |
+| `REQ-RAG-12.2.2` | integration | 차원이 다른 기존 컬렉션에서 쓰기·조회 거부, 같은 차원이면 정상 | | `tests/integration/resource/` |
+| `REQ-RAG-3.3.1` | integration | 레코드 필드 왕복 보존, active 레코드만 조회, `ChunkFilter` 조건별 범위 (`IF-RAG-1` 검증) | | `tests/integration/resource/` |

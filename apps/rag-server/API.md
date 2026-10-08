@@ -26,16 +26,16 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 | 메서드 | 경로 | 요약 | REQ |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/v1/captions/table` | 표 요약 생성 | `REQ-RAG-1.1`, `REQ-RAG-10.2` |
-| `POST` | `/v1/captions/image` | 이미지 캡션 생성 | `REQ-RAG-1.2`, `REQ-RAG-10.2` |
-| `POST` | `/v1/index-jobs` | 색인 요청 | `REQ-RAG-2.1.6`, `REQ-RAG-3.5`, `REQ-RAG-3.6.1`, `REQ-RAG-3.6.4`, `REQ-RAG-7.1`, `REQ-RAG-10.3` |
-| `GET` | `/v1/index-jobs/{job_id}` | 작업 상태 조회 | `REQ-RAG-7.2` |
+| `POST` | `/v1/captions/table` | 표 요약 생성 | `REQ-RAG-10.2.2`, `REQ-RAG-10.2` |
+| `POST` | `/v1/captions/image` | 이미지 캡션 생성 | `REQ-RAG-10.2.3`, `REQ-RAG-10.2` |
+| `POST` | `/v1/index-jobs` | 색인 요청 | `REQ-RAG-2.1.6`, `REQ-RAG-3.5`, `REQ-RAG-3.6.1`, `REQ-RAG-3.6.4`, `REQ-RAG-10.8.1`, `REQ-RAG-10.3` |
+| `GET` | `/v1/index-jobs/{job_id}` | 작업 상태 조회 | `REQ-RAG-10.8.2` |
 | `DELETE` | `/v1/documents/{doc_id}` | 문서 삭제 | `REQ-RAG-3.4`, `REQ-RAG-10.5` |
-| `GET` | `/v1/documents/{doc_id}/index-state` | 문서 색인 상태 조회 | `REQ-RAG-7.6.1`, `REQ-RAG-7.6.2` |
-| `POST` | `/v1/documents/index-states` | 여러 문서의 색인 상태 조회 | `REQ-RAG-7.6.3` |
+| `GET` | `/v1/documents/{doc_id}/index-state` | 문서 색인 상태 조회 | `REQ-RAG-10.8.6.1`, `REQ-RAG-10.8.6.2` |
+| `POST` | `/v1/documents/index-states` | 여러 문서의 색인 상태 조회 | `REQ-RAG-10.8.6.3` |
 | `PUT` | `/v1/documents/{doc_id}/metadata` | 이름·판 정보 변경 | `REQ-RAG-3.6.5`, `REQ-RAG-3.6.7`, `REQ-RAG-10.6` |
 | `GET` | `/v1/documents/{doc_id}/chunks` | 문서 청크 조회 | `REQ-RAG-4.7` |
-| `POST` | `/v1/search` | 검색 | `REQ-RAG-4`, `REQ-RAG-5.2`, `REQ-RAG-10.4` |
+| `POST` | `/v1/search` | 검색 | `REQ-RAG-4`, `REQ-RAG-4.9`, `REQ-RAG-10.4` |
 | `POST` | `/v1/evaluations` | 골든셋 한 건 평가 | `REQ-RAG-6`, `REQ-RAG-10.7` |
 | `GET` | `/v1/health` | 상태 확인 (인증 없음) | `REQ-RAG-9.2.1` |
 
@@ -43,7 +43,7 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 ### `POST /v1/captions/table`
 
-표의 요약 문장을 만들어 돌려준다. 결과는 저장하지 않는다. (`REQ-RAG-1.1`, `REQ-RAG-10.2.1`)
+표의 요약 문장을 만들어 돌려준다. 결과는 저장하지 않는다. (`REQ-RAG-10.2.2`, `REQ-RAG-10.2.1`)
 
 **요청**
 
@@ -59,12 +59,12 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
-| `502` | `CAPTION_FAILED` | 요약을 만들지 못했다 (`REQ-RAG-1.1.3`) |
+| `502` | `CAPTION_FAILED` | 요약을 만들지 못했다 (`REQ-RAG-10.2.2.3`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
 
 ### `POST /v1/captions/image`
 
-이미지를 설명하는 캡션을 만들어 돌려준다. 결과는 저장하지 않는다. (`REQ-RAG-1.2`, `REQ-RAG-10.2.1`)
+이미지를 설명하는 캡션을 만들어 돌려준다. 결과는 저장하지 않는다. (`REQ-RAG-10.2.3`, `REQ-RAG-10.2.1`)
 
 **요청** — `multipart/form-data`
 
@@ -80,12 +80,12 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
-| `502` | `CAPTION_FAILED` | 캡션을 만들지 못했다. 모델이 읽지 못하는 형식의 이미지도 같다 (`REQ-RAG-1.2.3`) |
+| `502` | `CAPTION_FAILED` | 캡션을 만들지 못했다. 모델이 읽지 못하는 형식의 이미지도 같다 (`REQ-RAG-10.2.3.3`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
 
 ### `POST /v1/index-jobs`
 
-문서 한 버전의 색인을 요청한다. 다시 색인해야 하면 작업으로 접수하고 처리가 끝나기를 기다리지 않고 응답한다. (`REQ-RAG-7.1.1`, `REQ-RAG-10.3.1`)
+문서 한 버전의 색인을 요청한다. 다시 색인해야 하면 작업으로 접수하고 처리가 끝나기를 기다리지 않고 응답한다. (`REQ-RAG-10.8.1.1`, `REQ-RAG-10.3.1`)
 
 **요청**
 
@@ -115,8 +115,8 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 **동작**
 
-- 같은 문서의 새 작업이 접수되면 아직 시작하지 않은 이전 작업은 `superseded`가 된다 (`REQ-RAG-7.3.4`)
-- 실패한 작업과 체크섬이 같은 요청도 새 작업으로 접수한다 (`REQ-RAG-7.4.3`)
+- 같은 문서의 새 작업이 접수되면 아직 시작하지 않은 이전 작업은 `superseded`가 된다 (`REQ-RAG-10.8.3.4`)
+- 실패한 작업과 체크섬이 같은 요청도 새 작업으로 접수한다 (`REQ-RAG-10.8.4.3`)
 - 이름·판 정보가 같은 다른 문서의 청크는 지우지 않는다. 같은 판 문서의 정리는 Backend가 문서 삭제로 요청한다 (`REQ-RAG-3.6.6`)
 - 작업 상태가 바뀔 때마다 Backend에 알림을 보낸다 (루트 `INTERFACES.md` `IF-2`)
 
@@ -149,7 +149,7 @@ Content-Type: application/json
 
 ### `GET /v1/index-jobs/{job_id}`
 
-작업 하나의 상태를 돌려준다. RAG Server가 다시 시작한 뒤에도 조회된다. (`REQ-RAG-7.2.2`, `REQ-RAG-7.5.1`)
+작업 하나의 상태를 돌려준다. RAG Server가 다시 시작한 뒤에도 조회된다. (`REQ-RAG-10.8.2.2`, `REQ-RAG-10.8.5.1`)
 
 **요청**
 
@@ -189,7 +189,7 @@ Content-Type: application/json
 
 ### `GET /v1/documents/{doc_id}/index-state`
 
-문서 하나의 색인 상태를 돌려준다. (`REQ-RAG-7.6.2`)
+문서 하나의 색인 상태를 돌려준다. (`REQ-RAG-10.8.6.2`)
 
 **요청**
 
@@ -203,7 +203,7 @@ Content-Type: application/json
 
 ### `POST /v1/documents/index-states`
 
-여러 문서의 색인 상태를 한 번에 돌려준다. (`REQ-RAG-7.6.3`)
+여러 문서의 색인 상태를 한 번에 돌려준다. (`REQ-RAG-10.8.6.3`)
 
 **요청**
 
@@ -275,12 +275,12 @@ Content-Type: application/json
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
-| `503` | `STORE_UNAVAILABLE` | Qdrant에 연결할 수 없다 (`REQ-RAG-13.1.1`) |
-| `500` | `VECTOR_DIMENSION_MISMATCH` | 저장된 벡터의 차원이 지금 임베딩 모델과 다르다 (`REQ-RAG-13.1.2`) |
+| `503` | `STORE_UNAVAILABLE` | Qdrant에 연결할 수 없다 (`REQ-RAG-12.2.1`) |
+| `500` | `VECTOR_DIMENSION_MISMATCH` | 저장된 벡터의 차원이 지금 임베딩 모델과 다르다 (`REQ-RAG-12.2.2`) |
 
 **동작**
 
-- 질의에 용어집의 말이 있으면 같은 묶음의 대표어와 동의어까지 넣어 검색한다 (`REQ-RAG-5.2.1`)
+- 질의에 용어집의 말이 있으면 같은 묶음의 대표어와 동의어까지 넣어 검색한다 (`REQ-RAG-4.9.1`)
 - 현재 검색되는 버전의 청크만 결과에 나온다. 색인 중인 새 버전은 끝나기 전에는 나오지 않는다 (`REQ-RAG-3.3.1`, `REQ-RAG-3.3.2`)
 - 재정렬에 실패하면 합친 순위와 점수로 돌려준다 (`REQ-RAG-4.2.2`)
 
@@ -339,7 +339,7 @@ Content-Type: application/json
 | :--- | :--- | :--- |
 | `409` | `DOCUMENT_NOT_SEARCHABLE` | 정답 문서가 검색되지 않는 상태다 (`REQ-RAG-6.3.2`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
-| `503` | `STORE_UNAVAILABLE` | Qdrant에 연결할 수 없다 (`REQ-RAG-13.1.1`) |
+| `503` | `STORE_UNAVAILABLE` | Qdrant에 연결할 수 없다 (`REQ-RAG-12.2.1`) |
 
 **동작**
 
@@ -392,10 +392,10 @@ Qdrant와 Ollama의 연결 상태를 돌려준다. (`REQ-RAG-9.2.1`)
 | `job_id` | `string` | 필수 | |
 | `doc_id` | `string` | 필수 | |
 | `version` | `string` | 필수 | |
-| `state` | `string` | 필수 | `queued`(색인 대기), `running`(색인 중), `succeeded`(완료), `failed`(실패), `superseded`(대체됨) 중 하나 (`REQ-RAG-7.2.1`) |
-| `stage` | `string` | 조건부 | `state`가 `running`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null` (`REQ-RAG-7.2.3`) |
-| `failure` | `JobFailure` | 조건부 | `state`가 `failed`이면 필수, 아니면 `null` (`REQ-RAG-7.2.4`) |
-| `result` | `JobResult` | 조건부 | `state`가 `succeeded`이면 필수, 아니면 `null` (`REQ-RAG-7.2.6`) |
+| `state` | `string` | 필수 | `queued`(색인 대기), `running`(색인 중), `succeeded`(완료), `failed`(실패), `superseded`(대체됨) 중 하나 (`REQ-RAG-10.8.2.1`) |
+| `stage` | `string` | 조건부 | `state`가 `running`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null` (`REQ-RAG-10.8.2.3`) |
+| `failure` | `JobFailure` | 조건부 | `state`가 `failed`이면 필수, 아니면 `null` (`REQ-RAG-10.8.2.4`) |
+| `result` | `JobResult` | 조건부 | `state`가 `succeeded`이면 필수, 아니면 `null` (`REQ-RAG-10.8.2.6`) |
 
 ### `JobFailure`
 
@@ -403,19 +403,19 @@ Qdrant와 Ollama의 연결 상태를 돌려준다. (`REQ-RAG-9.2.1`)
 | :--- | :--- | :--- | :--- |
 | `code` | `string` | 필수 | 실패 사유 코드. 아래 「작업 실패 사유 코드」 중 하나 |
 | `message` | `string` | 필수 | 관리자가 읽고 조치할 수 있는 한국어 설명 |
-| `heading_path` | `string[]` | 선택 | 실패가 생긴 절. 모르면 `null` (`REQ-RAG-7.2.5`) |
-| `placeholder_id` | `string` | 선택 | 실패가 생긴 자리표시. 모르면 `null` (`REQ-RAG-7.2.5`) |
+| `heading_path` | `string[]` | 선택 | 실패가 생긴 절. 모르면 `null` (`REQ-RAG-10.8.2.5`) |
+| `placeholder_id` | `string` | 선택 | 실패가 생긴 자리표시. 모르면 `null` (`REQ-RAG-10.8.2.5`) |
 
-작업 실패 사유 코드 (`REQ-RAG-7.2.4`):
+작업 실패 사유 코드 (`REQ-RAG-10.8.2.4`):
 
 | 코드 | 뜻 |
 | :--- | :--- |
 | `CHUNKING_FAILED` | 청킹을 끝내지 못했다. 위치가 있으면 그 절이다 (`REQ-RAG-10.3.3`) |
 | `MODEL_UNAVAILABLE` | 처리 중 모델 서버에 연결할 수 없었다 (`REQ-RAG-12.1.2`) |
-| `STORE_UNAVAILABLE` | 처리 중 Qdrant에 연결할 수 없었다 (`REQ-RAG-13.1.1`) |
-| `VECTOR_DIMENSION_MISMATCH` | 저장된 벡터와 임베딩 모델의 차원이 다르다 (`REQ-RAG-13.1.2`) |
+| `STORE_UNAVAILABLE` | 처리 중 Qdrant에 연결할 수 없었다 (`REQ-RAG-12.2.1`) |
+| `VECTOR_DIMENSION_MISMATCH` | 저장된 벡터와 임베딩 모델의 차원이 다르다 (`REQ-RAG-12.2.2`) |
 | `DOCUMENT_DELETED` | 시작하기 전에 문서 삭제를 요청받았다 (`REQ-RAG-10.5.1`) |
-| `SERVER_RESTARTED` | 끝나기 전에 RAG Server가 다시 시작했다 (`REQ-RAG-7.5.2`) |
+| `SERVER_RESTARTED` | 끝나기 전에 RAG Server가 다시 시작했다 (`REQ-RAG-10.8.5.2`) |
 | `INTERNAL_ERROR` | 예상하지 못한 오류 |
 
 ### `JobResult`
@@ -430,10 +430,10 @@ Qdrant와 Ollama의 연결 상태를 돌려준다. (`REQ-RAG-9.2.1`)
 | 필드 | 타입 | 필수 | 설명·제약 |
 | :--- | :--- | :--- | :--- |
 | `doc_id` | `string` | 필수 | |
-| `searchable_version` | `string` | 선택 | 현재 검색되는 버전. 없으면 `null` (`REQ-RAG-7.6.1`) |
+| `searchable_version` | `string` | 선택 | 현재 검색되는 버전. 없으면 `null` (`REQ-RAG-10.8.6.1`) |
 | `latest_job_id` | `string` | 선택 | 그 문서의 최신 작업. 없으면 `null` |
 | `latest_job_state` | `string` | 선택 | 최신 작업의 상태. 값은 `IndexJob.state`와 같다. 없으면 `null` |
-| `latest_job_stage` | `string` | 선택 | 최신 작업이 `running`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null` (`REQ-RAG-7.6.2`) |
+| `latest_job_stage` | `string` | 선택 | 최신 작업이 `running`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null` (`REQ-RAG-10.8.6.2`) |
 
 ### `SearchResult`
 
