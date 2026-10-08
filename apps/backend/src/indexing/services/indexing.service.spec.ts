@@ -1295,6 +1295,53 @@ describe('REQ-BE-3.3.1', () => {
     expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
     expect(events.filter((e) => e.source === 'reconcile')).toHaveLength(1);
   });
+
+  /** 진행 중인 상태 맞추기의 감시 등록 크기를 읽는다. 필드가 없으면 undefined다. */
+  const watchCount = (): number | undefined =>
+    (Reflect.get(service, 'reconcileWatches') as Set<unknown> | undefined)?.size;
+
+  it('T-FU-WATCH-1 상태 맞추기 밖의 알림은 문서별 상태를 남기지 않는다', async () => {
+    fakeRag.getIndexJob.mockResolvedValue(job({ state: 'running', result: null }));
+    for (const [index, docId] of ['A', 'B', 'C'].entries()) {
+      await service.handleNotification(
+        note({ docId, jobId: `j${docId}`, jobState: 'running', sequence: index + 1 }),
+      );
+    }
+    expect(events).toHaveLength(3);
+    // ★ 진행 중인 reconcile이 없으면 감시 등록은 비어 있고, 문서 수만큼 자라는 Map도 없다
+    expect(watchCount()).toBe(0);
+    expect(Reflect.get(service, 'notified')).toBeUndefined();
+  });
+
+  it('T-FU-WATCH-2 상태 맞추기 중에만 감시가 등록되고 끝나면(정상·조회 실패·예외) 지워진다', async () => {
+    // ① 정상: 묶음 조회가 멈춰 있는 동안만 1개
+    const gate = deferred<RagIndexState[]>();
+    fakeRag.getIndexStates.mockImplementation(() => gate.promise);
+    const running = service.reconcile(['A']);
+    expect(watchCount()).toBe(1);
+    gate.resolve([state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' })]);
+    fakeRag.getIndexJob.mockResolvedValue(
+      job({ jobId: 'jA', docId: 'A', state: 'running', result: null }),
+    );
+    await running;
+    expect(watchCount()).toBe(0);
+
+    // ② 묶음 조회 실패(RAG Server 불통)
+    fakeRag.getIndexStates.mockReset();
+    fakeRag.getIndexStates.mockRejectedValue(new RagUnavailableError());
+    await service.reconcile(['A']);
+    expect(watchCount()).toBe(0);
+
+    // ③ rag 오류가 아닌 예외로 reconcile이 거부돼도 지워진다
+    fakeRag.getIndexStates.mockReset();
+    fakeRag.getIndexStates.mockResolvedValue([
+      state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' }),
+    ]);
+    fakeRag.getIndexJob.mockReset();
+    fakeRag.getIndexJob.mockRejectedValue(new Error('unexpected'));
+    await expect(service.reconcile(['A'])).rejects.toThrow('unexpected');
+    expect(watchCount()).toBe(0);
+  });
 });
 
 describe('REQ-BE-1.3.6', () => {

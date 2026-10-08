@@ -70,14 +70,20 @@ function toFailureInfo(failure: NonNullable<RagIndexJob['failure']>): JobFailure
   };
 }
 
+/** 상태 맞추기 하나가 지켜보는 문서와, 묶음 조회 뒤 알림이 반영된 문서다. */
+interface ReconcileWatch {
+  docIds: ReadonlySet<string>;
+  notified: Set<string>;
+}
+
 /** 색인 연동 서비스다. */
 @Injectable()
 export class IndexingService implements OnModuleInit {
   private readonly chunking: RagChunking;
   /** 문서별 알림 처리 사슬의 꼬리다. ★ 끝나면 지운다 */
   private readonly chains = new Map<string, Promise<void>>();
-  /** 문서별로 반영한 알림 수다. ★ 지우지 않는다 — 지우면 0으로 돌아가 묶음 조회 뒤의 반영을 놓친다 */
-  private readonly notified = new Map<string, number>();
+  /** 진행 중인 상태 맞추기의 감시다. ★ reconcile이 끝나면(던져도) 지운다 — 문서 수만큼 자라지 않는다 */
+  private readonly reconcileWatches = new Set<ReconcileWatch>();
 
   constructor(
     @Inject(RagClient) private readonly rag: RagClient,
@@ -138,39 +144,42 @@ export class IndexingService implements OnModuleInit {
     const unique = [...new Set(docIds)];
     let events = 0;
     if (unique.length > 0) {
-      // ★ 묶음 조회 직전에 저장한다 — 조회 중에 반영된 알림도 다시 조회 쪽으로 간다
-      const seen = new Map(unique.map((id) => [id, this.notified.get(id) ?? 0]));
-      const states = await this.loadStates(unique);
-      if (states !== null) {
-        const wanted = new Set(unique);
-        // ★ 요청하지 않은 문서와 작업이 없는 문서는 버린다
-        const targets = states.filter((s) => wanted.has(s.docId) && s.latestJobId !== null);
-        for (let start = 0; start < targets.length; start += RECONCILE_CONCURRENCY) {
-          // ★ 문서 사이는 묶음 안에서 동시에, 같은 문서는 알림과 같은 사슬에서 차례로 돈다
-          const settled = await Promise.allSettled(
-            targets
-              .slice(start, start + RECONCILE_CONCURRENCY)
-              .map((s) =>
-                this.serializeByDoc(s.docId, () => this.reconcileOne(s, seen.get(s.docId) ?? 0)),
-              ),
-          );
-          for (const outcome of settled) {
-            // ★ 같은 묶음 앞 문서의 발행을 마친 뒤에 던진다
-            if (outcome.status === 'rejected') throw outcome.reason;
-            if (outcome.value) events += 1;
+      // ★ 묶음 조회 직전에 등록한다(동기) — 조회 중에 반영된 알림도 다시 조회 쪽으로 간다
+      const watch: ReconcileWatch = { docIds: new Set(unique), notified: new Set() };
+      this.reconcileWatches.add(watch);
+      try {
+        const states = await this.loadStates(unique);
+        if (states !== null) {
+          const wanted = new Set(unique);
+          // ★ 요청하지 않은 문서와 작업이 없는 문서는 버린다
+          const targets = states.filter((s) => wanted.has(s.docId) && s.latestJobId !== null);
+          for (let start = 0; start < targets.length; start += RECONCILE_CONCURRENCY) {
+            // ★ 문서 사이는 묶음 안에서 동시에, 같은 문서는 알림과 같은 사슬에서 차례로 돈다
+            const settled = await Promise.allSettled(
+              targets
+                .slice(start, start + RECONCILE_CONCURRENCY)
+                .map((s) => this.serializeByDoc(s.docId, () => this.reconcileOne(s, watch))),
+            );
+            for (const outcome of settled) {
+              // ★ 같은 묶음 앞 문서의 발행을 마친 뒤에 던진다
+              if (outcome.status === 'rejected') throw outcome.reason;
+              if (outcome.value) events += 1;
+            }
           }
         }
+      } finally {
+        this.reconcileWatches.delete(watch);
       }
     }
     this.logger.info({ docs: unique.length, events }, 'indexing.reconciled');
   }
 
   /** 직렬 구간 안에서 문서 하나의 이벤트를 발행한다. 발행했으면 참이다. */
-  private async reconcileOne(batchState: RagIndexState, seen: number): Promise<boolean> {
+  private async reconcileOne(batchState: RagIndexState, watch: ReconcileWatch): Promise<boolean> {
     const docId = batchState.docId;
     let state: RagIndexState | undefined = batchState;
     // ★ 묶음 조회 뒤 이 문서에 알림이 반영됐을 때만 다시 조회한다 — 낡은 스냅샷을 쓰지 않으면서 RAG 왕복은 보통 묶음 1번이다
-    if ((this.notified.get(docId) ?? 0) !== seen) {
+    if (watch.notified.has(docId)) {
       const fresh = await this.loadStates([docId]);
       state = fresh?.find((s) => s.docId === docId);
     }
@@ -282,7 +291,10 @@ export class IndexingService implements OnModuleInit {
       return;
     }
 
-    this.notified.set(n.docId, (this.notified.get(n.docId) ?? 0) + 1);
+    // ★ 진행 중인 상태 맞추기가 이 문서를 보고 있으면 묶음 조회 뒤 반영됐음을 알린다
+    for (const watch of this.reconcileWatches) {
+      if (watch.docIds.has(n.docId)) watch.notified.add(n.docId);
+    }
 
     await this.dispatch({
       docId: n.docId,
