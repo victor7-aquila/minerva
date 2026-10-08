@@ -40,12 +40,14 @@ function fakeConfig(values: {
   url: string;
   timeoutMs?: number;
   captionTimeoutMs?: number;
+  waitTimeoutMs?: number;
 }): ConfigService<AppConfig, true> {
   const map: Record<string, unknown> = {
     RAG_SERVER_URL: values.url,
     RAG_SERVER_API_TOKEN: TOKEN,
     RAG_TIMEOUT_MS: values.timeoutMs ?? 2000,
     RAG_CAPTION_TIMEOUT_MS: values.captionTimeoutMs ?? 2000,
+    RAG_WAIT_TIMEOUT_MS: values.waitTimeoutMs ?? 2000,
   };
   return { get: (key: string) => map[key] } as unknown as ConfigService<AppConfig, true>;
 }
@@ -78,7 +80,7 @@ function fakeLogger(): { logger: PinoLogger; calls: LogCall[] } {
 /** 가짜 설정·로거로 클라이언트를 만든다. */
 function makeClient(
   url: string,
-  timeouts: { timeoutMs?: number; captionTimeoutMs?: number } = {},
+  timeouts: { timeoutMs?: number; captionTimeoutMs?: number; waitTimeoutMs?: number } = {},
 ): { client: RagClient; calls: LogCall[] } {
   const { logger, calls } = fakeLogger();
   return { client: new RagClient(fakeConfig({ url, ...timeouts }), logger), calls };
@@ -429,8 +431,28 @@ const CALLS: [string, Call][] = [
 ];
 
 const CAPTION_NAMES = ['summarizeTable', 'captionImage'];
+/** 색인 중인 작업을 기다리는 메서드다. RAG_WAIT_TIMEOUT_MS를 쓴다 */
+const WAIT_NAMES = ['deleteDocument', 'updateMetadata'];
 const CAPTION_OPS = CALLS.filter(([name]) => CAPTION_NAMES.includes(name));
-const GENERAL_OPS = CALLS.filter(([name]) => !CAPTION_NAMES.includes(name));
+const WAIT_OPS = CALLS.filter(([name]) => WAIT_NAMES.includes(name));
+const GENERAL_OPS = CALLS.filter(
+  ([name]) => !CAPTION_NAMES.includes(name) && !WAIT_NAMES.includes(name),
+);
+
+/** signal을 받는 메서드를 그 signal로 부르는 표다. */
+const SIGNAL_CALLS: [string, (c: RagClient, signal: AbortSignal) => Promise<unknown>][] = [
+  ['deleteDocument', (c, signal) => c.deleteDocument('doc-001', signal)],
+  [
+    'updateMetadata',
+    (c, signal) =>
+      c.updateMetadata(
+        'doc-001',
+        'IEEE 1609.2.1',
+        { label: '2025', editionDate: '2025-01-31' },
+        signal,
+      ),
+  ],
+];
 
 /** 호출 이름으로 호출 함수를 찾는다. */
 function callOf(name: string): Call {
@@ -1193,16 +1215,20 @@ describe('REQ-BE-10.1.3', () => {
   const TIMEOUT_MS = 200;
   /** 요약·캡션 제한(ms)이다. */
   const CAPTION_TIMEOUT_MS = 1000;
+  /** 삭제·이름 변경 제한(ms)이다. */
+  const WAIT_TIMEOUT_MS = 1000;
   const GENERAL_DELAY = 1500;
   const MID_DELAY = 500;
   const LONG_DELAY = 3000;
 
   let timed: RagClient;
+  let timedLogs: LogCall[];
 
   beforeEach(() => {
-    ({ client: timed } = makeClient(server.baseUrl, {
+    ({ client: timed, calls: timedLogs } = makeClient(server.baseUrl, {
       timeoutMs: TIMEOUT_MS,
       captionTimeoutMs: CAPTION_TIMEOUT_MS,
+      waitTimeoutMs: WAIT_TIMEOUT_MS,
     }));
   });
 
@@ -1239,6 +1265,52 @@ describe('REQ-BE-10.1.3', () => {
       expect(ms).toBeLessThan(2500);
     },
     10_000,
+  );
+
+  it.each(WAIT_OPS)('T-TMO-6 %s는 일반 제한을 쓰지 않는다', async (_name, call) => {
+    server.setHandler(delayed(MID_DELAY));
+    await expect(call(timed)).resolves.toBeUndefined();
+  });
+
+  it.each(WAIT_OPS)(
+    'T-TMO-7 %s는 RAG_WAIT_TIMEOUT_MS에서 끝난다',
+    async (_name, call) => {
+      server.setHandler(delayed(LONG_DELAY));
+      const { err, ms } = await elapsed(call(timed));
+      expect(err).toBeInstanceOf(RagUnavailableError);
+      expect(ms).toBeGreaterThanOrEqual(950);
+      expect(ms).toBeLessThan(2500);
+    },
+    10_000,
+  );
+
+  it.each(SIGNAL_CALLS)(
+    'T-TMO-8 %s는 signal이 중단되면 제한 전에 끊고 ABORTED로 남긴다',
+    async (_name, call) => {
+      server.setHandler(delayed(LONG_DELAY));
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 100);
+      const { err, ms } = await elapsed(call(timed, controller.signal));
+      expect(err).toBeInstanceOf(RagUnavailableError);
+      // 제한(1000ms)이 아니라 중단(100ms)에서 끝났다
+      expect(ms).toBeLessThan(600);
+      const failed = timedLogs.filter((c) => c.args.includes('rag.call_failed'));
+      expect(failed).toHaveLength(1);
+      expect(failed[0].args[0]).toMatchObject({ code: 'ABORTED' });
+    },
+    10_000,
+  );
+
+  it.each(SIGNAL_CALLS)(
+    'T-TMO-9 %s는 이미 중단된 signal이면 기다리지 않고 RagUnavailableError다',
+    async (_name, call) => {
+      server.setHandler(delayed(LONG_DELAY));
+      const controller = new AbortController();
+      controller.abort();
+      const { err, ms } = await elapsed(call(timed, controller.signal));
+      expect(err).toBeInstanceOf(RagUnavailableError);
+      expect(ms).toBeLessThan(500);
+    },
   );
 
   it('T-TMO-4 응답 헤더 뒤 본문이 멈춰도 제한에서 끝난다', async () => {

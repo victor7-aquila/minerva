@@ -1459,14 +1459,16 @@ describe('REQ-BE-3.4.1', () => {
       service.updateMetadata('doc-1', NAME_SENT, { label: LABEL_SENT, editionDate: DATE_SENT }),
     ).resolves.toBe(true);
     expect(fakeRag.updateMetadata).toHaveBeenCalledTimes(1);
-    expect(fakeRag.updateMetadata).toHaveBeenCalledWith('doc-1', NAME_SENT, {
-      label: LABEL_SENT,
-      editionDate: DATE_SENT,
-    });
+    expect(fakeRag.updateMetadata).toHaveBeenCalledWith(
+      'doc-1',
+      NAME_SENT,
+      { label: LABEL_SENT, editionDate: DATE_SENT },
+      undefined,
+    );
 
     fakeRag.updateMetadata.mockClear();
     await expect(service.updateMetadata('doc-1', NAME_SENT, null)).resolves.toBe(true);
-    expect(fakeRag.updateMetadata).toHaveBeenCalledWith('doc-1', NAME_SENT, null);
+    expect(fakeRag.updateMetadata).toHaveBeenCalledWith('doc-1', NAME_SENT, null, undefined);
   });
 });
 
@@ -1484,6 +1486,30 @@ describe('REQ-BE-3.4.2', () => {
       expect(failed).toHaveLength(1);
       expect(payloadOf(failed[0])).toEqual({ operation: 'updateMetadata', docId: 'doc-1', code });
     }
+  });
+
+  it('T-META-5 받은 signal을 rag에 그대로 넘기고, 끊기면 예외 없이 거짓이다', async () => {
+    const controller = new AbortController();
+    fakeRag.updateMetadata.mockResolvedValue(undefined);
+    fakeRag.deleteDocument.mockResolvedValue(undefined);
+    await service.updateMetadata('doc-1', NAME_SENT, null, controller.signal);
+    await service.deleteChunks('doc-1', controller.signal);
+    expect(fakeRag.updateMetadata).toHaveBeenCalledWith(
+      'doc-1',
+      NAME_SENT,
+      null,
+      controller.signal,
+    );
+    expect(fakeRag.deleteDocument).toHaveBeenCalledWith('doc-1', controller.signal);
+
+    // rag는 끊긴 요청을 RagUnavailableError로 낸다
+    fakeRag.updateMetadata.mockRejectedValue(new RagUnavailableError());
+    fakeRag.deleteDocument.mockRejectedValue(new RagUnavailableError());
+    controller.abort();
+    await expect(service.updateMetadata('doc-1', NAME_SENT, null, controller.signal)).resolves.toBe(
+      false,
+    );
+    await expect(service.deleteChunks('doc-1', controller.signal)).resolves.toBe(false);
   });
 
   it('T-META-3 예상 밖 예외는 그대로 던진다', async () => {
@@ -1510,7 +1536,7 @@ describe('REQ-BE-1.8.4', () => {
     fakeRag.deleteDocument.mockResolvedValue(undefined);
     await expect(service.deleteChunks('doc-1')).resolves.toBe(true);
     expect(fakeRag.deleteDocument).toHaveBeenCalledTimes(1);
-    expect(fakeRag.deleteDocument).toHaveBeenCalledWith('doc-1');
+    expect(fakeRag.deleteDocument).toHaveBeenCalledWith('doc-1', undefined);
 
     fakeRag.deleteDocument.mockRejectedValue(new RagUnavailableError());
     await expect(service.deleteChunks('doc-1')).resolves.toBe(false);

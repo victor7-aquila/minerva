@@ -97,6 +97,26 @@ describe('REQ-BE-1.9.9', () => {
   });
 });
 
+describe('REQ-BE-1.8.4', () => {
+  it('T-TASK-4 종료는 stopSignal을 먼저 중단해, 그 신호를 기다리는 작업이 종료를 붙잡지 않는다', async () => {
+    expect(tasks.stopSignal.aborted).toBe(false);
+    let abortedInTask = false;
+    tasks.run('delete_chunks', 'doc-1', async () => {
+      // 오래 기다리는 RAG 요청 대신, 신호가 중단될 때까지 끝나지 않는 작업이다
+      await new Promise<void>((resolve) => {
+        tasks.stopSignal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      abortedInTask = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    await tasks.beforeApplicationShutdown();
+    expect(tasks.stopSignal.aborted).toBe(true);
+    expect(abortedInTask).toBe(true);
+  });
+});
+
 describe('REQ-BE-1.2.4', () => {
   it('T-CLK-1 같은 밀리초 안에서 1000번 불러도 값이 계속 커진다', () => {
     const clock = new DocumentClock();

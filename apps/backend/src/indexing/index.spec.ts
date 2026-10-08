@@ -85,8 +85,10 @@ function signatureChecks(svc: IndexingService): unknown[] {
     docId: string,
     name: string,
     edition: { label: string; editionDate: string } | null,
+    signal?: AbortSignal,
   ) => Promise<boolean> = svc.updateMetadata.bind(svc);
-  const remove: (docId: string) => Promise<boolean> = svc.deleteChunks.bind(svc);
+  const remove: (docId: string, signal?: AbortSignal) => Promise<boolean> =
+    svc.deleteChunks.bind(svc);
   return [request, notify, reconcile, stages, metadata, remove];
 }
 

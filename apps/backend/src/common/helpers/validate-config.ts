@@ -77,6 +77,7 @@ const KEY_SPECS: { readonly [K in keyof AppConfig]: KeySpec<AppConfig[K]> } = {
   RAG_EVENTS_TOKEN: { parse: nonEmpty },
   RAG_TIMEOUT_MS: { fallback: '30000', parse: intIn(1) },
   RAG_CAPTION_TIMEOUT_MS: { fallback: '120000', parse: intIn(1) },
+  RAG_WAIT_TIMEOUT_MS: { fallback: '600000', parse: intIn(1) },
   CHUNKING_MODE: { fallback: 'semantic', parse: oneOf(['semantic', 'rule'] as const) },
   RECONCILE_INTERVAL_MS: { fallback: '60000', parse: intIn(1) },
   RAG_RETRY_INTERVAL_MS: { fallback: '60000', parse: intIn(1) },

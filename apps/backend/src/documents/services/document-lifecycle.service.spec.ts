@@ -343,7 +343,7 @@ describe('REQ-BE-1.8.4', () => {
     await h.lifecycle.requestIndexFor(DOC_A, '1', false);
     expect(docOf(h.db, DOC_A).pendingRag.deleteChunks).toBe(true);
     await h.drain();
-    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A);
+    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A, expect.any(AbortSignal));
   });
 });
 
@@ -792,7 +792,7 @@ describe('REQ-BE-1.2.8', () => {
     expect(record?.detail?.reasonCode).toBe('REPLACED');
     // 청크 삭제가 실패하면 표시가 남는다
     await h.drain();
-    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A);
+    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A, expect.any(AbortSignal));
     expect(docOf(h.db, DOC_A).pendingRag.deleteChunks).toBe(true);
     // 다음 시도가 성공하면 표시가 지워진다
     await h.lifecycle.syncChunkDeletion(DOC_A);

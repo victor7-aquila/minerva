@@ -9,6 +9,7 @@ export interface AppConfig {
   RAG_EVENTS_TOKEN: string;
   RAG_TIMEOUT_MS: number;
   RAG_CAPTION_TIMEOUT_MS: number;
+  RAG_WAIT_TIMEOUT_MS: number;
   CHUNKING_MODE: 'semantic' | 'rule';
   RECONCILE_INTERVAL_MS: number;
   RAG_RETRY_INTERVAL_MS: number;

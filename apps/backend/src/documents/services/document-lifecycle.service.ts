@@ -643,8 +643,9 @@ export class DocumentLifecycle {
       if (doc.deleted && !doc.purged) await this.purge(docId);
       return;
     }
-    // ★ 거짓이면 표시가 남아 주기 작업이 다시 부른다 (REQ-BE-1.8.4)
-    if (!(await this.indexing.deleteChunks(docId))) return;
+    // ★ 거짓이면 표시가 남아 주기 작업이 다시 부른다 (REQ-BE-1.8.4).
+    //   종료 때 끊겨도 거짓이라 표시가 남고, 다음 기동 뒤 재요청이 잇는다
+    if (!(await this.indexing.deleteChunks(docId, this.tasks.stopSignal))) return;
     await this.repo.updateDocument(
       { docId, 'pendingRag.deleteChunks': true },
       { 'pendingRag.deleteChunks': false },
@@ -700,6 +701,7 @@ export class DocumentLifecycle {
       docId,
       doc.name,
       doc.edition ? { label: doc.edition.label, editionDate: doc.edition.editionDate } : null,
+      this.tasks.stopSignal,
     );
     if (!ok) return;
     // ★ 그사이 다른 편집이 있었으면 표시를 남겨 다음 주기가 새 값을 보낸다 (D7)

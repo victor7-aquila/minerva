@@ -221,17 +221,19 @@ export class IndexingService implements OnModuleInit {
     return stages;
   }
 
-  /** RAG Server에 이름·판 정보 변경을 요청한다. 실패하면 예외 없이 거짓이다. */
+  /** RAG Server에 이름·판 정보 변경을 요청한다. 실패하거나 signal로 끊기면 예외 없이 거짓이다. */
   async updateMetadata(
     docId: string,
     name: string,
     edition: IndexRequestInput['edition'],
+    signal?: AbortSignal,
   ): Promise<boolean> {
     try {
       await this.rag.updateMetadata(
         docId,
         name,
         edition === null ? null : { label: edition.label, editionDate: edition.editionDate },
+        signal,
       );
       return true;
     } catch (error) {
@@ -241,10 +243,10 @@ export class IndexingService implements OnModuleInit {
     }
   }
 
-  /** RAG Server에 문서의 청크 삭제를 요청한다. 실패하면 예외 없이 거짓이다. */
-  async deleteChunks(docId: string): Promise<boolean> {
+  /** RAG Server에 문서의 청크 삭제를 요청한다. 실패하거나 signal로 끊기면 예외 없이 거짓이다. */
+  async deleteChunks(docId: string, signal?: AbortSignal): Promise<boolean> {
     try {
-      await this.rag.deleteDocument(docId);
+      await this.rag.deleteDocument(docId, signal);
       return true;
     } catch (error) {
       if (!isRagFailure(error)) throw error;
