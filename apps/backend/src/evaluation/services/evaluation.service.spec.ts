@@ -547,12 +547,13 @@ describe('REQ-BE-5.2.3', () => {
 
   it('T-PR3-EVR-3 보조 갱신까지 실패하면 기록은 평가 중으로 남고 처리되지 않은 거부는 없다', async () => {
     const unhandled: unknown[] = [];
+    let view!: GoldenSetView;
     const onUnhandled = (reason: unknown): void => {
       unhandled.push(reason);
     };
     process.on('unhandledRejection', onUnhandled);
     try {
-      await h.service.create(body());
+      view = await h.service.create(body());
       h.db.failNext('updateOne', new Error('db down 1'));
       h.db.failNext('updateMany', new Error('db down 2'));
       await h.tasks.drain();
@@ -565,10 +566,18 @@ describe('REQ-BE-5.2.3', () => {
     }
     expect(unhandled).toEqual([]);
     expect(records()[0].outcome).toBe('evaluating');
-    // ★ 보조 갱신의 실패가 아니라 원래 오류가 작업 실패로 남는다
+    // ★ 원래 오류와 보조 갱신 실패가 각각 남는다 — 보조 갱신 실패(fail_records)가 먼저, 원래 오류(evaluate)가 다음이다
     const failed = linesOf('evaluation.task_failed');
-    expect(failed).toHaveLength(1);
-    expect(failed[0].errorName).toBe('Error');
+    expect(
+      failed.map((line) => ({
+        task: line.task,
+        goldenSetId: line.goldenSetId,
+        errorName: line.errorName,
+      })),
+    ).toEqual([
+      { task: 'fail_records', goldenSetId: null, errorName: 'Error' },
+      { task: 'evaluate', goldenSetId: view.golden_set_id, errorName: 'Error' },
+    ]);
   });
 });
 
@@ -681,6 +690,76 @@ describe('REQ-BE-5.2.4', () => {
         .sort(),
     ).toEqual(['G2', 'G3']);
   });
+
+  /** 부분 실패 시나리오의 공통 준비다: 앞 두 건이 들어간 뒤 insertMany가 실패한다. */
+  async function failPartialInsert(): Promise<void> {
+    await seedFinished(['G1', 'G2', 'G3']);
+    // ★ 앞 두 건만 들어간 뒤 실패한다(ordered insertMany)
+    h.db.failNext('insertMany', new Error('db down'), { insertFirst: 2 });
+  }
+
+  it('T-PR3-EVR-4 기록 저장이 부분 실패하면 이번 요청이 만든 기록을 지워 이전 최근 기록이 그대로이고 다음 전체 다시 평가는 성공한다', async () => {
+    await failPartialInsert();
+    const seeded = JSON.stringify(records());
+    await expect(h.service.evaluateAll()).rejects.toThrow('db down');
+    // ★ 시드한 기록 셋뿐이고 값이 그대로다
+    expect(records().map((r) => r.recordId)).toEqual(['r-G1', 'r-G2', 'r-G3']);
+    expect(JSON.stringify(records())).toBe(seeded);
+    expect(records().filter((r) => r.outcome === 'evaluating')).toEqual([]);
+    expect(h.rag.evaluate).toHaveBeenCalledTimes(0);
+    const page = await h.service.list(listQuery());
+    expect(page.items.map((item) => item.latest.outcome)).toEqual(['hit', 'hit', 'hit']);
+    // 평가 중 기록이 남지 않았으므로 다음 요청은 409가 아니다
+    await expect(h.service.evaluateAll()).resolves.toBeUndefined();
+    await h.tasks.drain();
+    expect(h.rag.evaluate).toHaveBeenCalledTimes(3);
+  });
+
+  it('T-FU-EVR-6 이번 요청 기록을 지우지 못하면 error로 끝내고 원래 오류로 거부한다', async () => {
+    await failPartialInsert();
+    h.db.failNext('deleteMany', new Error('delete down'));
+    await expect(h.service.evaluateAll()).rejects.toThrow('db down');
+    // ★ 기동 때 고아 기록을 지우는 deleteMany와 구별하려고 recordId 조건이 있는 호출을 본다
+    expect(
+      h.db.calls.some(
+        (call) => call.op === 'deleteMany' && JSON.stringify(call.filter).includes('recordId'),
+      ),
+    ).toBe(true);
+    const added = records().filter((r) => !r.recordId.startsWith('r-'));
+    expect(added).toHaveLength(2);
+    for (const record of added) {
+      expect(record.outcome).toBe('error');
+      expect(record.errorMessage).toBe(EVALUATION_MESSAGES.unexpected);
+    }
+    expect(records().filter((r) => r.outcome === 'evaluating')).toEqual([]);
+  });
+
+  it('T-FU-EVR-7 지우기와 error 끝내기가 모두 실패하면 기록은 평가 중으로 남고 fail_records 작업 실패 로그가 하나 남는다', async () => {
+    await failPartialInsert();
+    h.db.failNext('deleteMany', new Error('delete down'));
+    h.db.failNext('updateMany', new Error('update down'));
+    await expect(h.service.evaluateAll()).rejects.toThrow('db down');
+    const added = records().filter((r) => !r.recordId.startsWith('r-'));
+    expect(added).toHaveLength(2);
+    expect(added.map((r) => r.outcome)).toEqual(['evaluating', 'evaluating']);
+    const failed = linesOf('evaluation.task_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].task).toBe('fail_records');
+    expect(failed[0].goldenSetId).toBeNull();
+    expect(failed[0].errorName).toBe('Error');
+  });
+
+  it('T-FU-EVR-8 기록 지우기는 이번 요청의 평가 중 기록만 대상으로 한다', async () => {
+    await seedFinished(['G1', 'G2']);
+    // ★ 골든셋을 시드하지 않은 고아 평가 중 기록이다(전체 다시 평가가 409로 막히지 않게 한다)
+    await h.db
+      .collection('evaluation_records')
+      .insertOne({ ...evaluatingRecord({ recordId: 'r-orphan', goldenSetId: 'GX' }) });
+    h.db.failNext('insertMany', new Error('db down'), { insertFirst: 1 });
+    await expect(h.service.evaluateAll()).rejects.toThrow('db down');
+    expect(records().map((r) => r.recordId)).toEqual(['r-G1', 'r-G2', 'r-orphan']);
+    expect(records().find((r) => r.recordId === 'r-orphan')?.outcome).toBe('evaluating');
+  });
 });
 
 describe('REQ-BE-5.2.5', () => {
@@ -726,25 +805,6 @@ describe('REQ-BE-5.2.5', () => {
     await h.tasks.drain();
     await expect(h.service.evaluateAll()).resolves.toBeUndefined();
     await h.tasks.drain();
-  });
-
-  it('T-PR3-EVR-4 기록 저장이 부분 실패하면 들어간 기록을 error로 끝내고 다음 전체 다시 평가는 성공한다', async () => {
-    await seedFinished(['G1', 'G2', 'G3']);
-    // ★ 앞 두 건만 들어간 뒤 실패한다(ordered insertMany)
-    h.db.failNext('insertMany', new Error('db down'), { insertFirst: 2 });
-    await expect(h.service.evaluateAll()).rejects.toThrow('db down');
-    const added = records().filter((r) => !r.recordId.startsWith('r-'));
-    expect(added).toHaveLength(2);
-    for (const record of added) {
-      expect(record.outcome).toBe('error');
-      expect(record.errorMessage).toBe(EVALUATION_MESSAGES.unexpected);
-    }
-    expect(records().filter((r) => r.outcome === 'evaluating')).toEqual([]);
-    expect(h.rag.evaluate).toHaveBeenCalledTimes(0);
-    // 평가 중 기록이 남지 않았으므로 다음 요청은 409가 아니다
-    await expect(h.service.evaluateAll()).resolves.toBeUndefined();
-    await h.tasks.drain();
-    expect(h.rag.evaluate).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -1238,5 +1298,18 @@ describe('REQ-BE-8.2.1', () => {
     expect(failed[0].level).toBe(40);
     expect(extraKeys(failed[0])).toEqual(['errorName', 'goldenSetId', 'task']);
     expect(failed[0].errorName).toBe('Error');
+  });
+
+  it('T-FU-LOG-4 보조 갱신 실패 로그는 작업 이름·골든셋 ID(null)·오류 이름만 남기고 오류 메시지는 남기지 않는다', async () => {
+    await h.service.create(body());
+    h.db.failNext('updateOne', new Error('db down 1'));
+    h.db.failNext('updateMany', new Error('SECRET-UPDATE-77'));
+    await h.tasks.drain();
+    const failed = linesOf('evaluation.task_failed').filter((line) => line.task === 'fail_records');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].level).toBe(40);
+    expect(extraKeys(failed[0])).toEqual(['errorName', 'goldenSetId', 'task']);
+    expect(failed[0].goldenSetId).toBeNull();
+    for (const line of capture.lines) expect(line).not.toContain('SECRET-UPDATE-77');
   });
 });

@@ -15,6 +15,7 @@ import { DOC_A, DOC_B, INDEXING_MD, SPAN_SENT, waitUntil } from './support/evalu
 import { startFakeRagServer } from './support/fake-rag-server';
 import type { FakeRagServer, FakeReply, RecordedRequest } from './support/fake-rag-server';
 import { createLogCapture } from './support/log-capture';
+import { EvaluationCrudService } from '../src/evaluation/services/evaluation-crud.service';
 import {
   assertMongoReachable,
   createTestDbName,
@@ -460,7 +461,7 @@ describe('REQ-BE-5.2.5', () => {
 });
 
 describe('REQ-BE-5.3.2', () => {
-  it('T-PR3-E2E-EVL-1 평가를 세 번 하면 최근 기록은 마지막 결과이고 실제 Mongo의 aggregate도 같다', async () => {
+  it('T-PR3-E2E-EVL-1 평가를 세 번 하면 최근 기록은 마지막 결과이고 실제 Mongo에서 findLatestRecordsOf도 같다', async () => {
     // ★ 같은 골든셋의 평가 결과가 호출마다 다르게 나오도록 순서대로 응답한다(적중, 적중, 놓침)
     let evaluations = 0;
     fake.setHandler((req) => {
@@ -488,17 +489,8 @@ describe('REQ-BE-5.3.2', () => {
     expect(list.items).toHaveLength(1);
     expect(list.items[0].latest.outcome).toBe('miss');
 
-    // 실제 Mongo에서 같은 파이프라인 모양으로 골든셋마다 가장 늦게 시작한 기록 하나를 읽는다
-    const latest = await harness.db
-      .collection('evaluation_records')
-      .aggregate([
-        { $match: { goldenSetId: { $in: [id] } } },
-        { $sort: { goldenSetId: 1, startedAt: -1 } },
-        { $group: { _id: '$goldenSetId', latest: { $first: '$$ROOT' } } },
-        { $replaceRoot: { newRoot: '$latest' } },
-        { $project: { _id: 0 } },
-      ])
-      .toArray();
+    // ★ 테스트에 파이프라인을 복사하지 않고 서비스의 findLatestRecordsOf를 실제 Mongo로 실행한다
+    const latest = await harness.app.get(EvaluationCrudService).findLatestRecordsOf([id]);
     expect(latest).toHaveLength(1);
     expect(latest[0].outcome).toBe('miss');
   });
