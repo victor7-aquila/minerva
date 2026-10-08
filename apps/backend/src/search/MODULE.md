@@ -49,8 +49,7 @@ test/search.e2e-spec.ts
 | documents | DI | `resolveNames`, `visibleDocIds` | documents `MODULE.md` | `REQ-BE-4.1.2`, `REQ-BE-4.2.2` |
 | assets | DI | `restore` | assets `MODULE.md` | `REQ-BE-4.2.1` |
 | rag | DI | `RagClient.search` | rag `MODULE.md` | `REQ-BE-4.1.2` |
-| common | import | `RagUnavailableError` | common `MODULE.md` | `REQ-BE-4` |
-| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
+| common | DI·import | `RagUnavailableError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-4`, `REQ-BE-8.2.1` |
 
 ### 공개 표면
 

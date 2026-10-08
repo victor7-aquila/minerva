@@ -65,7 +65,7 @@ flowchart LR
     Svc -.->|IF-BE-1 이벤트| Documents
 ```
 
-점선은 NestJS 이벤트다. common·storage·라이브러리 의존은 생략했다.
+점선은 NestJS 이벤트다. common·storage 의존은 생략했다.
 
 ## 의존성과 공개 표면
 
@@ -76,8 +76,7 @@ flowchart LR
 | rag | DI | `submitIndexJob`, `getIndexJob`, `getIndexStates`, `updateMetadata`, `deleteDocument` | rag `MODULE.md` | `REQ-BE-3` |
 | documents | NestJS 이벤트 (발행) | `indexing.job-state-changed` | `IF-BE-1` | `REQ-BE-3.2.2`, `REQ-BE-3.3.1` |
 | storage | DI | `MONGO_DB`(컬렉션 `rag_event_cursors`) | storage `MODULE.md` | `REQ-BE-3.2.4` |
-| common | DI·import | `ConfigService`(`CHUNKING_MODE`, `RAG_EVENTS_TOKEN`), `UnauthorizedError` | common `MODULE.md` | `REQ-BE-3` |
-| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
+| common | DI·import | `ConfigService`(`CHUNKING_MODE`, `RAG_EVENTS_TOKEN`), `UnauthorizedError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-3`, `REQ-BE-8.2.1` |
 
 **금지 의존** — documents를 import하지 않는다. 문서 데이터는 documents가 인자로 넘기고, 결과는 반환값과 이벤트로 돌려준다(`ARCHITECT.md` 「의존 규칙」).
 
@@ -168,7 +167,7 @@ export class IndexingService {
 
 **`REQ-BE-3.1.2`** 접수한 작업 ID
 
-- 처리 계약: `accepted`·`reused`는 RAG Server가 준 `job_id`를 담는다. 그 값을 문서 버전에 쓰는 일은 documents가 한다(`REQ-BE-1.9.10`이 그 값으로 다시 요청할지 정한다)
+- 처리 계약: `accepted`·`reused`는 RAG Server가 준 `job_id`를 담는다. 그 값을 문서 버전에 쓰는 일은 documents가 한다
 - 충족 기준: 결과의 `jobId`가 응답의 `job_id`와 같다
 
 **`REQ-BE-3.1.3`** 설정한 청킹 방식

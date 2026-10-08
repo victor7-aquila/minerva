@@ -47,8 +47,7 @@ src/rag/**/*.spec.ts
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | RAG Server | HTTP | 모든 엔드포인트, `X-Minerva-Token` | `apps/rag-server/API.md` | `REQ-BE-10.1` |
-| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`, `RAG_WAIT_TIMEOUT_MS`), `RagUnavailableError` | common `MODULE.md` | `REQ-BE-10.1` |
-| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
+| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`, `RAG_WAIT_TIMEOUT_MS`), `RagUnavailableError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-10.1`, `REQ-BE-8.2.1` |
 
 ### 공개 표면
 

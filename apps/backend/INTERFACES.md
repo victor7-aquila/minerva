@@ -6,7 +6,7 @@
 
 | ID | 계약 | 참여 단위 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
-| `IF-BE-1` | 색인 작업 상태 이벤트 | indexing, documents | `REQ-BE-1.9`, `REQ-BE-1.2.5`, `REQ-BE-1.2.8`, `REQ-BE-3.2`, `REQ-BE-3.3` |
+| `IF-BE-1` | 색인 작업 상태 이벤트 | indexing, documents | `REQ-BE-1.9`, `REQ-BE-1.2.5`, `REQ-BE-1.2.8`, `REQ-BE-1.10.7`, `REQ-BE-3.2`, `REQ-BE-3.3` |
 
 ## IF-BE-1 색인 작업 상태 이벤트
 
@@ -17,7 +17,7 @@ indexing은 RAG Server의 작업 상태 알림(루트 `IF-2`)과 상태 맞추�
 | 단위 | 역할 | 관련 REQ |
 | :--- | :--- | :--- |
 | indexing | 생산 (알림·조회 결과를 이벤트로 바꾼다) | `REQ-BE-3.2`, `REQ-BE-3.3` |
-| documents | 소비 (상태 반영, 교체, 기록) | `REQ-BE-1.9.5`~`REQ-BE-1.9.8`, `REQ-BE-1.2.5`, `REQ-BE-1.2.8`, `REQ-BE-6.1.1` |
+| documents | 소비 (상태 반영, 교체, 기록) | `REQ-BE-1.9.5`~`REQ-BE-1.9.8`, `REQ-BE-1.2.5`, `REQ-BE-1.2.8`, `REQ-BE-1.10.7`, `REQ-BE-6.1.1` |
 
 ### 계약 표면
 
@@ -53,7 +53,7 @@ export interface IndexJobStateChangedEvent {
 
 | 필드 | 불변 조건 |
 | :--- | :--- |
-| `version` | 그 작업이 색인한 문서 버전. 색인을 요청할 때마다 새 버전이므로(`REQ-BE-1.6.3`) 버전 하나에 작업 하나다 |
+| `version` | 그 작업이 색인한 문서 버전. 같은 버전을 다시 요청하면(실패 문서를 색인 대기로 바꾼 뒤 `REQ-BE-1.10.5`, 연결 실패 뒤 다음 예약 색인 `REQ-BE-1.10.3`) 한 버전에 작업이 여럿일 수 있다. 같은 버전의 작업은 `jobId`로 가른다(`REQ-BE-1.9.6`) |
 | `searchableVersion` | 이벤트 시점에 RAG Server에서 검색되는 버전. 없으면 `null` |
 | `result` | `jobState`가 `succeeded`일 때만 값이 있다 |
 | `failure` | `jobState`가 `failed`일 때만 값이 있다 |
@@ -64,11 +64,11 @@ RAG Server가 색인 요청에 이미 같은 색인이 있다고 답한 경우(`
 ### 의무
 
 - **indexing** (생산) — 보장: 루트 `IF-2`의 순번 규칙으로 이미 반영한 순번 이하의 알림은 이벤트로 내지 않는다(`REQ-BE-3.2.4`). `failed`면 RAG Server에서 실패 사유를 받아 `failure`를 채운 뒤 낸다(`REQ-BE-3.2.3`). `succeeded`면 작업 결과를 받아 `result`를 채운다. 금지: 문서 컬렉션에 직접 쓰지 않는다.
-- **documents** (소비) — 보장: `version`이 그 문서의 마지막 버전이 아니거나, `jobState`가 `superseded`거나, 문서가 교체됨·삭제됨이면 처리 상태와 검색 상태를 바꾸지 않는다(`REQ-BE-1.9.6`). `queued`·`running`·`succeeded`·`failed`를 처리 상태 색인 대기·색인 중·완료·실패로 바꾸고, `failed`면 `failure`를 실패 사유로 남긴다(`REQ-BE-1.9.5`). `searchableVersion`이 있으면 검색 상태를 검색 가능으로 둔다(`REQ-BE-1.9.7`, `REQ-BE-1.9.8`). 문서가 이 이벤트로 검색 가능이 되면, 같은 판에서 판에 들어온 시각이 이 문서보다 이른 문서를 교체됨으로 바꾸고 그 문서의 청크 삭제를 요청한다(`REQ-BE-1.2.5`, `REQ-BE-1.2.8`). 처리 상태가 실제로 바뀐 경우에만 logs 서비스로 기록한다(`REQ-BE-6.1.1`). 같은 이벤트를 두 번 받아도 결과가 같다. 금지: 교체 여부를 RAG Server의 결과로 정하지 않는다. 교체는 documents가 같은 판과 판에 들어온 시각으로만 정한다.
+- **documents** (소비) — 보장: `version`이 그 문서의 마지막 버전이 아니거나, `jobState`가 `superseded`거나, 문서가 교체됨·삭제됨이면 처리 상태와 검색 상태를 바꾸지 않는다. 마지막 버전에 `jobId`가 기록돼 있으면 그와 다른 `jobId`의 이벤트도 같다(`REQ-BE-1.9.6`). `queued`·`running`·`succeeded`·`failed`를 처리 상태 색인 대기·색인 중·완료·실패로 바꾸고, `failed`면 `failure`를 실패 사유로 남긴다(`REQ-BE-1.9.5`). `queued`로 색인 대기가 되어도 색인 대기열에 넣지 않고, 이 이벤트로 처리 상태가 색인 대기 밖으로 바뀌면 같은 갱신에서 그 문서를 색인 대기열에서 뺀다(`REQ-BE-1.10.2`, `REQ-BE-1.10.7`). `searchableVersion`이 있으면 검색 상태를 검색 가능으로 둔다(`REQ-BE-1.9.7`, `REQ-BE-1.9.8`). 문서가 이 이벤트로 검색 가능이 되면, 같은 판에서 판에 들어온 시각이 이 문서보다 이른 문서를 교체됨으로 바꾸고 그 문서의 청크 삭제를 요청한다(`REQ-BE-1.2.5`, `REQ-BE-1.2.8`). 처리 상태가 실제로 바뀐 경우에만 logs 서비스로 기록한다(`REQ-BE-6.1.1`). 같은 이벤트를 두 번 받아도 결과가 같다. 금지: 교체 여부를 RAG Server의 결과로 정하지 않는다. 교체는 documents가 같은 판과 판에 들어온 시각으로만 정한다.
 
 ### 검증
 
 | 검증할 것 | 담당 단위 | 종류 | 대체 경계 |
 | :--- | :--- | :--- | :--- |
 | 순번 이하 알림 무시, 실패 사유·결과 채우기 | indexing | unit | rag (RAG Server 응답), 저장소 |
-| 상태 대응, 이전 버전·대체됨·교체됨·삭제됨 무시, 교체 대상 고르기와 청크 삭제 요청, 바뀐 경우만 기록, 같은 이벤트 두 번 | documents | unit | 저장소, indexing, logs |
+| 상태 대응, 이전 버전·대체됨·교체됨·삭제됨 무시, 같은 버전의 다른 작업 무시, 색인 대기 밖으로 바뀌면 대기열에서 빼기, 교체 대상 고르기와 청크 삭제 요청, 바뀐 경우만 기록, 같은 이벤트 두 번 | documents | unit | 저장소, indexing, logs |

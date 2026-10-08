@@ -20,7 +20,7 @@ Backend의 HTTP 공통 규약을 맡는다. 전역 요청 검증, 전역 예외 
 
 - 엔드포인트별 라우팅과 처리 — 각 기능 모듈의 컨트롤러 (`ARCHITECT.md` 「단위 구성」)
 - 오류 클래스와 메시지 정의 — common
-- 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) 정의 — utils 라이브러리 (`libs/utils`, `ARCHITECT.md` 「의존 규칙」)
+- 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) 정의 — common (`ARCHITECT.md` 「의존 규칙」)
 
 ## 구조
 
@@ -54,9 +54,7 @@ test/
 
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| common | DI·import | `CommonModule`, `ConfigService`(`PORT`, `UPLOAD_MAX_FILES`, `UPLOAD_MAX_TOTAL_BYTES`, `UPLOAD_MAX_IMAGE_BYTES`, `UPLOAD_MAX_MD_BYTES`), `DomainError` | common `MODULE.md` | `REQ-BE-7.1`, `REQ-BE-8.3` |
-| libs/logger | DI·import | `AppLoggerModule`(앱 조립), `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-7.1.1`, `REQ-BE-8.2.1` |
-| libs/utils | 참조 | 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | utils `MODULE.md` | `REQ-BE-7.1.3` |
+| common | DI·import | `CommonModule`(설정·로거, 앱 조립), `ConfigService`(`PORT`, `UPLOAD_MAX_FILES`, `UPLOAD_MAX_TOTAL_BYTES`, `UPLOAD_MAX_IMAGE_BYTES`, `UPLOAD_MAX_MD_BYTES`), `DomainError`, `PinoLogger` (nestjs-pino), 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | common `MODULE.md` | `REQ-BE-7.1`, `REQ-BE-8.2.1`, `REQ-BE-8.3` |
 | 모든 기능 모듈 | 앱 조립 | NestJS 모듈 | 각 `MODULE.md` | `REQ-BE-7.1.1` |
 
 ### 공개 표면
@@ -92,7 +90,7 @@ export class AppModule {}
 
 **`REQ-BE-7.1.3`** 목록은 페이지와 전체 개수
 
-- 처리 계약: 목록 엔드포인트는 utils 라이브러리의 페이지 규약(utils `MODULE.md` 「페이지 규약」)을 쓴다. 목록 DTO는 `PageQueryDto`를 이어받고, 응답은 `toPage()`로 만든다
+- 처리 계약: 목록 엔드포인트는 common의 페이지 규약(common `MODULE.md` 「페이지 규약」)을 쓴다. 목록 DTO는 `PageQueryDto`를 이어받고, 응답은 `toPage()`로 만든다
 - 충족 기준: 모든 목록 엔드포인트의 응답이 `items`, `total`, `page`, `page_size`를 갖고, 페이지 크기 20·50·100 밖은 `400`이다
 
 `DomainErrorFilter`는 `DomainError`를 `API.md` 「오류 코드」의 상태와 `{"error": {"code", "message"}}`로, 그 밖의 예외를 `500 INTERNAL_ERROR`와 일반 메시지로 바꾸고 스택은 애플리케이션 로그에만 남긴다(`REQ-BE-8.3.1`, `REQ-BE-8.3.2`). 그 충족 기준은 common이 소유하고, 아래 테스트 표가 HTTP 경계에서 함께 본다.
