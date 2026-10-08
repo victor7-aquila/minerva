@@ -400,22 +400,17 @@ function scanHtmlTags(text: string, from: number, to: number): HtmlTag[] {
   return found;
 }
 
-/** 표 짝을 구할 `html_block` 범위다. resetBefore가 참이면 직전 블록과 사이에 코드 블록이 있었다. */
-type HtmlBlockRange = TextRange & { resetBefore: boolean };
-
-/** `html_block` 토큰들의 범위를 문서 순서대로 모은다. 코드 블록을 만나면 다음 범위에 끊김을 표시한다. */
-function htmlBlockRanges(tokens: Token[]): HtmlBlockRange[] {
-  const ranges: HtmlBlockRange[] = [];
-  let reset = false;
+/**
+ * `html_block` 토큰들의 범위를 문서 순서대로 모은다.
+ * ★ 코드 블록(펜스·들여쓰기)은 훑지 않고 짝도 끊지 않는다 — 칸 안 코드 블록 때문에 HTML 블록이 끊겨도
+ *   닫는 </table>까지 표 하나다 (REQ-BE-2.1.1). 코드 블록 안의 </table>은 html_block이 아니라 짝이 아니다
+ */
+function htmlBlockRanges(tokens: Token[]): TextRange[] {
+  const ranges: TextRange[] = [];
   for (const token of tokens) {
-    if (token.type === 'fence' || token.type === 'code_block') {
-      reset = true;
-    } else if (token.type === 'html_block') {
-      const meta = metaOf(token);
-      if (meta === null) continue;
-      ranges.push({ start: meta.srcStart, end: meta.srcEnd, resetBefore: reset });
-      reset = false;
-    }
+    if (token.type !== 'html_block') continue;
+    const meta = metaOf(token);
+    if (meta !== null) ranges.push({ start: meta.srcStart, end: meta.srcEnd });
   }
   return ranges;
 }
@@ -424,11 +419,10 @@ function htmlBlockRanges(tokens: Token[]): HtmlBlockRange[] {
  * HTML 표의 여는 태그 시작 → 닫는 태그 끝을 짝짓는다.
  * ★ 문단·인라인 코드의 글(`<script>` 같은 낱말)이 짝을 깨지 않게 표 후보가 나오는 `html_block` 범위만 훑는다
  */
-function htmlTablePairs(text: string, blocks: readonly HtmlBlockRange[]): Map<number, number> {
+function htmlTablePairs(text: string, blocks: readonly TextRange[]): Map<number, number> {
   const pairs = new Map<number, number>();
-  let stack: number[] = [];
+  const stack: number[] = [];
   for (const block of blocks) {
-    if (block.resetBefore) stack = [];
     for (const tag of scanHtmlTags(text, block.start, block.end)) {
       if (tag.name !== 'table') continue;
       if (!tag.closing) {
@@ -720,8 +714,11 @@ function htmlTableHeads(tableHtml: string): string {
   return heads.join(', ');
 }
 
-/** 이미지로 보지 않는 HTML 블록의 시작 표지다. */
-const HTML_SKIP_PREFIXES = ['<!--', '<pre', '<script', '<style', '<textarea'];
+/**
+ * 블록 전체를 표·이미지로 보지 않는 `<pre>` 블록의 시작 태그다. ★ 태그 이름 경계로 본다(`<preview>`는 아니다).
+ * 주석·script·style·textarea는 블록을 건너뛰지 않는다 — scanHtmlTags가 그 안만 건너뛴다
+ */
+const PRE_BLOCK_HEAD = /^<pre(?=[\s/>]|$)/i;
 
 /** `html_block` 하나에서 후보를 모은다. ★ 블록 전체를 훑는다 — `</table>` 뒤의 태그도 후보다 */
 function htmlBlockCandidates(
@@ -731,8 +728,8 @@ function htmlBlockCandidates(
 ): Candidate[] {
   const meta = metaOf(token);
   if (meta === null) return [];
-  const head = token.content.trimStart().toLowerCase();
-  if (HTML_SKIP_PREFIXES.some((prefix) => head.startsWith(prefix))) return [];
+  const head = token.content.trimStart();
+  if (PRE_BLOCK_HEAD.test(head)) return [];
   const found: Candidate[] = [];
   for (const tag of scanHtmlTags(map.normalized, meta.srcStart, meta.srcEnd)) {
     if (tag.name === 'table') {

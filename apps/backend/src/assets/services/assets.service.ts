@@ -134,7 +134,7 @@ export class AssetsService implements OnModuleInit {
 
     // ★ assetCount는 자리표시가 있는 최상위 표·이미지만 센다(표 안 이미지 제외). REQUIREMENTS 「용어」
     //   표·이미지: "표 안의 이미지 참조는 따로 세지 않고 그 표의 일부로 본다".
-    //   반면 로그의 images는 표 안 이미지를 포함한 수다 — 같은 로그의 unmatched와 기준을 맞춘다(IMPL_PLAN)
+    //   반면 로그의 images는 표 안 이미지를 포함한 수다 — 같은 로그의 unmatched와 기준을 맞춘다
     const topLevel = records.filter(isTopLevel);
     const tables = topLevel.filter((record) => record.kind === 'table').length;
     const imageCount = records.length - tables;
