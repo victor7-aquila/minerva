@@ -503,7 +503,7 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 
 | 필드 | 타입 | 필수 | 설명·제약 |
 | :--- | :--- | :--- | :--- |
-| `code` | `string` | 필수 | 실패 사유 코드. Backend가 정하는 코드는 `RAG_UNREACHABLE`(RAG Server에 색인을 요청하지 못함, `REQ-BE-1.9.4`)와 `REPLACED`(처리 중에 교체됨, `REQ-BE-1.2.8`)이고, 그 밖은 RAG Server 작업의 실패 사유 코드다 (`REQ-BE-1.9.5`) |
+| `code` | `string` | 필수 | 실패 사유 코드. Backend가 정하는 코드는 `RAG_UNREACHABLE`(RAG Server에 색인을 요청하지 못함, `REQ-BE-1.9.4`)와 `REPLACED`(처리 중에 교체됨, `REQ-BE-1.2.8`)다. RAG Server가 색인 요청을 거부하면 그 오류 코드 `PAYLOAD_TOO_LARGE`(색인용 MD가 크기 한도를 넘음)·`INVALID_REQUEST`(형식 오류)다 (`REQ-BE-1.9.4`). 그 밖은 RAG Server 작업의 실패 사유 코드다 (`REQ-BE-1.9.5`) |
 | `message` | `string` | 필수 | 한국어 설명 |
 | `heading_path` | `string[]` | 선택 | 문제가 난 절. 모르면 `null` |
 | `placeholder_id` | `string` | 선택 | 문제가 난 표·이미지. 모르면 `null` |

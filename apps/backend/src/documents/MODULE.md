@@ -436,10 +436,10 @@ classDiagram
 
 - 충족 기준: 색인 요청이 RAG Server에 닿는 순간 처리 상태가 이미 `queued`다
 
-**`REQ-BE-1.9.4`** 이미 같은 색인 → 완료, 요청 실패 → 실패
+**`REQ-BE-1.9.4`** 이미 같은 색인 → 완료, 요청 실패·거부 → 실패
 
-- 처리 계약: `reused`면 `completed`로 두고 `searchableVersion`은 그대로 둔다. `unreachable`이면 `failed`(코드 `RAG_UNREACHABLE`)다. `accepted`면 `jobId`를 버전에 남긴다(`REQ-BE-3.1.2`). `reused`면 `jobId`를 남기고 결과는 `searchableVersion` 버전의 결과를 복사한다. 요청 결과는 처리 상태가 아직 `queued`일 때만 반영한다 — 그사이 작업 상태 이벤트(`REQ-BE-1.9.5`)나 삭제·교체가 상태를 바꿨으면 그 상태를 둔다
-- 충족 기준: 세 결과마다 처리 상태와 버전의 `jobId`가 위와 같다
+- 처리 계약: `reused`면 `completed`로 두고 `searchableVersion`은 그대로 둔다. `unreachable`이면 `failed`(코드 `RAG_UNREACHABLE`)다. `rejected`면 `failed`이고, 실패 사유의 코드는 RAG Server가 준 코드, 위치는 `null`, 설명은 코드별로 정한다 — `PAYLOAD_TOO_LARGE`는 `색인용 MD가 RAG Server의 크기 한도를 넘어 색인하지 못했습니다`, `INVALID_REQUEST`는 `RAG Server가 색인 요청을 형식 오류로 거부했습니다`. 거부는 같은 요청을 다시 보내도 같으므로 다시 요청하지 않는다. `accepted`면 `jobId`를 버전에 남긴다(`REQ-BE-3.1.2`). `reused`면 `jobId`를 남기고 결과는 `searchableVersion` 버전의 결과를 복사한다. 요청 결과는 처리 상태가 아직 `queued`일 때만 반영한다 — 그사이 작업 상태 이벤트(`REQ-BE-1.9.5`)나 삭제·교체가 상태를 바꿨으면 그 상태를 둔다
+- 충족 기준: 네 결과마다 처리 상태와 버전의 `jobId`가 위와 같고, `rejected`의 실패 사유 코드가 RAG Server가 준 코드다
 
 **`REQ-BE-1.9.5`** 작업 상태 → 처리 상태
 
@@ -518,7 +518,7 @@ stateDiagram-v2
     completed --> queued: 요약·캡션 변경, 재색인 (임시 설명 없음)
     failed --> queued: 요약·캡션 변경, 재색인 (임시 설명 없음)
     queued --> completed: reused, succeeded
-    queued --> failed: unreachable, failed
+    queued --> failed: unreachable, rejected, failed
     queued --> indexing: running
     indexing --> completed: succeeded
     indexing --> failed: failed
@@ -584,7 +584,7 @@ stateDiagram-v2
 
 ### 런타임·보안
 
-- **실행 형태** — 표·이미지 처리와 색인 요청은 요청에 응답한 뒤 백그라운드로 한다. 주기 작업은 앞 실행이 끝나기 전에 겹쳐 돌지 않는다. 백그라운드 작업은 응답 뒤(다음 이벤트 루프 차례)에 시작하고, 실패는 `documents.task_failed`로 남긴다. 종료할 때는 새 작업을 받지 않고 진행 중인 작업을 기다린 뒤 저장소를 닫는다(멈춘 표·이미지 처리는 다음 기동 처리가 잇는다).
+- **실행 형태** — 표·이미지 처리와 색인 요청은 요청에 응답한 뒤 백그라운드로 한다. 주기 작업은 앞 실행이 끝나기 전에 겹쳐 돌지 않는다. 백그라운드 작업은 응답 뒤(다음 이벤트 루프 차례)에 시작하고, 실패는 `documents.task_failed`로 남긴다. 종료할 때는 새 작업을 받지 않고 진행 중인 작업을 기다린 뒤 저장소를 닫는다(멈춘 표·이미지 처리는 다음 기동 처리가 잇는다). ★ 기다리기 전에 청크 삭제·이름·판 정보 변경 요청은 끊는다 — 이 요청은 `RAG_WAIT_TIMEOUT_MS`(기본 10분)까지 기다려 종료를 붙잡는다. 백그라운드 작업이 `indexing.deleteChunks`·`indexing.updateMetadata`에 종료 때 중단되는 `signal`을 넘기며, 끊긴 요청은 실패와 같아 `pendingRag` 표시가 남고 다음 기동 뒤 재요청이 잇는다(`REQ-BE-1.8.4`, `REQ-BE-3.4.2`).
 - **동시성** — 상태를 바꾸는 쓰기는 기대하는 현재 상태를 조건으로 한 원자적 갱신이다. 조건이 맞지 않으면 바꾸지 않는다
 
 ## 테스트와 추적성
@@ -636,13 +636,13 @@ stateDiagram-v2
 | `REQ-BE-1.8.1` | e2e | 즉시 `204`와 삭제됨 | RAG Server (가짜, 지연) | `test/` |
 | `REQ-BE-1.8.2` | unit | 목록·조회·검색·이름 목록에서 빠짐 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.3` | unit | 삭제 뒤 남은 요청 없음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.8.4` | unit | 청크 삭제 재요청 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.8.4` | unit | 청크 삭제 재요청, 종료 때 요청을 끊고 표시를 남김 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.5` | unit | 청크 삭제 뒤에만 데이터 삭제 | indexing·assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.6` | unit | 삭제 뒤 이름·판 유지 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.1` | unit | 다시 올리기 → 업로드됨 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.2` | unit | 요약·캡션 생성 중을 거침 | assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.3` | unit | 요청 순간 이미 색인 대기 | indexing (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.9.4` | unit | 결과별 상태와 작업 ID | indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.4` | unit | 결과별 상태와 작업 ID, 거부 코드별 실패 사유 | indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.5` | unit | 이벤트별 처리 상태, 실패 사유 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.6` | unit | 반영하지 않는 이벤트 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.7` | unit | 검색 가능 전환과 교체 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |

@@ -47,7 +47,7 @@ src/rag/**/*.spec.ts
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | RAG Server | HTTP | 모든 엔드포인트, `X-Minerva-Token` | `apps/rag-server/API.md` | `REQ-BE-10.1` |
-| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`), `RagUnavailableError` | common `MODULE.md` | `REQ-BE-10.1` |
+| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`, `RAG_WAIT_TIMEOUT_MS`), `RagUnavailableError` | common `MODULE.md` | `REQ-BE-10.1` |
 | libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
 
 ### 공개 표면
@@ -77,10 +77,15 @@ export class RagClient {
   captionImage(image: Buffer, fileName: string): Promise<string>;
   submitIndexJob(req: RagIndexRequest): Promise<RagIndexJobAccepted>;
   getIndexJob(jobId: string): Promise<RagIndexJob>;
-  deleteDocument(docId: string): Promise<void>;
+  deleteDocument(docId: string, signal?: AbortSignal): Promise<void>;
   getIndexState(docId: string): Promise<RagIndexState>;
   getIndexStates(docIds: readonly string[]): Promise<RagIndexState[]>;
-  updateMetadata(docId: string, name: string, edition: RagEdition | null): Promise<void>;
+  updateMetadata(
+    docId: string,
+    name: string,
+    edition: RagEdition | null,
+    signal?: AbortSignal,
+  ): Promise<void>;
   getDocumentChunks(docId: string): Promise<RagDocumentChunks>;
   search(req: RagSearchRequest): Promise<RagSearchResult[]>;
   evaluate(req: RagEvaluationRequest): Promise<RagEvaluationResult>;
@@ -101,8 +106,8 @@ export class RagClient {
 
 **`REQ-BE-10.1.3`** 호출마다 시간 제한
 
-- 처리 계약: `summarizeTable`·`captionImage`는 `RAG_CAPTION_TIMEOUT_MS`, 나머지는 `RAG_TIMEOUT_MS`를 시간 제한으로 둔다
-- 충족 기준: 제한보다 늦게 답하는 가짜 서버에서 각 메서드가 그 제한에서 `RagUnavailableError`를 낸다
+- 처리 계약: `summarizeTable`·`captionImage`는 `RAG_CAPTION_TIMEOUT_MS`, `deleteDocument`·`updateMetadata`는 `RAG_WAIT_TIMEOUT_MS`, 나머지는 `RAG_TIMEOUT_MS`를 시간 제한으로 둔다. `deleteDocument`·`updateMetadata`는 RAG Server가 색인 중인 작업이 끝날 때까지 응답을 미루므로 긴 제한을 쓴다(`apps/rag-server/API.md`). 이 둘에 `signal`을 주면 시간 제한 전이라도 `signal`이 중단될 때 요청을 끊고 `RagUnavailableError`를 낸다 — ★ 종료 때 오래 기다리는 요청이 종료를 붙잡지 않게 하려는 것이다
+- 충족 기준: 제한보다 늦게 답하는 가짜 서버에서 각 메서드가 그 제한에서 `RagUnavailableError`를 내고, `deleteDocument`·`updateMetadata`는 `RAG_TIMEOUT_MS`를 넘겨도 `RAG_WAIT_TIMEOUT_MS` 전에는 끝나지 않으며, `signal`을 중단하면 바로 `RagUnavailableError`를 낸다
 
 **`REQ-BE-10.1.4`** API 토큰을 담아 호출
 
@@ -112,7 +117,7 @@ export class RagClient {
 
 ### 설정
 
-정의는 common 「설정」이 소유한다. 이 모듈이 읽는 키: `RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`.
+정의는 common 「설정」이 소유한다. 이 모듈이 읽는 키: `RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`, `RAG_WAIT_TIMEOUT_MS`.
 
 ### 예외
 
@@ -135,5 +140,5 @@ export class RagClient {
 | :--- | :--- | :--- | :--- | :--- |
 | `REQ-BE-10.1.1` | unit | 메서드별 경로·메서드·본문 | RAG Server (가짜 HTTP) | `src/rag/**/*.spec.ts` |
 | `REQ-BE-10.1.2` | unit | 연결 거부·시간 초과·503은 `RagUnavailableError`, 그 밖은 `RagRequestError`와 코드 | RAG Server (가짜 HTTP) | `src/rag/**/*.spec.ts` |
-| `REQ-BE-10.1.3` | unit | 요약·캡션과 나머지의 시간 제한 | RAG Server (가짜 HTTP, 지연) | `src/rag/**/*.spec.ts` |
+| `REQ-BE-10.1.3` | unit | 요약·캡션, 삭제·이름 변경, 나머지의 시간 제한과 `signal` 중단 | RAG Server (가짜 HTTP, 지연) | `src/rag/**/*.spec.ts` |
 | `REQ-BE-10.1.4` | unit | 모든 요청의 토큰 헤더 | RAG Server (가짜 HTTP) | `src/rag/**/*.spec.ts` |

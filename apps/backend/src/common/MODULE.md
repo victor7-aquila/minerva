@@ -153,6 +153,7 @@ export type SearchState = 'searchable' | 'not_searchable' | 'replaced';
 | `RAG_EVENTS_TOKEN` | `string` | 필수 | 비밀. RAG Server의 `RAG_BACKEND_EVENTS_TOKEN`과 같은 값 | `REQ-BE-3.2.5` |
 | `RAG_TIMEOUT_MS` | `number` | `30000` | 1 이상 | `REQ-BE-10.1.3` |
 | `RAG_CAPTION_TIMEOUT_MS` | `number` | `120000` | 1 이상 | `REQ-BE-10.1.3` |
+| `RAG_WAIT_TIMEOUT_MS` | `number` | `600000` | 1 이상. 문서 삭제·이름 변경 호출 | `REQ-BE-10.1.3` |
 | `CHUNKING_MODE` | `'semantic' \| 'rule'` | `semantic` | | `REQ-BE-3.1.3` |
 | `RECONCILE_INTERVAL_MS` | `number` | `60000` | 1 이상 | `REQ-BE-3.3.1` |
 | `RAG_RETRY_INTERVAL_MS` | `number` | `60000` | 1 이상. 청크 삭제·이름·판 정보 변경 재요청 주기 | `REQ-BE-1.8.4`, `REQ-BE-3.4.2` |
