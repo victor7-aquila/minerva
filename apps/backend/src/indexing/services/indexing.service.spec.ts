@@ -263,10 +263,35 @@ describe('REQ-BE-3.1.1', () => {
     expect(lines[0].level).toBe(40);
   });
 
-  it('T-REQ-4 RAG Server가 오류로 응답해도 unreachable이고 코드를 남긴다', async () => {
-    fakeRag.submitIndexJob.mockRejectedValue(new RagRequestError(400, 'INVALID_REQUEST'));
-    await expect(service.requestIndex(input())).resolves.toEqual({ kind: 'unreachable' });
-    expect(logsOf('indexing.request_failed')[0].code).toBe('INVALID_REQUEST');
+  it('T-REQ-4 거부가 아닌 오류 응답은 unreachable이고 코드를 남긴다', async () => {
+    const causes: Array<[RagRequestError, string]> = [
+      [new RagRequestError(500, 'INTERNAL_ERROR'), 'INTERNAL_ERROR'],
+      [new RagRequestError(401, 'UNAUTHORIZED'), 'UNAUTHORIZED'],
+      // 상태와 코드가 함께 맞지 않으면 거부로 보지 않는다
+      [new RagRequestError(500, 'PAYLOAD_TOO_LARGE'), 'PAYLOAD_TOO_LARGE'],
+      [new RagRequestError(400, 'UNKNOWN'), 'UNKNOWN'],
+    ];
+    for (const [error, code] of causes) {
+      capture.clear();
+      fakeRag.submitIndexJob.mockRejectedValue(error);
+      await expect(service.requestIndex(input())).resolves.toEqual({ kind: 'unreachable' });
+      expect(logsOf('indexing.request_failed')[0].code).toBe(code);
+    }
+  });
+
+  it('T-REQ-4b RAG Server가 색인 요청을 거부하면 그 코드로 rejected다', async () => {
+    const causes: Array<[RagRequestError, string]> = [
+      [new RagRequestError(413, 'PAYLOAD_TOO_LARGE'), 'PAYLOAD_TOO_LARGE'],
+      [new RagRequestError(400, 'INVALID_REQUEST'), 'INVALID_REQUEST'],
+    ];
+    for (const [error, code] of causes) {
+      capture.clear();
+      fakeRag.submitIndexJob.mockRejectedValue(error);
+      await expect(service.requestIndex(input())).resolves.toEqual({ kind: 'rejected', code });
+      const failed = logsOf('indexing.request_failed');
+      expect(failed).toHaveLength(1);
+      expect(payloadOf(failed[0])).toEqual({ operation: 'requestIndex', docId: 'doc-1', code });
+    }
   });
 
   it('T-REQ-5 계약 밖 outcome이면 INVALID_RESPONSE로 unreachable이다', async () => {

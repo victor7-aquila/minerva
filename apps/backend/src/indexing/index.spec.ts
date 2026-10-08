@@ -58,7 +58,10 @@ interface ExpectedIndexRequestInput {
   force: boolean;
 }
 type ExpectedIndexRequestOutcome =
-  { kind: 'accepted'; jobId: string } | { kind: 'reused'; jobId: string } | { kind: 'unreachable' };
+  | { kind: 'accepted'; jobId: string }
+  | { kind: 'reused'; jobId: string }
+  | { kind: 'rejected'; code: 'PAYLOAD_TOO_LARGE' | 'INVALID_REQUEST' }
+  | { kind: 'unreachable' };
 interface ExpectedRagEventNotification {
   docId: string;
   jobId: string;

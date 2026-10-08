@@ -16,6 +16,7 @@ import {
 import { DocumentsCrudService } from './documents-crud.service';
 import type { DocumentUpdate, VersionCondition, VersionUpdate } from './documents-crud.service';
 import {
+  RAG_REJECTED_FAILURES,
   RAG_UNREACHABLE_FAILURE,
   REPLACED_FAILURE,
   UNKNOWN_FAILURE,
@@ -407,6 +408,11 @@ export class DocumentLifecycle {
           );
         }
       }
+    } else if (outcome.kind === 'rejected') {
+      // ★ 거부는 다시 보내도 같으므로 재요청하지 않는다 (REQ-BE-1.9.4)
+      const failure = { ...RAG_REJECTED_FAILURES[outcome.code] };
+      await this.transition(docId, version, ['queued'], 'failed', failure);
+      return true;
     } else {
       await this.transition(docId, version, ['queued'], 'failed', RAG_UNREACHABLE_FAILURE);
       return true;

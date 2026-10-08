@@ -10,6 +10,7 @@ export type {
   IndexJobStateChangedEvent,
 } from './interfaces/indexing.events';
 export type {
+  IndexRejectionCode,
   IndexRequestInput,
   IndexRequestOutcome,
   RagEventNotification,

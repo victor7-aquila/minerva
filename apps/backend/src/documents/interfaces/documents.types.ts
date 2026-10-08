@@ -1,4 +1,5 @@
 import type { ProcessingState, SearchState } from '../../common';
+import type { IndexRejectionCode } from '../../indexing';
 
 /** 문서 컬렉션 이름이다. */
 export const DOCUMENTS_COLLECTION = 'documents';
@@ -173,6 +174,21 @@ export const RAG_UNREACHABLE_FAILURE: VersionFailure = {
   message: 'RAG Server에 색인을 요청하지 못했습니다',
   headingPath: null,
   placeholderId: null,
+};
+/** RAG Server가 색인 요청을 거부한 실패 사유다. 코드는 RAG Server의 오류 코드다 (REQ-BE-1.9.4). */
+export const RAG_REJECTED_FAILURES: Readonly<Record<IndexRejectionCode, VersionFailure>> = {
+  PAYLOAD_TOO_LARGE: {
+    code: 'PAYLOAD_TOO_LARGE',
+    message: '색인용 MD가 RAG Server의 크기 한도를 넘어 색인하지 못했습니다',
+    headingPath: null,
+    placeholderId: null,
+  },
+  INVALID_REQUEST: {
+    code: 'INVALID_REQUEST',
+    message: 'RAG Server가 색인 요청을 형식 오류로 거부했습니다',
+    headingPath: null,
+    placeholderId: null,
+  },
 };
 /** 처리 중에 교체된 실패 사유다. */
 export const REPLACED_FAILURE: VersionFailure = {

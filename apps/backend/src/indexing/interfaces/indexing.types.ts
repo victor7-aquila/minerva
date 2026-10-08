@@ -11,9 +11,15 @@ export interface IndexRequestInput {
   force: boolean;
 }
 
+/** RAG Server가 색인 요청을 거부한 오류 코드다. */
+export type IndexRejectionCode = 'PAYLOAD_TOO_LARGE' | 'INVALID_REQUEST';
+
 /** 색인 요청의 결과다. */
 export type IndexRequestOutcome =
-  { kind: 'accepted'; jobId: string } | { kind: 'reused'; jobId: string } | { kind: 'unreachable' };
+  | { kind: 'accepted'; jobId: string }
+  | { kind: 'reused'; jobId: string }
+  | { kind: 'rejected'; code: IndexRejectionCode }
+  | { kind: 'unreachable' };
 
 /** 작업 상태 알림(루트 IF-2)의 값이다. 알림 컨트롤러가 본문을 옮겨 담는다. */
 export interface RagEventNotification {

@@ -222,6 +222,30 @@ describe('REQ-BE-1.9.4', () => {
     expect(record?.detail?.reasonCode).toBe('RAG_UNREACHABLE');
   });
 
+  it.each([
+    ['PAYLOAD_TOO_LARGE', '크기 한도'],
+    ['INVALID_REQUEST', '형식 오류'],
+  ] as const)(
+    'T-IDX-2b rejected(%s)면 failed이고 RAG Server가 준 코드가 실패 사유다',
+    async (code, phrase) => {
+      await seedDoc({ docId: DOC_A, processingState: 'captioning' });
+      h.indexing.requestIndex.mockResolvedValue({ kind: 'rejected', code });
+      await h.lifecycle.requestIndexFor(DOC_A, '1', false);
+      expect(docOf(h.db, DOC_A).processingState).toBe('failed');
+      const failure = versionOf(h.db, DOC_A, '1')?.failure;
+      expect(failure).toMatchObject({ code, headingPath: null, placeholderId: null });
+      // 연결 실패로 보이지 않게 거부 까닭을 설명한다
+      expect(failure?.message).toContain(phrase);
+      expectSafeKoreanMessage(failure?.message ?? '');
+      const record = h.logs.recordsOf('processing_state').at(-1);
+      expect(record?.outcome).toBe('failure');
+      expect(record?.detail?.reasonCode).toBe(code);
+      // 거부는 다시 보내도 같으므로 색인을 다시 요청하지 않는다
+      await h.drain();
+      expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('T-IDX-3 reused면 검색되는 버전의 결과를 이어받아 완료하고 searchableVersion은 그대로다', async () => {
     await seed(
       h.db,
