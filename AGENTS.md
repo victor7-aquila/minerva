@@ -9,10 +9,11 @@ minerva는 AI가 개발 문서를 검색해 활용하도록 하는 RAG 서버의
 ### 반드시
 
 - `apps/` 아래 앱 폴더의 파일을 고치기 전에 그 앱 폴더의 `AGENTS.md`를 읽고 이 문서와 함께 따른다 — 앱마다 접근하면 안 되는 저장소·서비스와 언어별 규칙이 그 문서에 있다
+- 문서 변경의 승인은 작업·방향 단위로 받는다. 사용자가 이번 대화에서 승인한 작업·방향(예: "단위를 8개로 정리")을 반영하는 데 필요한 변경은 문서·줄마다 변경안을 다시 보여 주거나 묻지 않고 반영한 뒤, 무엇이 바뀌었는지 REQ ID 단위로 보고한다. 승인 범위를 벗어나는 결정(요구 범위의 추가·삭제, 결과가 갈리는 선택)만 묻는다 — 이 문서에서 "사용자 승인"은 이 뜻이다
 
 ### 금지
 
-- 앱 폴더의 `REQUIREMENTS.md`(예: `apps/rag-server/REQUIREMENTS.md`)를 사용자 승인 없이 만들거나 고치지 않는다. 저장소 루트에는 `REQUIREMENTS.md`를 두지 않는다. 사용자가 이번 대화에서 변경안을 보고 승인한 줄만 반영하고(Claude Code에서는 requirements-writer 스킬로), 요구사항이 틀렸거나 빠졌으면 작업을 멈추고 사용자에게 보고한다 — 요구사항 정본이다
+- 앱 폴더의 `REQUIREMENTS.md`(예: `apps/rag-server/REQUIREMENTS.md`)를 사용자 승인 없이 만들거나 고치지 않는다. 저장소 루트에는 `REQUIREMENTS.md`를 두지 않는다. 사용자가 승인한 작업·방향 안에서만 반영하고(Claude Code에서는 requirements-writer 스킬로), 그 밖에서 요구사항이 틀렸거나 빠진 것을 발견하면 작업을 멈추고 사용자에게 보고한다 — 요구사항 정본이다
 - 저장소 루트의 `INTERFACES.md`, 앱 폴더의 `ARCHITECT.md`·`INTERFACES.md`·`API.md`, 단위 폴더의 `MODULE.md`·`FEATURE.md`를 사용자 승인 없이 만들거나 고치지 않는다. 사용자가 승인한 변경만 반영한다(Claude Code에서는 문서별 작성 스킬로)
 - 명세와 다르게 구현하지 않는다. 명세대로는 안 되거나 더 나은 방식이 보이면 구현 전에 그 사실과 이유를 사용자에게 알리고, 승인받아 명세를 고친 뒤에 구현한다 — 다른 단위가 그 명세를 믿고 작업한다
 - 기본 브랜치 `main`에 직접 커밋하거나 푸시하지 않는다. 작업 브랜치에 커밋하고 PR로 올린다
@@ -37,7 +38,7 @@ minerva는 AI가 개발 문서를 검색해 활용하도록 하는 RAG 서버의
 | `apps/backend/API.md` | Console과 AI가 호출하는 Backend HTTP API | 사용자가 승인한 변경만 반영한다 |
 | `apps/console/REQUIREMENTS.md` | Console 요구사항 (`REQ-FE`) | 사용자가 승인한 변경만 반영한다 |
 | `apps/console/ARCHITECT.md` | Console 구조 | 사용자가 승인한 변경만 반영한다 |
-| `apps/*/AGENTS.md`, 모든 `CLAUDE.md` | 앱별 에이전트 규칙, Claude Code 어댑터 | 변경안을 보여 주고 사용자가 승인한 뒤에 고친다. `CLAUDE.md`에는 `@AGENTS.md` 한 줄만 둔다 |
+| `apps/*/AGENTS.md`, 모든 `CLAUDE.md` | 앱별 에이전트 규칙, Claude Code 어댑터 | 사용자가 승인한 작업·방향 안에서 고친다. `CLAUDE.md`에는 `@AGENTS.md` 한 줄만 둔다 |
 
 ## 작업 방식
 
