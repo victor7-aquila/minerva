@@ -278,9 +278,10 @@ export function createFakeIndexing() {
         _docId: string,
         _name: string,
         _edition: { label: string; editionDate: string } | null,
+        _signal?: AbortSignal,
       ): Promise<boolean> => true,
     ),
-    deleteChunks: jest.fn(async (_docId: string): Promise<boolean> => true),
+    deleteChunks: jest.fn(async (_docId: string, _signal?: AbortSignal): Promise<boolean> => true),
   };
 }
 

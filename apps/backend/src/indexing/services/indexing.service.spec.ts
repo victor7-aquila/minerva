@@ -48,9 +48,9 @@ const fakeRag = {
   getIndexStates: jest.fn<Promise<RagIndexState[]>, [docIds: readonly string[]]>(),
   updateMetadata: jest.fn<
     Promise<void>,
-    [docId: string, name: string, edition: RagEdition | null]
+    [docId: string, name: string, edition: RagEdition | null, signal?: AbortSignal]
   >(),
-  deleteDocument: jest.fn<Promise<void>, [docId: string]>(),
+  deleteDocument: jest.fn<Promise<void>, [docId: string, signal?: AbortSignal]>(),
 };
 
 let db: FakeDb;

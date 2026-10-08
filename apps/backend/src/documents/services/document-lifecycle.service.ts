@@ -409,7 +409,8 @@ export class DocumentLifecycle {
         }
       }
     } else if (outcome.kind === 'rejected') {
-      // ★ 거부는 다시 보내도 같으므로 재요청하지 않는다 (REQ-BE-1.9.4)
+      // ★ 거부는 다시 보내도 같으므로 재요청하지 않는다 (REQ-BE-1.9.4).
+      //   거부는 청크를 만들지 않으므로 아래의 삭제·교체 재확인(D22)도 필요 없다
       const failure = { ...RAG_REJECTED_FAILURES[outcome.code] };
       await this.transition(docId, version, ['queued'], 'failed', failure);
       return true;
