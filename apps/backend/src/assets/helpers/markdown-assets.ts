@@ -370,17 +370,20 @@ function hasImageChild(token: Token): boolean {
  * ★ 따옴표 밖의 `<`에서 멈춘다 — 닫히지 않은 `<img` 뒤에 오는 `<table>`이 그 태그에 삼켜지지 않게 한다(그 `<img`는 태그가 아니다)
  */
 const ATTRS = `(?:[^<>"']|"[^"]*(?:"|$)|'[^']*(?:'|$))*`;
-/** 주석, raw text 요소, img·table 태그를 차례로 찾는 정규식이다. ★ g 정규식이므로 matchAll로만 쓴다 */
+/**
+ * 주석, 코드로 보는 요소(pre·script·style·textarea), img·table 태그를 차례로 찾는 정규식이다. ★ g 정규식이므로 matchAll로만 쓴다
+ * ★ 태그 이름 경계로 본다(`<preview>`는 pre가 아니다). 닫는 태그가 없으면 범위(HTML 블록) 끝까지 코드다
+ */
 const HTML_SCAN = new RegExp(
   [
     '<!--(?:[\\s\\S]*?-->|[\\s\\S]*$)',
-    `<(script|style|textarea)(?=[\\s/>]|$)${ATTRS}(?:>|$)(?:[\\s\\S]*?<\\/\\1\\s*>|[\\s\\S]*$)`,
+    `<(pre|script|style|textarea)(?=[\\s/>]|$)${ATTRS}(?:>|$)(?:[\\s\\S]*?<\\/\\1\\s*>|[\\s\\S]*$)`,
     `<(\\/?)(img|table)(?=[\\s/>]|$)${ATTRS}(>|$)`,
   ].join('|'),
   'gi',
 );
 
-/** text[from, to) 안의 img·table 태그를 차례로 모은다. 주석·raw text 안과 닫히지 않은 태그는 건너뛴다. */
+/** text[from, to) 안의 img·table 태그를 차례로 모은다. 주석·코드 요소 안과 닫히지 않은 태그는 건너뛴다. */
 function scanHtmlTags(text: string, from: number, to: number): HtmlTag[] {
   const found: HtmlTag[] = [];
   for (const match of text.slice(from, to).matchAll(HTML_SCAN)) {
@@ -400,22 +403,17 @@ function scanHtmlTags(text: string, from: number, to: number): HtmlTag[] {
   return found;
 }
 
-/** 표 짝을 구할 `html_block` 범위다. resetBefore가 참이면 직전 블록과 사이에 코드 블록이 있었다. */
-type HtmlBlockRange = TextRange & { resetBefore: boolean };
-
-/** `html_block` 토큰들의 범위를 문서 순서대로 모은다. 코드 블록을 만나면 다음 범위에 끊김을 표시한다. */
-function htmlBlockRanges(tokens: Token[]): HtmlBlockRange[] {
-  const ranges: HtmlBlockRange[] = [];
-  let reset = false;
+/**
+ * `html_block` 토큰들의 범위를 문서 순서대로 모은다.
+ * ★ 코드 블록(펜스·들여쓰기)은 훑지 않고 짝도 끊지 않는다 — 칸 안 코드 블록 때문에 HTML 블록이 끊겨도
+ *   닫는 </table>까지 표 하나다 (REQ-BE-2.1.1). 코드 블록 안의 </table>은 html_block이 아니라 짝이 아니다
+ */
+function htmlBlockRanges(tokens: Token[]): TextRange[] {
+  const ranges: TextRange[] = [];
   for (const token of tokens) {
-    if (token.type === 'fence' || token.type === 'code_block') {
-      reset = true;
-    } else if (token.type === 'html_block') {
-      const meta = metaOf(token);
-      if (meta === null) continue;
-      ranges.push({ start: meta.srcStart, end: meta.srcEnd, resetBefore: reset });
-      reset = false;
-    }
+    if (token.type !== 'html_block') continue;
+    const meta = metaOf(token);
+    if (meta !== null) ranges.push({ start: meta.srcStart, end: meta.srcEnd });
   }
   return ranges;
 }
@@ -424,11 +422,10 @@ function htmlBlockRanges(tokens: Token[]): HtmlBlockRange[] {
  * HTML 표의 여는 태그 시작 → 닫는 태그 끝을 짝짓는다.
  * ★ 문단·인라인 코드의 글(`<script>` 같은 낱말)이 짝을 깨지 않게 표 후보가 나오는 `html_block` 범위만 훑는다
  */
-function htmlTablePairs(text: string, blocks: readonly HtmlBlockRange[]): Map<number, number> {
+function htmlTablePairs(text: string, blocks: readonly TextRange[]): Map<number, number> {
   const pairs = new Map<number, number>();
-  let stack: number[] = [];
+  const stack: number[] = [];
   for (const block of blocks) {
-    if (block.resetBefore) stack = [];
     for (const tag of scanHtmlTags(text, block.start, block.end)) {
       if (tag.name !== 'table') continue;
       if (!tag.closing) {
@@ -692,6 +689,37 @@ function stripTags(text: string): string {
   return out + text.slice(pos);
 }
 
+/** 코드 펜스 줄(여는·닫는)이다. 1번 그룹은 펜스 글자, 2번 그룹은 그 뒤(정보 문자열)다. */
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/**
+ * 칸 글에서 코드 블록의 펜스 줄을 빼고 코드 내용은 남긴다 (REQ-BE-2.2.3).
+ * ★ 첫 줄(여는 칸 태그와 같은 줄의 내용)은 HTML 블록 안의 글자라 펜스 모양이어도 남긴다
+ */
+function dropFenceLines(text: string): string {
+  const [first, ...others] = text.split('\n');
+  const kept: string[] = [first];
+  let open: string | null = null;
+  for (const line of others) {
+    const match = FENCE_LINE.exec(line);
+    const fence = match?.[1];
+    const rest = match?.[2] ?? '';
+    if (fence === undefined) {
+      kept.push(line);
+    } else if (open === null) {
+      // ★ 정보 문자열에 백틱이 있으면 펜스가 아니라 인라인 코드다
+      if (fence.startsWith('`') && rest.includes('`')) kept.push(line);
+      else open = fence;
+    } else if (fence[0] === open[0] && fence.length >= open.length && rest.trim() === '') {
+      open = null;
+    } else {
+      // 열린 펜스보다 짧거나 다른 글자의 펜스 모양은 코드 내용이다
+      kept.push(line);
+    }
+  }
+  return kept.join('\n');
+}
+
 /**
  * HTML 표 첫 행의 칸 텍스트를 쉼표로 이어 설명 원문을 만든다.
  * ★ 닫는 태그가 없을 때 되돌아 훑지 않는다 — 앞의 태그가 닫히지 않으면 뒤의 태그도 닫히지 않으므로 거기서 멈춘다
@@ -713,17 +741,17 @@ function htmlTableHeads(tableHtml: string): string {
     if (tagEnd < 0) break;
     const close = findFrom(CELL_CLOSE, row, tagEnd + 1);
     if (close === null) break;
-    const text = stripTags(row.slice(tagEnd + 1, close.at)).trim();
+    const text = stripTags(dropFenceLines(row.slice(tagEnd + 1, close.at))).trim();
     if (text !== '') heads.push(text);
     pos = close.end;
   }
   return heads.join(', ');
 }
 
-/** 이미지로 보지 않는 HTML 블록의 시작 표지다. */
-const HTML_SKIP_PREFIXES = ['<!--', '<pre', '<script', '<style', '<textarea'];
-
-/** `html_block` 하나에서 후보를 모은다. ★ 블록 전체를 훑는다 — `</table>` 뒤의 태그도 후보다 */
+/**
+ * `html_block` 하나에서 후보를 모은다. ★ 블록 전체를 훑는다 — `</table>` 뒤의 태그도 후보다.
+ * 주석과 pre·script·style·textarea 안만 건너뛰고 닫는 태그 뒤는 후보다 (REQ-BE-2.1.2)
+ */
 function htmlBlockCandidates(
   map: LineMap,
   token: Token,
@@ -731,8 +759,6 @@ function htmlBlockCandidates(
 ): Candidate[] {
   const meta = metaOf(token);
   if (meta === null) return [];
-  const head = token.content.trimStart().toLowerCase();
-  if (HTML_SKIP_PREFIXES.some((prefix) => head.startsWith(prefix))) return [];
   const found: Candidate[] = [];
   for (const tag of scanHtmlTags(map.normalized, meta.srcStart, meta.srcEnd)) {
     if (tag.name === 'table') {

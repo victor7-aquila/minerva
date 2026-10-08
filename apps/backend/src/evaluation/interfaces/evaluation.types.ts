@@ -25,6 +25,11 @@ export const GOLDEN_SET_SORT_COLUMNS: readonly GoldenSetSortColumn[] = [
 ];
 /** 백그라운드 작업 이름이다. 로그의 task 값이다. */
 export type EvaluationTaskName = 'evaluate' | 'evaluate_all';
+/**
+ * 작업 실패 로그의 task 값이다.
+ * ★ fail_records는 평가 중 기록을 지우거나 실패로 끝내는 보조 갱신이다 — 작업으로 돌리지 않고 로그 task 값으로만 쓴다
+ */
+export type EvaluationLogTask = EvaluationTaskName | 'fail_records';
 
 /** 골든셋 저장 레코드다 (MongoDB golden_sets). */
 export interface GoldenSetRecord {

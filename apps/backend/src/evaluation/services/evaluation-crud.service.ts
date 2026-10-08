@@ -129,6 +129,16 @@ export class EvaluationCrudService {
     return result.modifiedCount;
   }
 
+  /** 기록들 중 평가 중인 것을 지우고 지운 건수를 준다. 비면 DB를 부르지 않는다. */
+  async deleteEvaluatingRecords(recordIds: readonly string[]): Promise<number> {
+    if (recordIds.length === 0) return 0;
+    const result = await this.records.deleteMany({
+      recordId: { $in: [...recordIds] },
+      outcome: 'evaluating',
+    });
+    return result.deletedCount;
+  }
+
   /** 골든셋 ID 전체를 준다. */
   async findAllGoldenSetIds(): Promise<string[]> {
     const found = await this.goldenSets

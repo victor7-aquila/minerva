@@ -257,13 +257,29 @@ function applyProjection(doc: Doc, plan: ProjectionPlan): Doc {
   return picked;
 }
 
-/** 두 값을 정렬용으로 비교한다. */
+/** BSON 비교 순서의 타입 순위다. ★ null과 필드 없음은 같은 값이고 가장 작다 */
+function typeRank(value: unknown): number {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'number') return 1;
+  if (typeof value === 'string') return 2;
+  if (Array.isArray(value)) return 4;
+  if (typeof value === 'boolean') return 5;
+  if (isDate(value)) return 6;
+  if (isRegExp(value)) return 7;
+  return 3; // 객체
+}
+
+/** 두 값을 정렬용으로 비교한다. 타입이 다르면 BSON 비교 순서다. */
 function compareValues(a: unknown, b: unknown): number {
-  if (isDate(a) && isDate(b)) return Math.sign(a.getTime() - b.getTime());
-  if (a === b) return 0;
+  const rank = typeRank(a) - typeRank(b);
+  if (rank !== 0) return Math.sign(rank);
+  if (a === null || a === undefined) return 0;
+  if (typeof a === 'number') return Math.sign(a - (b as number));
   // ★ 문자열은 코드 포인트 순이다 (UTF-16 코드 유닛 순이면 U+FFFF 위 문자가 어긋난다)
-  if (typeof a === 'string' && typeof b === 'string') return Math.sign(compareCodePoints(a, b));
-  return (a as number) < (b as number) ? -1 : 1;
+  if (typeof a === 'string') return Math.sign(compareCodePoints(a, b as string));
+  if (typeof a === 'boolean') return Number(a) - Number(b as boolean);
+  if (isDate(a)) return Math.sign(a.getTime() - (b as Date).getTime());
+  throw new Error('fake-mongo: 지원하지 않는 정렬 값(객체·배열·정규식)');
 }
 
 /** 정렬 조건대로 배열을 제자리에서 정렬한다. */
@@ -326,8 +342,11 @@ function runPipeline(source: Doc[], pipeline: Doc[]): Doc[] {
       const groups = new Map<string, Doc>();
       for (const doc of docs) {
         const value = getPath(doc, field);
-        const key = isDate(value) ? `d:${value.getTime()}` : `${typeof value}:${String(value)}`;
-        if (!groups.has(key)) groups.set(key, { _id: value, [resultName]: doc });
+        // ★ 실제 MongoDB처럼 null과 필드 없음은 _id가 null인 한 그룹이다
+        const id = value === undefined ? null : value;
+        const key =
+          id === null ? 'null' : isDate(id) ? `d:${id.getTime()}` : `${typeof id}:${String(id)}`;
+        if (!groups.has(key)) groups.set(key, { _id: id, [resultName]: doc });
       }
       docs = [...groups.values()];
     } else if (name === '$replaceRoot') {

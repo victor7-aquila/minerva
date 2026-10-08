@@ -151,11 +151,16 @@ export class DocumentsScheduler implements OnApplicationBootstrap {
 
   /** 문서 하나를 이전 버전으로 되돌린다. 되돌렸으면 참이다. */
   private async recoverOne(doc: DocumentRecord): Promise<boolean> {
+    // ★ 이 프로세스에서 새 버전을 쓰는 중인 선점은 되돌리지 않는다 — 버전 레코드보다 표시를 먼저 본다.
+    //   표시가 없는데 레코드도 없으면 다른 프로세스의 끊긴 선점이거나 롤백이 실패한 선점이다
+    if (this.lifecycle.isClaiming(doc.docId, doc.latestVersion)) return false;
     if ((await this.repo.findVersion(doc.docId, doc.latestVersion)) !== null) return false;
     const prev = previousVersion(doc.latestVersion);
     const prevRecord = prev === null ? null : await this.repo.findVersion(doc.docId, prev);
     if (prev === null || prevRecord === null) return false;
     const to: ProcessingState = prevRecord.result !== null ? 'completed' : 'failed';
+    // ★ 조회를 기다리는 사이 같은 버전을 다시 선점했을 수 있다 — 되돌리기 직전에(동기로) 한 번 더 본다
+    if (this.lifecycle.isClaiming(doc.docId, doc.latestVersion)) return false;
     const ok = await this.repo.updateDocument(
       {
         docId: doc.docId,
@@ -234,8 +239,10 @@ export class DocumentsScheduler implements OnApplicationBootstrap {
   /** 문서 하나의 표시된 요청을 다시 보낸다. 실패는 그 문서만 건너뛴다. */
   private async retryOne(doc: DocumentRecord): Promise<void> {
     try {
-      if (doc.pendingRag.deleteChunks) await this.lifecycle.syncChunkDeletion(doc.docId);
-      else if (doc.deleted && !doc.purged) await this.lifecycle.purge(doc.docId);
+      // ★ 데이터 삭제도 청크 삭제 진행 표시 안에서 돈다 — recheck가 다시 돌기를 요청할 수 있게 한다 (REQ-BE-1.8.5)
+      if (doc.pendingRag.deleteChunks || (doc.deleted && !doc.purged)) {
+        await this.lifecycle.syncChunkDeletion(doc.docId);
+      }
       if (doc.pendingRag.metadata) await this.lifecycle.syncMetadata(doc.docId);
     } catch (error) {
       this.logger.warn(

@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { BeforeApplicationShutdown } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
-import type { EvaluationTaskName } from '../interfaces/evaluation.types';
+import type { EvaluationLogTask, EvaluationTaskName } from '../interfaces/evaluation.types';
 
 /** 평가 백그라운드 작업을 돌린다. */
 @Injectable()
@@ -34,7 +34,7 @@ export class EvaluationTasks implements BeforeApplicationShutdown {
   }
 
   /** 작업 실패를 로그로 남긴다. */
-  logFailure(task: EvaluationTaskName, goldenSetId: string | null, error: unknown): void {
+  logFailure(task: EvaluationLogTask, goldenSetId: string | null, error: unknown): void {
     // ★ 오류 메시지·스택은 남기지 않는다. 이름만 남긴다
     const errorName = error instanceof Error ? error.name : 'UnknownError';
     this.logger.warn({ task, goldenSetId, errorName }, 'evaluation.task_failed');

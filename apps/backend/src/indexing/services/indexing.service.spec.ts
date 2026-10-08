@@ -1295,6 +1295,89 @@ describe('REQ-BE-3.3.1', () => {
     expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
     expect(events.filter((e) => e.source === 'reconcile')).toHaveLength(1);
   });
+
+  /**
+   * 진행 중인 상태 맞추기의 감시 등록 크기를 읽는다. 필드가 없으면 undefined다.
+   * ★ 감시 누수는 공개 동작으로 드러나지 않아 내부 필드를 본다 — 끝난 감시가 남아도 다음 reconcile은 새 감시를 쓴다
+   */
+  const watchCount = (): number | undefined =>
+    (Reflect.get(service, 'reconcileWatches') as Set<unknown> | undefined)?.size;
+
+  /** 문서 A의 running 알림을 순번과 함께 보낸다. */
+  const noteRunningA = (sequence: number): Promise<void> =>
+    service.handleNotification(note({ docId: 'A', jobId: 'jA', jobState: 'running', sequence }));
+
+  /** A의 running 상태를 묶음으로 주고 reconcile(['A'])을 돌려 그동안의 묶음 조회 횟수를 돌려준다. */
+  async function statesCallsOfReconcileA(): Promise<number> {
+    fakeRag.getIndexStates.mockReset();
+    fakeRag.getIndexStates.mockResolvedValue([
+      state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' }),
+    ]);
+    await service.reconcile(['A']);
+    return fakeRag.getIndexStates.mock.calls.length;
+  }
+
+  it('T-FU-WATCH-1 상태 맞추기 밖의 알림은 감시를 남기지 않고 다음 상태 맞추기의 다시 조회를 일으키지 않는다', async () => {
+    fakeRag.getIndexJob.mockResolvedValue(job({ state: 'running', result: null }));
+    for (const [index, docId] of ['A', 'B', 'C'].entries()) {
+      await service.handleNotification(
+        note({ docId, jobId: `j${docId}`, jobState: 'running', sequence: index + 1 }),
+      );
+    }
+    expect(events).toHaveLength(3);
+    // ★ 진행 중인 reconcile이 없으면 감시 등록은 비어 있다
+    expect(watchCount()).toBe(0);
+    fakeRag.getIndexStates.mockResolvedValue(
+      ['A', 'B', 'C'].map((docId) =>
+        state({ docId, latestJobId: `j${docId}`, latestJobState: 'running' }),
+      ),
+    );
+    await service.reconcile(['A', 'B', 'C']);
+    // ★ 알림이 상태 맞추기 전에 끝났으므로 묶음 조회 1번뿐이다 — 문서별로 남은 상태가 없다
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(1);
+    expect(watchCount()).toBe(0);
+  });
+
+  it('T-FU-WATCH-2 상태 맞추기 중에만 감시가 등록돼 그때의 알림만 다시 조회를 일으키고 끝나면(정상·조회 실패·예외) 지워진다', async () => {
+    fakeRag.getIndexJob.mockResolvedValue(
+      job({ jobId: 'jA', docId: 'A', state: 'running', result: null }),
+    );
+    // ① 묶음 조회가 멈춘 동안 온 알림은 A만 다시 조회하게 한다
+    const gate = deferred<RagIndexState[]>();
+    fakeRag.getIndexStates.mockImplementationOnce(() => gate.promise);
+    fakeRag.getIndexStates.mockResolvedValue([
+      state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' }),
+    ]);
+    const running = service.reconcile(['A']);
+    // ★ 묶음 조회가 멈춘 동안만 감시가 1개 등록돼 있다
+    expect(watchCount()).toBe(1);
+    await noteRunningA(1);
+    gate.resolve([state({ docId: 'A', latestJobId: 'jA', latestJobState: 'running' })]);
+    await running;
+    expect(fakeRag.getIndexStates).toHaveBeenCalledTimes(2);
+    expect([...fakeRag.getIndexStates.mock.calls[1][0]]).toEqual(['A']);
+    expect(watchCount()).toBe(0);
+
+    // ② 정상으로 끝난 뒤의 알림은 다음 상태 맞추기에서 다시 조회를 일으키지 않는다
+    await noteRunningA(2);
+    expect(await statesCallsOfReconcileA()).toBe(1);
+
+    // ③ 묶음 조회 실패(RAG Server 불통)로 끝난 뒤도 같다
+    fakeRag.getIndexStates.mockReset();
+    fakeRag.getIndexStates.mockRejectedValue(new RagUnavailableError());
+    await service.reconcile(['A']);
+    expect(watchCount()).toBe(0);
+    await noteRunningA(3);
+    expect(await statesCallsOfReconcileA()).toBe(1);
+
+    // ④ rag 오류가 아닌 예외로 거부된 뒤도 같다
+    fakeRag.getIndexJob.mockRejectedValueOnce(new Error('unexpected'));
+    await expect(service.reconcile(['A'])).rejects.toThrow('unexpected');
+    expect(watchCount()).toBe(0);
+    await noteRunningA(4);
+    expect(await statesCallsOfReconcileA()).toBe(1);
+    expect(watchCount()).toBe(0);
+  });
 });
 
 describe('REQ-BE-1.3.6', () => {

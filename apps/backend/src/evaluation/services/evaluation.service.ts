@@ -139,8 +139,9 @@ export class EvaluationService implements OnModuleInit {
       try {
         await this.repo.insertRecords(items.map((item) => item.record));
       } catch (error) {
-        // ★ 일부만 들어갔을 수 있다 — 평가 중으로 남지 않게 실패로 끝내 본다
-        await this.failQuietly(items.map((item) => item.record.recordId));
+        // ★ 일부만 들어갔을 수 있다. 이번 요청이 만든 평가 중 기록을 지워 골든셋마다 이전 최근 기록을 그대로 두고,
+        //   지우지 못하면 평가 중으로 남지 않게 실패로 끝내 본다 (REQ-BE-5.2.4). 원래 오류가 우선이다
+        await this.discardStarted(items.map((item) => item.record.recordId));
         throw error;
       }
       if (items.length > 0) this.tasks.run('evaluate_all', null, () => this.runAll(items));
@@ -246,17 +247,36 @@ export class EvaluationService implements OnModuleInit {
       );
     } catch (error) {
       // ★ 평가 중으로 남지 않게 실패로 한 번 더 끝내 본다. 이것도 실패하면 기동 정리가 맡는다
-      await this.failQuietly([recordId]);
+      await this.failQuietly([recordId], goldenSet.goldenSetId);
       throw error;
     }
   }
 
-  /** 기록들을 예상하지 못한 오류로 끝내 본다. ★ 실패는 삼킨다 — 원래 오류가 우선이다 */
-  private async failQuietly(recordIds: readonly string[]): Promise<void> {
+  /**
+   * 기록들을 예상하지 못한 오류로 끝내 본다. ★ 실패는 삼킨다 — 원래 오류가 우선이다.
+   * goldenSetId는 한 골든셋의 기록이면 그 ID, 여러 골든셋에 걸치면 null이다 (로그 필드)
+   */
+  private async failQuietly(
+    recordIds: readonly string[],
+    goldenSetId: string | null,
+  ): Promise<void> {
     try {
       await this.repo.failRecords(recordIds, EVALUATION_MESSAGES.unexpected, this.clock.now());
-    } catch {
-      // ★ 삼킨다
+    } catch (error) {
+      // ★ 삼키되 남긴다 — 기록이 평가 중으로 남았을 수 있다. 원래 오류가 우선이다
+      this.tasks.logFailure('fail_records', goldenSetId, error);
+    }
+  }
+
+  /** 이번 요청이 만든 평가 중 기록을 지운다. 지우지 못하면 실패로 끝내 본다. ★ 실패는 삼킨다 — 원래 오류가 우선이다 */
+  private async discardStarted(recordIds: readonly string[]): Promise<void> {
+    try {
+      await this.repo.deleteEvaluatingRecords(recordIds);
+    } catch (error) {
+      // ★ 지우기 실패도 남긴다 — 뒤의 끝내기가 성공하면 다른 흔적이 없다
+      this.tasks.logFailure('fail_records', null, error);
+      // ★ 지우기가 실패하면 남았을 수 있는 기록을 error로 끝낸다
+      await this.failQuietly(recordIds, null);
     }
   }
 

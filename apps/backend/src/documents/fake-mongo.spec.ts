@@ -239,6 +239,22 @@ describe('REQ-BE-5.3.2', () => {
       'fake-mongo',
     );
   });
+
+  it('T-PR3-FAKE-10 $group에서 null과 필드 없음은 _id가 null인 한 그룹이다', async () => {
+    const db = createFakeDb();
+    const c = db.collection('c');
+    await c.insertMany([{ g: null, t: 1 }, { t: 3 }, { g: 'x', t: 2 }]);
+    const groups = await c
+      .aggregate([{ $sort: { t: -1 } }, { $group: { _id: '$g', latest: { $first: '$$ROOT' } } }])
+      .toArray();
+    expect(groups).toHaveLength(2);
+    // ★ _id는 undefined가 아니라 null이어야 실제 MongoDB와 같다
+    const nullGroup = groups.filter((g) => g._id === null);
+    expect(nullGroup).toHaveLength(1);
+    expect(nullGroup[0]._id).toBeNull();
+    expect((nullGroup[0].latest as { t: number }).t).toBe(3);
+    expect(groups.filter((g) => g._id === 'x')).toHaveLength(1);
+  });
 });
 
 describe('REQ-BE-5.2.4', () => {
@@ -311,5 +327,45 @@ describe('REQ-BE-5.2.8', () => {
     // null이 목록에 있으면 값이 없거나 null인 문서가 빠진다
     expect(await ids({ g: { $nin: ['a', null] } })).toEqual([2]);
     expect(await ids({ g: { $nin: [] } })).toEqual([1, 2, 3, 4]);
+  });
+});
+
+describe('REQ-BE-1.3.2', () => {
+  it('T-PR3-FAKE-8 정렬에서 null과 필드 없음은 같은 값이고 오름차순 맨 앞, 내림차순 맨 뒤다', async () => {
+    const db = createFakeDb();
+    const c = db.collection('c');
+    await c.insertMany([
+      { k: 'a', v: 2 },
+      { k: 'b', v: null },
+      { k: 'c' },
+      { k: 'd', v: -1 },
+      { k: 'e', v: 0 },
+    ]);
+    const keys = async (sort: Record<string, 1 | -1>) =>
+      (await c.find({}).sort(sort).toArray()).map((d) => d.k);
+    expect(await keys({ v: 1, k: 1 })).toEqual(['b', 'c', 'd', 'e', 'a']);
+    expect(await keys({ v: -1, k: 1 })).toEqual(['a', 'e', 'd', 'b', 'c']);
+  });
+
+  it('T-PR3-FAKE-9 정렬에서 타입이 다르면 숫자 < 문자열 < Date 순이다', async () => {
+    const db = createFakeDb();
+    const c = db.collection('c');
+    await c.insertMany([
+      { k: 's', v: 'x' },
+      { k: 'n', v: 5 },
+      { k: 'd', v: new Date(0) },
+      { k: 'z' },
+    ]);
+    const keys = (await c.find({}).sort({ v: 1 }).toArray()).map((d) => d.k);
+    expect(keys).toEqual(['z', 'n', 's', 'd']);
+  });
+
+  it('T-PR3-FAKE-11 정렬 값이 객체·배열이면 지원하지 않는다는 오류다', async () => {
+    const db = createFakeDb();
+    const c = db.collection('c');
+    await c.insertMany([{ v: { a: 1 } }, { v: { a: 2 } }]);
+    await expect(c.find({}).sort({ v: 1 }).toArray()).rejects.toThrow(
+      'fake-mongo: 지원하지 않는 정렬 값',
+    );
   });
 });

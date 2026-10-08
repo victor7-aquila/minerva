@@ -69,6 +69,18 @@ describe('REQ-BE-8.2.1', () => {
       expect(raw).not.toContain('QUERY-SENT-71');
     }
   });
+
+  it('T-FU-TASK-1 fail_records는 작업 실패 로그의 task 값으로만 받고 작업 이름으로는 받지 않는다', () => {
+    tasks.logFailure('fail_records', null, new Error('x'));
+    const lines = capture.parsed().filter((line) => line.msg === 'evaluation.task_failed');
+    expect(lines.map((line) => line.task)).toEqual(['fail_records']);
+    // ★ 타입 검사만 한다 — 부르지 않는다
+    const typeOnly = (): void => {
+      // @ts-expect-error -- fail_records는 작업 이름(EvaluationTaskName)이 아니다
+      tasks.run('fail_records', null, async () => undefined);
+    };
+    expect(typeof typeOnly).toBe('function');
+  });
 });
 
 describe('REQ-BE-5.2.4', () => {
