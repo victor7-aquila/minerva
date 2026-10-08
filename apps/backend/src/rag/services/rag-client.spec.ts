@@ -1105,7 +1105,7 @@ describe('REQ-BE-10.1.2', () => {
   });
 
   describe('T-LOG-2 상황별 status·code', () => {
-    // 결정 근거: IMPL_PLAN 호출 흐름·CONTEXT 「구현 결정」. MODULE.md는 필드 이름만 정하므로
+    // rag MODULE.md 「로그」(rag.call_failed)는 필드 이름만 정하므로
     // 서버가 준 코드(503 SERVER_NOT_READY, UNKNOWN)만 값을 고정하고, 구현이 정한 내부 코드
     // (CONNECTION_FAILED·TIMEOUT·INVALID_RESPONSE)는 비어 있지 않은 문자열인지만 본다
     /** 실패 로그 필드를 읽는다. */
@@ -1322,7 +1322,7 @@ describe('REQ-BE-10.1.4', () => {
         const err = await caught(client.search({ query: 'q' }));
         // ★ 핵심 단언: 다른 출처로 요청(토큰)이 가지 않는다
         expect(target.requests).toHaveLength(0);
-        // 결정 근거: IMPL_PLAN `redirect: 'error'` — 따르지 않고 RagUnavailableError로 끝낸다
+        // 리다이렉트를 따르지 않고(redirect: 'error') RagUnavailableError로 끝낸다
         expect(err).toBeInstanceOf(RagUnavailableError);
       } finally {
         await target.close();

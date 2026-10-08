@@ -20,7 +20,7 @@ const STATES: ProcessingState[] = [
 const TARGETS: ProcessingState[] = ['queued', 'indexing', 'completed', 'failed'];
 const CODES: Array<string | null> = [null, 'RAG_UNREACHABLE', 'PARSE_FAILED'];
 
-/** IMPL_PLAN 「4」 표를 그대로 옮긴 기대값이다. */
+/** REQ-BE-1.9.5 처리 계약(documents MODULE.md)의 출발 상태 규칙을 그대로 옮긴 기대값이다. */
 function expectedApply(
   current: ProcessingState,
   code: string | null,
@@ -61,7 +61,7 @@ describe('REQ-BE-1.9.5', () => {
 });
 
 describe('REQ-BE-1.9.6', () => {
-  it('T-STATE-2 canApplyEvent는 IMPL_PLAN 표의 72칸과 같다', () => {
+  it('T-STATE-2 canApplyEvent는 REQ-BE-1.9.5 출발 상태 규칙의 72칸과 같다', () => {
     expect(GRID).toHaveLength(72);
   });
 

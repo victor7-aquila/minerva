@@ -118,6 +118,15 @@ describe('REQ-BE-7.1.2', () => {
     expect(collectFieldPaths(withParent, 'p')).toEqual(['p.x']);
   });
 
+  it('T-VAL-9 RequestValidationError의 메시지·이름·동결', () => {
+    const empty = new RequestValidationError([]);
+    const two = new RequestValidationError(['a', 'b']);
+    expect(empty.message).toBe('요청 형식이 올바르지 않습니다');
+    expect(two.message).toBe('요청 형식이 올바르지 않습니다. 확인할 필드: a, b');
+    expect(two.name).toBe('RequestValidationError');
+    expect(Object.isFrozen(two.fields)).toBe(true);
+  });
+
   // ★ 스택 초과 회귀: 하위 경로를 인자 펼치기(push(...paths))로 합치면 오류가 많을 때 RangeError가 난다
   it('T-VAL-10 중첩 오류가 200000개여도 예외 없이 경로를 모두 모은다', () => {
     const count = 200000;
@@ -134,14 +143,5 @@ describe('REQ-BE-7.1.2', () => {
     expect(paths).toHaveLength(count);
     expect(paths[0]).toBe('items.0.name');
     expect(paths[count - 1]).toBe(`items.${count - 1}.name`);
-  });
-
-  it('T-VAL-9RequestValidationError의 메시지·이름·동결', () => {
-    const empty = new RequestValidationError([]);
-    const two = new RequestValidationError(['a', 'b']);
-    expect(empty.message).toBe('요청 형식이 올바르지 않습니다');
-    expect(two.message).toBe('요청 형식이 올바르지 않습니다. 확인할 필드: a, b');
-    expect(two.name).toBe('RequestValidationError');
-    expect(Object.isFrozen(two.fields)).toBe(true);
   });
 });

@@ -19,7 +19,7 @@ type Equals<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 const assertType = <T extends true>(): T => true as T;
 
-/** AssetsService의 열 가지 메서드 시그니처를 IMPL_PLAN 「1」과 같은 함수 타입에 대입한다. 컴파일되면 통과다. */
+/** AssetsService의 열 가지 메서드 시그니처를 assets MODULE.md 「기능 그룹별 요구사항」의 AssetsService 시그니처와 같은 함수 타입에 대입한다. 컴파일되면 통과다. */
 function signatureChecks(svc: AssetsService): unknown[] {
   const prepare: (
     docId: string,
