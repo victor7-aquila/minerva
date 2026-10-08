@@ -31,6 +31,19 @@ RAG Server에 색인·이름·판 정보 변경·청크 삭제를 요청하고, 
 
 ```text
 src/indexing/
+├── index.ts
+├── indexing.module.ts
+├── controllers/
+│   └── rag-events.controller.ts
+├── guards/
+│   └── rag-events-token.guard.ts
+├── interfaces/
+│   ├── indexing.events.ts
+│   ├── indexing.types.ts
+│   └── rag-event.dto.ts
+├── services/
+│   ├── indexing.service.ts
+│   └── indexing-crud.service.ts
 └── MODULE.md
 
 src/indexing/**/*.spec.ts
@@ -52,7 +65,7 @@ flowchart LR
     Svc -.->|IF-BE-1 이벤트| Documents
 ```
 
-점선은 NestJS 이벤트다. common·storage 의존은 생략했다.
+점선은 NestJS 이벤트다. common·storage·라이브러리 의존은 생략했다.
 
 ## 의존성과 공개 표면
 
@@ -63,7 +76,8 @@ flowchart LR
 | rag | DI | `submitIndexJob`, `getIndexJob`, `getIndexStates`, `updateMetadata`, `deleteDocument` | rag `MODULE.md` | `REQ-BE-3` |
 | documents | NestJS 이벤트 (발행) | `indexing.job-state-changed` | `IF-BE-1` | `REQ-BE-3.2.2`, `REQ-BE-3.3.1` |
 | storage | DI | `MONGO_DB`(컬렉션 `rag_event_cursors`) | storage `MODULE.md` | `REQ-BE-3.2.4` |
-| common | DI·import | `ConfigService`(`CHUNKING_MODE`, `RAG_EVENTS_TOKEN`), `PinoLogger`, `UnauthorizedError` | common `MODULE.md` | `REQ-BE-3` |
+| common | DI·import | `ConfigService`(`CHUNKING_MODE`, `RAG_EVENTS_TOKEN`), `UnauthorizedError` | common `MODULE.md` | `REQ-BE-3` |
+| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
 
 **금지 의존** — documents를 import하지 않는다. 문서 데이터는 documents가 인자로 넘기고, 결과는 반환값과 이벤트로 돌려준다(`ARCHITECT.md` 「의존 규칙」).
 
@@ -72,8 +86,8 @@ flowchart LR
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
 | 색인 요청 | `IndexingService.requestIndex`, `IndexRequestInput`, `IndexRequestOutcome` | 「색인 요청 — REQ-BE-3.1」 | `REQ-BE-3.1` |
-| 상태 알림 받기 | `POST /v1/internal/rag-events` | `API.md`, 루트 `IF-2` | `REQ-BE-3.2` |
-| 상태 알림 받기 | `indexing.job-state-changed` 이벤트 | `IF-BE-1` | `REQ-BE-3.2.2` |
+| 상태 알림 받기 | `POST /v1/internal/rag-events`, `IndexingService.handleNotification`(알림 컨트롤러 전용) | `API.md`, 루트 `IF-2` | `REQ-BE-3.2` |
+| 상태 알림 받기 | `indexing.job-state-changed` 이벤트(`INDEX_JOB_STATE_CHANGED`) | `IF-BE-1` | `REQ-BE-3.2.2` |
 | 상태 맞추기 | `IndexingService.reconcile`, `IndexingService.getStages` | 「상태 맞추기 — REQ-BE-3.3」 | `REQ-BE-3.3.1`, `REQ-BE-1.3.6` |
 | 이름·판 정보 전달 | `IndexingService.updateMetadata`, `IndexingService.deleteChunks` | 「이름·판 정보 전달 — REQ-BE-3.4」 | `REQ-BE-3.4`, `REQ-BE-1.8.4` |
 
@@ -87,6 +101,8 @@ flowchart LR
 | :--- | :--- | :--- | :--- |
 | `docId` | `string` | 필수 | 고유 |
 | `lastSequence` | `number` | 필수 | 반영한 알림 순번의 최댓값. 줄어들지 않는다 |
+
+인덱스: `rag_event_cursors_doc_id` — `{ docId: 1 }`, unique
 
 ## 기능 그룹별 요구사항
 
@@ -108,10 +124,25 @@ export type IndexRequestOutcome =
   | { kind: 'reused'; jobId: string }
   | { kind: 'unreachable' };
 
+// RagJobState는 rag 공개 타입이다(rag `MODULE.md`). indexing이 그대로 다시 내보낸다
+/** 작업 상태 알림(루트 IF-2)의 값이다. 알림 컨트롤러가 본문을 옮겨 담는다. */
+export interface RagEventNotification {
+  docId: string;
+  jobId: string;
+  version: string;
+  jobState: RagJobState;
+  searchableVersion: string | null;
+  sequence: number;
+}
+
+/** IF-BE-1 이벤트 이름이다. */
+export const INDEX_JOB_STATE_CHANGED = 'indexing.job-state-changed';
+
 /** RAG Server 색인 연동을 맡는다. */
 @Injectable()
 export class IndexingService {
   requestIndex(input: IndexRequestInput): Promise<IndexRequestOutcome>;
+  handleNotification(notification: RagEventNotification): Promise<void>;
   reconcile(docIds: readonly string[]): Promise<void>;
   getStages(docIds: readonly string[]): Promise<ReadonlyMap<string, 'chunking' | 'embedding' | 'storing'>>;
   updateMetadata(docId: string, name: string, edition: IndexRequestInput['edition']): Promise<boolean>;
@@ -146,29 +177,29 @@ export class IndexingService {
 
 **`REQ-BE-3.2.2`** 이벤트로 넘기기
 
-- 처리 계약: 새 알림의 `job_state`, `version`, `index_state.searchable_version`으로 `IndexJobStateChangedEvent`(`source: 'notification'`)를 만들어 발행한다. `succeeded`면 `getIndexJob`으로 결과를 채운다
+- 처리 계약: 새 알림의 `job_state`, `version`, `index_state.searchable_version`으로 `IndexJobStateChangedEvent`(`source: 'notification'`)를 만들어 발행한다. `succeeded`면 `getIndexJob`으로 결과를 채운다. 결과·실패 사유 조회는 순번을 올리기 전에 한다. `succeeded`인데 결과를 받지 못하면 순번을 올리지 않고 이벤트를 내지 않는다(상태 맞추기가 맞춘다). 이벤트는 받는 쪽 처리가 끝날 때까지 기다려 내고(`emitAsync`), 받는 쪽이 실패하면 `indexing.event_dispatch_failed`를 남긴다.
 - 충족 기준: `succeeded` 알림 하나에 이벤트 하나가 결과(청크 수, 대체 분할)와 함께 발행된다
 
 **`REQ-BE-3.2.3`** 실패면 실패 사유를 받아 함께 넘김
 
-- 처리 계약: `failed`면 `getIndexJob`으로 실패 사유(코드, 설명, 위치)를 받아 이벤트의 `failure`에 넣는다. 받지 못하면 코드 `RAG_UNREACHABLE`과 일반 설명을 넣는다
+- 처리 계약: `failed`면 `getIndexJob`으로 실패 사유(코드, 설명, 위치)를 받아 이벤트의 `failure`에 넣는다. 받지 못하면 코드 `RAG_UNREACHABLE`과 일반 설명을 넣는다. `getIndexJob`의 `failure`가 비어 있어도 같다. 일반 설명은 `RAG Server에서 실패 사유를 받지 못했습니다`이고 위치는 `null`이다.
 - 충족 기준: `failed` 알림의 이벤트에 RAG Server가 준 코드·설명·위치가 있고, 조회가 실패하면 `RAG_UNREACHABLE`이다
 
 **`REQ-BE-3.2.4`** 오래된 순번 무시
 
-- 처리 계약: 문서의 `lastSequence`보다 큰 순번만 반영하고, 반영할 때 `lastSequence`를 조건부 갱신으로 올린다. 같은 알림이 동시에 두 번 와도 한 번만 반영한다
+- 처리 계약: 문서의 `lastSequence`보다 큰 순번만 반영하고, 반영할 때 `lastSequence`를 조건부 갱신으로 올린다. 같은 알림이 동시에 두 번 와도 한 번만 반영한다. 갱신은 `lastSequence < sequence` 조건의 `updateOne`, 맞는 문서가 없으면 `insertOne`, `docId` 고유 인덱스 충돌이면 조건부 `updateOne`을 한 번 더 한다. 고유 인덱스 `rag_event_cursors_doc_id`(`{ docId: 1 }`)는 기동 때 만든다. 같은 문서의 알림은 한 프로세스 안에서 순번 확인부터 이벤트 발행까지 차례로 처리하고, 다른 문서는 기다리지 않는다.
 - 충족 기준: 순번 3을 반영한 뒤 2·3이 오면 이벤트가 없고, 4가 오면 있으며, 같은 순번 둘이 동시에 와도 이벤트가 하나다
 
 **`REQ-BE-3.2.5`** 알림 토큰 검사
 
-- 처리 계약: `X-Minerva-Token`을 `RAG_EVENTS_TOKEN`과 시간이 일정한 비교로 견준다. 없거나 다르면 `UnauthorizedError`(`401`)를 내고 순번·이벤트에 손대지 않는다
+- 처리 계약: `X-Minerva-Token`을 `RAG_EVENTS_TOKEN`과 시간이 일정한 비교로 견준다. 없거나 다르면 `UnauthorizedError`(`401`)를 내고 순번·이벤트에 손대지 않는다. 검사는 라우트 가드에서 하므로 본문 검증보다 먼저다(토큰이 없으면 본문이 잘못돼도 `401`). 비교는 두 값의 SHA-256 다이제스트를 `timingSafeEqual`로 견준다.
 - 충족 기준: 토큰이 없거나 틀린 알림이 `401`을 받고 이벤트와 순번 변경이 없다
 
 ### 상태 맞추기 — `REQ-BE-3.3`
 
 **`REQ-BE-3.3.1`** 기동 때와 주기마다 색인 상태 맞추기
 
-- 처리 계약: `reconcile`은 받은 문서들의 색인 상태를 `getIndexStates`로 조회해 문서마다 최신 작업의 이벤트(`source: 'reconcile'`)를 발행한다. 최신 작업이 `failed`면 실패 사유를, `succeeded`면 결과를 `getIndexJob`으로 채운다. 대상 문서와 주기는 documents가 정한다(`RECONCILE_INTERVAL_MS`). RAG Server에 닿지 않으면 이벤트 없이 끝난다
+- 처리 계약: `reconcile`은 받은 문서들의 색인 상태를 `getIndexStates`로 조회해 문서마다 최신 작업의 이벤트(`source: 'reconcile'`)를 발행한다. 색인 상태에는 작업 버전이 없으므로 최신 작업이 있는 문서마다 `getIndexJob`으로 버전을 받고, 최신 작업이 `failed`면 실패 사유를, `succeeded`면 결과를 함께 채운다. 이벤트의 `jobState`·`searchableVersion`은 색인 상태 조회 값이다. 최신 작업이 없거나, `getIndexJob`이 실패했거나, 결과·실패 사유가 비어 있는 문서는 이벤트 없이 넘어간다(다음 주기에 다시 맞춘다). 받은 문서 ID의 중복은 빼고, 빈 목록이면 RAG Server를 부르지 않는다. 대상 문서와 주기는 documents가 정한다(`RECONCILE_INTERVAL_MS`). RAG Server에 닿지 않으면 이벤트 없이 끝난다
 - 충족 기준: 처리 중인 문서 둘의 상태가 `succeeded`·`failed`면 결과·실패 사유가 담긴 이벤트가 둘 발행되고, RAG Server가 닿지 않으면 예외 없이 이벤트가 없다
 
 `getStages`는 같은 조회로 `running` 작업의 단계를 문서별로 돌려주며, 실패하면 빈 값을 돌려준다(`REQ-BE-1.3.6`).
@@ -204,8 +235,9 @@ RAG Server 호출 실패는 예외로 내보내지 않고 결과 값으로 바�
 | :--- | :--- | :--- | :--- | :--- |
 | `indexing.event_received` | 알림 받음 | info | `docId`, `jobId`, `jobState`, `sequence`, `applied` | `REQ-BE-3.2` |
 | `indexing.event_unauthorized` | 토큰 불일치 | warning | `tokenPresent` | `REQ-BE-3.2.5` |
-| `indexing.request_failed` | 색인·변경·삭제 요청 실패 | warning | `operation`, `docId`, `code` | `REQ-BE-3.1.1`, `REQ-BE-3.4.2` |
-| `indexing.reconciled` | `reconcile` 끝 | info | `docs`, `events` | `REQ-BE-3.3.1` |
+| `indexing.request_failed` | 색인·변경·삭제 요청, 작업·색인 상태 조회 실패 | warning | `operation`(`requestIndex`·`updateMetadata`·`deleteChunks`·`getIndexJob`·`getIndexStates`), `docId`(여러 문서 조회면 `null`), `code` | `REQ-BE-3.1.1`, `REQ-BE-3.4.2` |
+| `indexing.event_dispatch_failed` | 이벤트 받는 쪽 처리 실패 | warning | `docId`, `jobId`, `source`, `errorName` | `REQ-BE-3.2.1` |
+| `indexing.reconciled` | `reconcile` 끝 | info | `docs`(중복을 뺀 받은 문서 수), `events`(발행을 시도한 이벤트 수) | `REQ-BE-3.3.1` |
 
 ## 테스트와 추적성
 
@@ -222,3 +254,5 @@ RAG Server 호출 실패는 예외로 내보내지 않고 결과 값으로 바�
 | `REQ-BE-3.3.1` | unit | 상태별 이벤트, 닿지 않으면 이벤트 없음 | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.4.1` | unit | 변경 요청 본문과 참 | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.4.2` | unit | 실패 시 예외 없이 거짓 | rag (가짜, 실패) | `src/indexing/**/*.spec.ts` |
+| `REQ-BE-1.3.6` | unit | `getStages`가 색인 중 문서의 단계를 한 번에 주고, 받지 못하면 빈 결과 | rag (가짜) | `src/indexing/**/*.spec.ts` |
+| `REQ-BE-1.8.4` | unit | `deleteChunks`의 요청과 참, 실패 시 예외 없이 거짓 | rag (가짜, 실패) | `src/indexing/**/*.spec.ts` |

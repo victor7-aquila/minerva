@@ -14,12 +14,13 @@ Backend의 HTTP 공통 규약을 맡는다. 전역 요청 검증, 전역 예외 
 
 | REQ | 기능 그룹 | 책임 |
 | :--- | :--- | :--- |
-| `REQ-BE-7.1` | 요청 처리 | HTTP 요청을 받고, 형식을 검증하고, 페이지 응답 형식을 정한다 |
+| `REQ-BE-7.1` | 요청 처리 | HTTP 요청을 받고, 형식을 검증하고, 목록 응답이 페이지 형식을 따르게 한다 |
 
 **비범위**
 
 - 엔드포인트별 라우팅과 처리 — 각 기능 모듈의 컨트롤러 (`ARCHITECT.md` 「단위 구성」)
 - 오류 클래스와 메시지 정의 — common
+- 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) 정의 — utils 라이브러리 (`libs/utils`, `ARCHITECT.md` 「의존 규칙」)
 
 ## 구조
 
@@ -27,8 +28,21 @@ Backend의 HTTP 공통 규약을 맡는다. 전역 요청 검증, 전역 예외 
 
 ```text
 src/api/
+├── index.ts
+├── app.module.ts
+├── filters/
+│   └── domain-error.filter.ts
+├── helpers/
+│   ├── multer-options.ts
+│   ├── upload-limits.ts
+│   ├── upload-state.ts
+│   └── validation.ts
+├── interceptors/
+│   └── multipart-limit.interceptor.ts
+├── interfaces/
+│   └── error-status.ts
 └── MODULE.md
-src/main.ts                  # 앱 진입점. 빌드·실행 명령이 이 경로를 가리킨다
+src/main.ts                  # 앱 진입점. 빌드 출력 dist/src/main.js를 실행 명령이 가리킨다
 
 src/api/**/*.spec.ts
 test/
@@ -40,7 +54,9 @@ test/
 
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| common | DI·import | `ConfigService`(`PORT`, `UPLOAD_MAX_FILES`, `UPLOAD_MAX_TOTAL_BYTES`, `UPLOAD_MAX_IMAGE_BYTES`, `UPLOAD_MAX_MD_BYTES`), `DomainError`, `PinoLogger` | common `MODULE.md` | `REQ-BE-7.1`, `REQ-BE-8.3` |
+| common | DI·import | `CommonModule`, `ConfigService`(`PORT`, `UPLOAD_MAX_FILES`, `UPLOAD_MAX_TOTAL_BYTES`, `UPLOAD_MAX_IMAGE_BYTES`, `UPLOAD_MAX_MD_BYTES`), `DomainError` | common `MODULE.md` | `REQ-BE-7.1`, `REQ-BE-8.3` |
+| libs/logger | DI·import | `AppLoggerModule`(앱 조립), `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-7.1.1`, `REQ-BE-8.2.1` |
+| libs/utils | 참조 | 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | utils `MODULE.md` | `REQ-BE-7.1.3` |
 | 모든 기능 모듈 | 앱 조립 | NestJS 모듈 | 각 `MODULE.md` | `REQ-BE-7.1.1` |
 
 ### 공개 표면
@@ -48,7 +64,6 @@ test/
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
 | 요청 처리 | `src/main.ts` (부트스트랩), `AppModule` | 「요청 처리 — REQ-BE-7.1」 | `REQ-BE-7.1.1` |
-| 요청 처리 | `PageQueryDto`, `Page<T>`, `toPage()` | 같은 절 | `REQ-BE-7.1.3` |
 | 요청 처리 | 전역 `ValidationPipe`, `DomainErrorFilter` | 같은 절, `API.md` 「공통 규약」 | `REQ-BE-7.1.2`, `REQ-BE-8.3` |
 
 ## 기능 그룹별 요구사항
@@ -56,24 +71,6 @@ test/
 ### 요청 처리 — `REQ-BE-7.1`
 
 ```typescript
-/** 페이지 요청이다. 목록 DTO가 이어받는다. */
-export class PageQueryDto {
-  page?: number;      // 1 이상, 기본 1
-  page_size?: 20 | 50 | 100;  // 기본 20
-  order?: 'asc' | 'desc';     // 기본 desc
-}
-
-/** 페이지 응답이다. */
-export interface Page<T> {
-  items: T[];
-  total: number;
-  page: number;
-  page_size: number;
-}
-
-/** 목록과 전체 개수로 페이지 응답을 만든다. */
-export function toPage<T>(items: T[], total: number, query: PageQueryDto): Page<T>;
-
 /** 도메인 오류와 그 밖의 예외를 오류 응답으로 바꾼다. */
 @Catch()
 export class DomainErrorFilter implements ExceptionFilter {}
@@ -85,7 +82,7 @@ export class AppModule {}
 
 **`REQ-BE-7.1.1`** HTTP로 호출
 
-- 처리 계약: `main.ts`가 `AppModule`로 앱을 만들고, 전역 접두사 없이 각 컨트롤러가 `/v1` 경로를 가진다. 전역 파이프·필터·로거를 붙이고 `PORT`에서 듣는다. 파일 업로드는 multipart로 받으며, 파일 수는 `UPLOAD_MAX_FILES`, 파일 하나는 `max(UPLOAD_MAX_MD_BYTES, UPLOAD_MAX_IMAGE_BYTES)`, 요청 전체는 `UPLOAD_MAX_TOTAL_BYTES`를 넘으면 본문을 끝까지 읽지 않고 `PayloadTooLargeError`로 막는다(`REQ-BE-1.1.10`)
+- 처리 계약: `main.ts`가 `AppModule`로 앱을 만들고, 전역 접두사 없이 각 컨트롤러가 `/v1` 경로를 가진다. `AppModule`이 전역 파이프·필터·업로드 인터셉터를 등록하고, 모듈 사이 이벤트(`EventEmitterModule.forRoot()`)와 주기 작업(`ScheduleModule.forRoot()`)을 앱 전체에 한 번 가져오고(기능 모듈은 `forRoot`를 부르지 않는다), `main.ts`는 로거를 붙이고 `PORT`에서 듣는다. 파일 업로드는 `multipart/form-data`로 받는다. api의 전역 업로드 인터셉터가 `multipart/form-data` 요청의 `files` 필드를 메모리로 읽어 `req.files`에 두고(파일 이름은 UTF-8), 그 밖의 `multipart/*` 요청은 본문을 읽지 않고 `InvalidRequestError`로 거부한다. 업로드를 받는 컨트롤러는 `@UploadedFiles()`·`@Body()`로 받는다. 파일 수는 `UPLOAD_MAX_FILES`, 파일 하나는 `max(UPLOAD_MAX_MD_BYTES, UPLOAD_MAX_IMAGE_BYTES)`, 요청 전체(HTTP 본문 바이트)는 `UPLOAD_MAX_TOTAL_BYTES`를 넘으면 본문을 끝까지 읽지 않고 그 순간 `PayloadTooLargeError`로 응답한 뒤 연결을 닫는다. `Content-Length`가 이미 한도를 넘으면 본문을 읽기 전에 막는다(`REQ-BE-1.1.10`)
 - 충족 기준: 앱이 뜨면 `API.md`의 모든 엔드포인트가 응답하고, 파일 수 한도를 넘는 업로드가 `413`이다
 
 **`REQ-BE-7.1.2`** 형식이 잘못된 요청 거부
@@ -95,6 +92,7 @@ export class AppModule {}
 
 **`REQ-BE-7.1.3`** 목록은 페이지와 전체 개수
 
+- 처리 계약: 목록 엔드포인트는 utils 라이브러리의 페이지 규약(utils `MODULE.md` 「페이지 규약」)을 쓴다. 목록 DTO는 `PageQueryDto`를 이어받고, 응답은 `toPage()`로 만든다
 - 충족 기준: 모든 목록 엔드포인트의 응답이 `items`, `total`, `page`, `page_size`를 갖고, 페이지 크기 20·50·100 밖은 `400`이다
 
 `DomainErrorFilter`는 `DomainError`를 `API.md` 「오류 코드」의 상태와 `{"error": {"code", "message"}}`로, 그 밖의 예외를 `500 INTERNAL_ERROR`와 일반 메시지로 바꾸고 스택은 애플리케이션 로그에만 남긴다(`REQ-BE-8.3.1`, `REQ-BE-8.3.2`). 그 충족 기준은 common이 소유하고, 아래 테스트 표가 HTTP 경계에서 함께 본다.
@@ -108,7 +106,12 @@ export class AppModule {}
 | `InvalidRequestError` | 요청 검증 실패 | `INVALID_REQUEST` `400` | 발생·변환: api | `REQ-BE-7.1.2` |
 | `PayloadTooLargeError` | multipart 한도 초과 | `PAYLOAD_TOO_LARGE` `413` | 발생·변환: api | `REQ-BE-1.1.10` |
 | `DomainError` 하위 클래스 | 기능 모듈이 던짐 | 그 `code`와 `API.md`의 상태 | 변환: api | `REQ-BE-8.3.1` |
+| 프레임워크 HTTP 오류 (없는 경로) | 라우트가 없다 | `NOT_FOUND` `404` | 변환: api | `REQ-BE-7.1.1` |
+| 프레임워크 HTTP 오류 (본문 크기 초과) | JSON 본문이 프레임워크 한도를 넘는다 | `PAYLOAD_TOO_LARGE` `413` | 변환: api | `REQ-BE-7.1.2` |
+| 프레임워크 HTTP 오류 (그 밖의 4xx) | 잘못된 JSON 등 | `INVALID_REQUEST` `400` | 변환: api | `REQ-BE-7.1.2` |
 | 그 밖의 예외 | 예상하지 못한 오류 | `INTERNAL_ERROR` `500` | 변환: api | `REQ-BE-8.3.2` |
+
+프레임워크 HTTP 오류의 `message`는 원래 오류 문자열을 쓰지 않고 고정 한국어 문장을 쓴다(`REQ-BE-8.3.2`).
 
 ### 로그
 

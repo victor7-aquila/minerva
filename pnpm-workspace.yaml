@@ -1,0 +1,7 @@
+packages:
+  - apps/backend
+
+# 설치 스크립트 실행 허용 목록. Jest가 끌어오는 아래 두 패키지는 미리 빌드된 바이너리를 쓰므로 스크립트를 돌리지 않는다
+allowBuilds:
+  '@parcel/watcher': false
+  unrs-resolver: false

@@ -26,6 +26,15 @@ RAG Server HTTP API(`apps/rag-server/API.md`)를 부르는 Backend의 유일한 
 
 ```text
 src/rag/
+├── index.ts
+├── rag.module.ts
+├── helpers/
+│   └── rag-wire.ts
+├── interfaces/
+│   ├── rag-request-error.ts
+│   └── rag.types.ts
+├── services/
+│   └── rag-client.ts
 └── MODULE.md
 
 src/rag/**/*.spec.ts
@@ -38,7 +47,8 @@ src/rag/**/*.spec.ts
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | RAG Server | HTTP | 모든 엔드포인트, `X-Minerva-Token` | `apps/rag-server/API.md` | `REQ-BE-10.1` |
-| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`), `PinoLogger`, `RagUnavailableError` | common `MODULE.md` | `REQ-BE-10.1` |
+| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`), `RagUnavailableError` | common `MODULE.md` | `REQ-BE-10.1` |
+| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
 
 ### 공개 표면
 

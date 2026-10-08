@@ -9,3 +9,8 @@
 
 # 앱이 쓰는 로컬 데이터: 이미지 파일, 작업 목록 SQLite, 모델 파일
 data/
+
+# Node 의존성과 빌드 산출물
+node_modules/
+dist/
+coverage/
