@@ -233,6 +233,24 @@ async function removeAndPurge(): Promise<void> {
   expect(h.assets.deleteDocument).toHaveBeenCalledTimes(1);
 }
 
+/**
+ * 임시 설명이 있는 재색인에서 새 버전을 쓴 뒤 다시 읽은 결과만 삭제됨·교체됨으로 두고, 기록·처리 시작이 없는지 본다.
+ * ★ 문서는 그대로 두어 captioning 조건부 갱신이 성공할 상태다 — 다시 읽은 결과만으로 멈추는지 본다
+ */
+async function expectReindexStopsOn(lost: 'deleted' | 'replaced'): Promise<void> {
+  await seedDoc({ docId: DOC_A });
+  h.assets.markTemporaryForRegeneration.mockResolvedValue(1);
+  const started = jest.spyOn(h.lifecycle, 'startProcessing');
+  jest.spyOn(h.lifecycle, 'recheckAfterVersionWrite').mockResolvedValue(lost);
+  await h.service.reindex(DOC_A);
+  await h.drain();
+  expect(transitionsOf(DOC_A)).toEqual([]);
+  expect(started).not.toHaveBeenCalled();
+  expect(docOf(h.db, DOC_A).processingState).toBe('queued');
+  expect(h.assets.generateHints).not.toHaveBeenCalled();
+  expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+}
+
 /** 그 문서의 버전 레코드 개수다. */
 function versionRows(docId: string): number {
   return h.db.dump('document_versions').filter((v) => v.docId === docId).length;
@@ -1419,6 +1437,16 @@ describe('REQ-BE-1.5.1', () => {
     expect(docOf(h.db, DOC_A).edition).toBeNull();
     expect(h.logs.recordsOf('edit')[0].detail?.changedFields).toEqual(['edition']);
   });
+
+  it('T-FU-ORDER-7 요약·캡션 편집의 새 버전을 쓰는 사이 삭제되면 edit 기록은 남고 응답은 DocumentNotFoundError다', async () => {
+    await seedDoc({ docId: DOC_A });
+    const held = await holdClaimPath('edit');
+    await h.service.remove(DOC_A);
+    held.release();
+    expect(await held.outcome).toBeInstanceOf(DocumentNotFoundError);
+    expect(recordCount(DOC_A, 'edit')).toBe(1);
+    expect(h.logs.recordsOf('edit')[0].detail?.changedFields).toEqual(['hints']);
+  });
 });
 
 describe('REQ-BE-1.5.2', () => {
@@ -2181,6 +2209,10 @@ describe('REQ-BE-1.2.8', () => {
     expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });
+
+  it('T-FU-ORDER-5 재색인은 다시 읽어 교체됨이면 captioning 조건부 갱신이 성공할 상태여도 기록·처리 시작이 없다', async () => {
+    await expectReindexStopsOn('replaced');
+  });
 });
 
 describe('REQ-BE-1.8.3', () => {
@@ -2198,8 +2230,7 @@ describe('REQ-BE-1.8.3', () => {
       held.release();
       const outcome = await held.outcome;
       await h.drain();
-      // ★ 요청 결과는 지금 동작 그대로다: 편집은 마지막 getDetail이 삭제된 문서라 404다
-      // (REQ에 근거가 없는 동작이다. 명세가 정해지면 이 단언을 바꾼다)
+      // ★ 편집은 DocumentNotFoundError다 (REQ-BE-1.5.1 — 기록까지 T-FU-ORDER-7에서 본다)
       if (path === 'edit') expect(outcome).toBeInstanceOf(DocumentNotFoundError);
       else expect(outcome).toBe('resolved');
       expect(transitionsOf(DOC_A)).toEqual([]);
@@ -2209,6 +2240,10 @@ describe('REQ-BE-1.8.3', () => {
       expect(versionRows(DOC_A)).toBe(0);
     },
   );
+
+  it('T-FU-ORDER-6 재색인은 다시 읽어 삭제됨이면 captioning 조건부 갱신이 성공할 상태여도 기록·처리 시작이 없다', async () => {
+    await expectReindexStopsOn('deleted');
+  });
 });
 
 describe('REQ-BE-1.8.6', () => {

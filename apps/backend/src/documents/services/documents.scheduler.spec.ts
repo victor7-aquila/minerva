@@ -185,60 +185,9 @@ describe('REQ-BE-1.9.9', () => {
     expect(captioning).toHaveLength(1);
     expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
   });
-});
 
-describe('REQ-BE-1.9.10', () => {
-  it('T-PR3-RES-2 한 문서의 색인 요청이 던져도 둘째 문서를 요청하고 task_failed를 남긴다', async () => {
-    // ★ 요청 직전에 문서·버전을 다시 읽는 조건: queued, 작업 ID 없음, 마지막 버전
-    await seed(
-      h.db,
-      [
-        docRecord({ docId: DOC_A, name: 'a', processingState: 'queued', latestVersion: '1' }),
-        docRecord({ docId: DOC_B, name: 'b', processingState: 'queued', latestVersion: '1' }),
-      ],
-      [versionRecord({ docId: DOC_A, jobId: null }), versionRecord({ docId: DOC_B, jobId: null })],
-    );
-    h.indexing.requestIndex.mockImplementation(async (input) => {
-      if (input.docId === DOC_A) throw new Error('boom');
-      return { kind: 'accepted', jobId: 'job-b' };
-    });
-    await expect(h.scheduler.resume()).resolves.toBeUndefined();
-    await h.drain();
-    const requested = h.indexing.requestIndex.mock.calls.map((call) => call[0].docId);
-    expect(new Set(requested)).toEqual(new Set([DOC_A, DOC_B]));
-    expect(versionOf(h.db, DOC_B, '1')?.jobId).toBe('job-b');
-    const failed = logLines('documents.task_failed').filter((line) => line.task === 'resume');
-    expect(failed).toHaveLength(1);
-    expect(failed[0].docId).toBe(DOC_A);
-    // ★ 요청에 성공한 문서만 requeued로 센다
-    expect(logLines('documents.resume')[0].requeued).toBe(1);
-  });
-
-  it('T-RES-2 작업 ID 없는 queued 문서만 색인을 다시 요청하고 reindex 버전은 force다', async () => {
-    // ★ 시드는 요청 직전 다시 읽기 조건(queued·jobId null·latestVersion 일치)을 만족한다 (P36)
-    await seed(
-      h.db,
-      [
-        docRecord({ docId: DOC_A, name: 'a', processingState: 'queued' }),
-        docRecord({ docId: DOC_B, name: 'b', processingState: 'queued' }),
-        docRecord({ docId: DOC_C, name: 'c', processingState: 'queued' }),
-      ],
-      [
-        versionRecord({ docId: DOC_A, origin: 'hints', jobId: null }),
-        versionRecord({ docId: DOC_B, jobId: 'job-1' }),
-        versionRecord({ docId: DOC_C, origin: 'reindex', jobId: null }),
-      ],
-    );
-    await h.scheduler.resume();
-    await h.drain();
-    const forced = new Map(
-      h.indexing.requestIndex.mock.calls.map((call) => [call[0].docId, call[0].force]),
-    );
-    expect(forced.size).toBe(2);
-    expect(forced.get(DOC_A)).toBe(false);
-    expect(forced.get(DOC_C)).toBe(true);
-    expect(forced.has(DOC_B)).toBe(false);
-  });
+  // ★ 기동 때 이전 버전으로 되돌리기(`recovered`)의 근거는 REQ-BE-1.9.9다 (documents MODULE.md 로그 표 `documents.resume`)
+  // ── 마지막 버전 레코드가 없는 처리 중 문서는 이전 버전으로 되돌린다 ──
 
   it('T-RES-5a 마지막 버전 레코드가 없으면 이전 버전으로 되돌리고 결과가 있으면 completed다', async () => {
     await seed(
@@ -300,10 +249,7 @@ describe('REQ-BE-1.9.10', () => {
     expect(record?.outcome).toBe('failure');
     expect(record?.detail?.reasonCode).toBe('PARSE_FAILED');
   });
-});
 
-// ★ 기동 때 이전 버전으로 되돌리는 `recovered` 로그의 근거는 REQ-BE-1.9.9다 (documents MODULE.md 로그 표)
-describe('REQ-BE-1.9.9', () => {
   // ── 이 프로세스에서 진행 중인 선점은 기동 복구에서 뺀다 ──
 
   const PREPARED: PreparedVersion = {
@@ -460,6 +406,60 @@ describe('REQ-BE-1.9.9', () => {
     expect(logLines('documents.resume')[0].recovered).toBe(0);
     expect(docOf(h.db, DOC_A).latestVersion).toBe('2');
     h.lifecycle.endClaim(DOC_A, '2');
+  });
+});
+
+describe('REQ-BE-1.9.10', () => {
+  it('T-PR3-RES-2 한 문서의 색인 요청이 던져도 둘째 문서를 요청하고 task_failed를 남긴다', async () => {
+    // ★ 요청 직전에 문서·버전을 다시 읽는 조건: queued, 작업 ID 없음, 마지막 버전
+    await seed(
+      h.db,
+      [
+        docRecord({ docId: DOC_A, name: 'a', processingState: 'queued', latestVersion: '1' }),
+        docRecord({ docId: DOC_B, name: 'b', processingState: 'queued', latestVersion: '1' }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: null }), versionRecord({ docId: DOC_B, jobId: null })],
+    );
+    h.indexing.requestIndex.mockImplementation(async (input) => {
+      if (input.docId === DOC_A) throw new Error('boom');
+      return { kind: 'accepted', jobId: 'job-b' };
+    });
+    await expect(h.scheduler.resume()).resolves.toBeUndefined();
+    await h.drain();
+    const requested = h.indexing.requestIndex.mock.calls.map((call) => call[0].docId);
+    expect(new Set(requested)).toEqual(new Set([DOC_A, DOC_B]));
+    expect(versionOf(h.db, DOC_B, '1')?.jobId).toBe('job-b');
+    const failed = logLines('documents.task_failed').filter((line) => line.task === 'resume');
+    expect(failed).toHaveLength(1);
+    expect(failed[0].docId).toBe(DOC_A);
+    // ★ 요청에 성공한 문서만 requeued로 센다
+    expect(logLines('documents.resume')[0].requeued).toBe(1);
+  });
+
+  it('T-RES-2 작업 ID 없는 queued 문서만 색인을 다시 요청하고 reindex 버전은 force다', async () => {
+    // ★ 시드는 요청 직전 다시 읽기 조건(queued·jobId null·latestVersion 일치)을 만족한다 (P36)
+    await seed(
+      h.db,
+      [
+        docRecord({ docId: DOC_A, name: 'a', processingState: 'queued' }),
+        docRecord({ docId: DOC_B, name: 'b', processingState: 'queued' }),
+        docRecord({ docId: DOC_C, name: 'c', processingState: 'queued' }),
+      ],
+      [
+        versionRecord({ docId: DOC_A, origin: 'hints', jobId: null }),
+        versionRecord({ docId: DOC_B, jobId: 'job-1' }),
+        versionRecord({ docId: DOC_C, origin: 'reindex', jobId: null }),
+      ],
+    );
+    await h.scheduler.resume();
+    await h.drain();
+    const forced = new Map(
+      h.indexing.requestIndex.mock.calls.map((call) => [call[0].docId, call[0].force]),
+    );
+    expect(forced.size).toBe(2);
+    expect(forced.get(DOC_A)).toBe(false);
+    expect(forced.get(DOC_C)).toBe(true);
+    expect(forced.has(DOC_B)).toBe(false);
   });
 });
 
