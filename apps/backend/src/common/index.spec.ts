@@ -46,7 +46,7 @@ describe('REQ-BE-8.1.1', () => {
     expect(typeof CommonModule).toBe('function');
   });
 
-  it('AppConfig가 16개 키와 타입을 가진다', () => {
+  it('AppConfig가 17개 키와 타입을 가진다', () => {
     const keys: (keyof AppConfig)[] = [
       'PORT',
       'MONGODB_URI',
@@ -56,6 +56,7 @@ describe('REQ-BE-8.1.1', () => {
       'RAG_EVENTS_TOKEN',
       'RAG_TIMEOUT_MS',
       'RAG_CAPTION_TIMEOUT_MS',
+      'RAG_WAIT_TIMEOUT_MS',
       'CHUNKING_MODE',
       'RECONCILE_INTERVAL_MS',
       'RAG_RETRY_INTERVAL_MS',
@@ -65,7 +66,7 @@ describe('REQ-BE-8.1.1', () => {
       'UPLOAD_MAX_FILES',
       'UPLOAD_MAX_TOTAL_BYTES',
     ];
-    expect(keys).toHaveLength(16);
+    expect(keys).toHaveLength(17);
 
     const port: AppConfig['PORT'] = 1;
     const mode: AppConfig['CHUNKING_MODE'] = 'rule';

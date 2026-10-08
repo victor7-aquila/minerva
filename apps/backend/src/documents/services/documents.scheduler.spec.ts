@@ -528,7 +528,12 @@ describe('REQ-BE-3.3.1', () => {
     const reconciled = h.indexing.reconcile.mock.calls.map((call) => new Set(call[0]));
     expect(reconciled.every((ids) => ids.has(DOC_B))).toBe(true);
     await waitUntil(() => docOf(h.db, DOC_A).pendingRag.metadata === false);
-    expect(h.indexing.updateMetadata).toHaveBeenCalledWith(DOC_A, expect.any(String), null);
+    expect(h.indexing.updateMetadata).toHaveBeenCalledWith(
+      DOC_A,
+      expect.any(String),
+      null,
+      expect.any(AbortSignal),
+    );
     // ★ 두 인터벌은 harness.close()가 지운다
     await h.drain();
   });

@@ -222,6 +222,30 @@ describe('REQ-BE-1.9.4', () => {
     expect(record?.detail?.reasonCode).toBe('RAG_UNREACHABLE');
   });
 
+  it.each([
+    ['PAYLOAD_TOO_LARGE', '크기 한도'],
+    ['INVALID_REQUEST', '형식 오류'],
+  ] as const)(
+    'T-IDX-2b rejected(%s)면 failed이고 RAG Server가 준 코드가 실패 사유다',
+    async (code, phrase) => {
+      await seedDoc({ docId: DOC_A, processingState: 'captioning' });
+      h.indexing.requestIndex.mockResolvedValue({ kind: 'rejected', code });
+      await h.lifecycle.requestIndexFor(DOC_A, '1', false);
+      expect(docOf(h.db, DOC_A).processingState).toBe('failed');
+      const failure = versionOf(h.db, DOC_A, '1')?.failure;
+      expect(failure).toMatchObject({ code, headingPath: null, placeholderId: null });
+      // 연결 실패로 보이지 않게 거부 까닭을 설명한다
+      expect(failure?.message).toContain(phrase);
+      expectSafeKoreanMessage(failure?.message ?? '');
+      const record = h.logs.recordsOf('processing_state').at(-1);
+      expect(record?.outcome).toBe('failure');
+      expect(record?.detail?.reasonCode).toBe(code);
+      // 거부는 다시 보내도 같으므로 색인을 다시 요청하지 않는다
+      await h.drain();
+      expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it('T-IDX-3 reused면 검색되는 버전의 결과를 이어받아 완료하고 searchableVersion은 그대로다', async () => {
     await seed(
       h.db,
@@ -319,7 +343,7 @@ describe('REQ-BE-1.8.4', () => {
     await h.lifecycle.requestIndexFor(DOC_A, '1', false);
     expect(docOf(h.db, DOC_A).pendingRag.deleteChunks).toBe(true);
     await h.drain();
-    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A);
+    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A, expect.any(AbortSignal));
   });
 });
 
@@ -768,7 +792,7 @@ describe('REQ-BE-1.2.8', () => {
     expect(record?.detail?.reasonCode).toBe('REPLACED');
     // 청크 삭제가 실패하면 표시가 남는다
     await h.drain();
-    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A);
+    expect(h.indexing.deleteChunks).toHaveBeenCalledWith(DOC_A, expect.any(AbortSignal));
     expect(docOf(h.db, DOC_A).pendingRag.deleteChunks).toBe(true);
     // 다음 시도가 성공하면 표시가 지워진다
     await h.lifecycle.syncChunkDeletion(DOC_A);
@@ -1049,6 +1073,24 @@ describe('REQ-BE-3.4.2', () => {
     expect(h.indexing.updateMetadata.mock.calls.length).toBe(calls);
     expect(docOf(h.db, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc').pendingRag.metadata).toBe(false);
     expect(docOf(h.db, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd').pendingRag.metadata).toBe(false);
+  });
+
+  it('T-META-2 이름·판 정보 변경에 종료 신호를 넘기고, 종료로 끊기면 표시를 남긴다', async () => {
+    await seedDoc({ docId: DOC_A, name: 'a', pendingRag: pending });
+    h.indexing.updateMetadata.mockImplementation(
+      (_docId: string, _name: string, _edition: unknown, signal?: AbortSignal) =>
+        new Promise<boolean>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(false), { once: true });
+        }),
+    );
+    const running = h.lifecycle.syncMetadata(DOC_A);
+    await tick();
+    expect(h.indexing.updateMetadata).toHaveBeenCalledTimes(1);
+    expect(h.indexing.updateMetadata.mock.calls[0][3]).toBe(h.tasks.stopSignal);
+
+    await h.tasks.beforeApplicationShutdown();
+    await running;
+    expect(docOf(h.db, DOC_A).pendingRag.metadata).toBe(true);
   });
 });
 
@@ -1385,6 +1427,33 @@ function holdFirstDelete() {
 }
 
 describe('REQ-BE-1.8.4', () => {
+  it('T-DEL-7 청크 삭제에 종료 신호를 넘기고, 종료로 끊기면 표시를 남기고 데이터를 지우지 않는다', async () => {
+    await seedDoc({
+      docId: DOC_A,
+      deleted: true,
+      pendingRag: { deleteChunks: true, metadata: false },
+    });
+    // 끊기면 거짓을 돌려주는 rag 호출을 흉내 낸다 (indexing은 끊긴 요청을 거짓으로 바꾼다)
+    h.indexing.deleteChunks.mockImplementation(
+      (_docId: string, signal?: AbortSignal) =>
+        new Promise<boolean>((resolve) => {
+          signal?.addEventListener('abort', () => resolve(false), { once: true });
+        }),
+    );
+    const running = h.lifecycle.syncChunkDeletion(DOC_A);
+    await tick();
+    expect(h.indexing.deleteChunks).toHaveBeenCalledTimes(1);
+    // ★ 아무 신호가 아니라 작업 실행기의 종료 신호여야 종료 때 끊긴다
+    expect(h.indexing.deleteChunks.mock.calls[0][1]).toBe(h.tasks.stopSignal);
+
+    await h.tasks.beforeApplicationShutdown();
+    await running;
+    const doc = docOf(h.db, DOC_A);
+    expect(doc.pendingRag.deleteChunks).toBe(true);
+    expect(doc.purged).toBe(false);
+    expect(h.assets.deleteDocument).not.toHaveBeenCalled();
+  });
+
   it('T-DEL-4 삭제 요청이 대기 중일 때 같은 문서의 재요청이 오면 삭제를 다시 부르고 표시는 false로 끝난다', async () => {
     await seedReplacedPending();
     const { first, started } = holdFirstDelete();

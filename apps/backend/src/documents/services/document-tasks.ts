@@ -11,6 +11,8 @@ export type DocumentTaskName =
 export class DocumentTasks implements BeforeApplicationShutdown {
   private readonly running = new Set<Promise<void>>();
   private shuttingDown = false;
+  /** 종료 때 중단해 오래 기다리는 RAG 요청을 끊는다 */
+  private readonly stopController = new AbortController();
 
   constructor(@Inject(PinoLogger) private readonly logger: PinoLogger) {
     this.logger.setContext('DocumentTasks');
@@ -19,6 +21,11 @@ export class DocumentTasks implements BeforeApplicationShutdown {
   /** 종료 중인가를 돌려준다. */
   get stopping(): boolean {
     return this.shuttingDown;
+  }
+
+  /** 종료가 시작되면 중단되는 신호를 돌려준다. 청크 삭제·이름·판 정보 변경 요청에 넘긴다. */
+  get stopSignal(): AbortSignal {
+    return this.stopController.signal;
   }
 
   /** 작업을 다음 차례에 시작한다. 실패는 로그로만 남긴다. */
@@ -46,9 +53,11 @@ export class DocumentTasks implements BeforeApplicationShutdown {
     }
   }
 
-  /** 새 작업을 막고 진행 중인 작업을 기다린다. */
+  /** 새 작업을 막고, 오래 기다리는 RAG 요청을 끊은 뒤 진행 중인 작업을 기다린다. */
   async beforeApplicationShutdown(): Promise<void> {
     this.shuttingDown = true;
+    // ★ 기다리기 전에 끊는다. 아니면 RAG_WAIT_TIMEOUT_MS(기본 10분)까지 종료가 붙잡힌다
+    this.stopController.abort();
     await this.drain();
   }
 }

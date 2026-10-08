@@ -85,7 +85,7 @@ flowchart LR
 
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
-| 색인 요청 | `IndexingService.requestIndex`, `IndexRequestInput`, `IndexRequestOutcome` | 「색인 요청 — REQ-BE-3.1」 | `REQ-BE-3.1` |
+| 색인 요청 | `IndexingService.requestIndex`, `IndexRequestInput`, `IndexRequestOutcome`, `IndexRejectionCode` | 「색인 요청 — REQ-BE-3.1」 | `REQ-BE-3.1` |
 | 상태 알림 받기 | `POST /v1/internal/rag-events`, `IndexingService.handleNotification`(알림 컨트롤러 전용) | `API.md`, 루트 `IF-2` | `REQ-BE-3.2` |
 | 상태 알림 받기 | `indexing.job-state-changed` 이벤트(`INDEX_JOB_STATE_CHANGED`) | `IF-BE-1` | `REQ-BE-3.2.2` |
 | 상태 맞추기 | `IndexingService.reconcile`, `IndexingService.getStages` | 「상태 맞추기 — REQ-BE-3.3」 | `REQ-BE-3.3.1`, `REQ-BE-1.3.6` |
@@ -118,10 +118,14 @@ export interface IndexRequestInput {
   force: boolean;
 }
 
+/** RAG Server가 색인 요청을 거부한 오류 코드다. */
+export type IndexRejectionCode = 'PAYLOAD_TOO_LARGE' | 'INVALID_REQUEST';
+
 /** 색인 요청의 결과다. */
 export type IndexRequestOutcome =
   | { kind: 'accepted'; jobId: string }
   | { kind: 'reused'; jobId: string }
+  | { kind: 'rejected'; code: IndexRejectionCode }
   | { kind: 'unreachable' };
 
 // RagJobState는 rag 공개 타입이다(rag `MODULE.md`). indexing이 그대로 다시 내보낸다
@@ -145,8 +149,13 @@ export class IndexingService {
   handleNotification(notification: RagEventNotification): Promise<void>;
   reconcile(docIds: readonly string[]): Promise<void>;
   getStages(docIds: readonly string[]): Promise<ReadonlyMap<string, 'chunking' | 'embedding' | 'storing'>>;
-  updateMetadata(docId: string, name: string, edition: IndexRequestInput['edition']): Promise<boolean>;
-  deleteChunks(docId: string): Promise<boolean>;
+  updateMetadata(
+    docId: string,
+    name: string,
+    edition: IndexRequestInput['edition'],
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+  deleteChunks(docId: string, signal?: AbortSignal): Promise<boolean>;
 }
 ```
 
@@ -154,8 +163,8 @@ export class IndexingService {
 
 **`REQ-BE-3.1.1`** 색인 요청 내용
 
-- 처리 계약: `requestIndex`는 `IndexRequestInput`을 `POST /v1/index-jobs` 본문(`apps/rag-server/API.md`)으로 옮겨 보낸다. 응답의 `outcome`이 `queued`·`joined`면 `accepted`, `reused`면 `reused`를 돌려준다. `RagUnavailableError`나 `RagRequestError`면 `unreachable`을 돌려주고 예외를 내지 않는다
-- 충족 기준: 요청 본문에 색인용 MD, 자리표시마다 문장, 이름, 판 정보, `force`가 들어 있고, 세 응답과 실패가 각각 해당 결과로 바뀐다
+- 처리 계약: `requestIndex`는 `IndexRequestInput`을 `POST /v1/index-jobs` 본문(`apps/rag-server/API.md`)으로 옮겨 보낸다. 응답의 `outcome`이 `queued`·`joined`면 `accepted`, `reused`면 `reused`를 돌려준다. RAG Server가 색인 요청을 거부한 `RagRequestError`(`413 PAYLOAD_TOO_LARGE`, `400 INVALID_REQUEST`)면 그 코드로 `rejected`를 돌려준다(`REQ-BE-1.9.4`). 그 밖의 `RagRequestError`와 `RagUnavailableError`면 `unreachable`을 돌려준다. 어느 실패에도 예외를 내지 않는다
+- 충족 기준: 요청 본문에 색인용 MD, 자리표시마다 문장, 이름, 판 정보, `force`가 들어 있고, 세 응답과 실패가 각각 해당 결과로 바뀐다. `413 PAYLOAD_TOO_LARGE`·`400 INVALID_REQUEST`는 그 코드의 `rejected`, `401`·`500`·연결 실패는 `unreachable`이다
 
 **`REQ-BE-3.1.2`** 접수한 작업 ID
 
@@ -212,8 +221,8 @@ export class IndexingService {
 
 **`REQ-BE-3.4.2`** 실패하면 다시 요청할 수 있게
 
-- 처리 계약: `updateMetadata`·`deleteChunks`는 RAG Server에 닿지 않거나 오류 응답이면 예외 없이 거짓을 돌려준다. 거짓이면 documents가 다시 보낼 요청으로 남기고 `RAG_RETRY_INTERVAL_MS`마다 다시 부른다(documents `MODULE.md` 「주기 작업」)
-- 충족 기준: RAG Server가 닿지 않으면 두 함수가 예외 없이 거짓이다
+- 처리 계약: `updateMetadata`·`deleteChunks`는 RAG Server에 닿지 않거나 오류 응답이면 예외 없이 거짓을 돌려준다. `signal`은 rag에 그대로 넘기며, 중단돼 끊긴 요청도 거짓이다(rag `MODULE.md` `REQ-BE-10.1.3`). 거짓이면 documents가 다시 보낼 요청으로 남기고 `RAG_RETRY_INTERVAL_MS`마다 다시 부른다(documents `MODULE.md` 「주기 작업」)
+- 충족 기준: RAG Server가 닿지 않으면 두 함수가 예외 없이 거짓이고, 받은 `signal`이 rag 호출에 그대로 넘어간다
 
 ## 실행 계약
 
@@ -243,7 +252,7 @@ RAG Server 호출 실패는 예외로 내보내지 않고 결과 값으로 바�
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-BE-3.1.1` | unit | 요청 본문, 응답별 결과, 실패 시 `unreachable` | rag (가짜) | `src/indexing/**/*.spec.ts` |
+| `REQ-BE-3.1.1` | unit | 요청 본문, 응답별 결과, 거부(`413`·`400`)는 `rejected`, 그 밖의 실패는 `unreachable` | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.1.2` | unit | 결과의 작업 ID | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.1.3` | unit | 설정한 청킹 방식 | rag (가짜), `ConfigService` | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.2.1` | e2e | 토큰이 맞으면 오래된 알림도 `204` | RAG Server (가짜 알림) | `test/` |
@@ -253,6 +262,6 @@ RAG Server 호출 실패는 예외로 내보내지 않고 결과 값으로 바�
 | `REQ-BE-3.2.5` | e2e | 토큰 없음·틀림 `401`, 이벤트·순번 변경 없음 | RAG Server (가짜 알림) | `test/` |
 | `REQ-BE-3.3.1` | unit | 상태별 이벤트, 닿지 않으면 이벤트 없음 | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.4.1` | unit | 변경 요청 본문과 참 | rag (가짜) | `src/indexing/**/*.spec.ts` |
-| `REQ-BE-3.4.2` | unit | 실패 시 예외 없이 거짓 | rag (가짜, 실패) | `src/indexing/**/*.spec.ts` |
+| `REQ-BE-3.4.2` | unit | 실패 시 예외 없이 거짓, `signal` 전달 | rag (가짜, 실패) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-1.3.6` | unit | `getStages`가 색인 중 문서의 단계를 한 번에 주고, 받지 못하면 빈 결과 | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-1.8.4` | unit | `deleteChunks`의 요청과 참, 실패 시 예외 없이 거짓 | rag (가짜, 실패) | `src/indexing/**/*.spec.ts` |

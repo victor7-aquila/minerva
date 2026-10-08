@@ -23,6 +23,7 @@ const ALL_KEYS = [
   'RAG_EVENTS_TOKEN',
   'RAG_TIMEOUT_MS',
   'RAG_CAPTION_TIMEOUT_MS',
+  'RAG_WAIT_TIMEOUT_MS',
   'CHUNKING_MODE',
   'RECONCILE_INTERVAL_MS',
   'RAG_RETRY_INTERVAL_MS',
@@ -65,6 +66,7 @@ describe('REQ-BE-8.1.1', () => {
       ['RAG_EVENTS_TOKEN', 'tok-b', 'tok-b'],
       ['RAG_TIMEOUT_MS', '1500', 1500],
       ['RAG_CAPTION_TIMEOUT_MS', '90000', 90000],
+      ['RAG_WAIT_TIMEOUT_MS', '45000', 45000],
       ['CHUNKING_MODE', 'rule', 'rule'],
       ['RECONCILE_INTERVAL_MS', '5000', 5000],
       ['RAG_RETRY_INTERVAL_MS', '7000', 7000],
@@ -81,7 +83,7 @@ describe('REQ-BE-8.1.1', () => {
       expect(typeof result[key]).toBe(typeof expected);
     });
 
-    it('반환 객체의 키 집합이 16개와 정확히 같고 모르는 환경 변수는 섞이지 않는다', () => {
+    it('반환 객체의 키 집합이 17개와 정확히 같고 모르는 환경 변수는 섞이지 않는다', () => {
       const result = load({
         ...REQUIRED_ENV,
         PATH: '/usr/bin',
@@ -97,6 +99,7 @@ describe('REQ-BE-8.1.1', () => {
       ['PORT', 3000],
       ['RAG_TIMEOUT_MS', 30000],
       ['RAG_CAPTION_TIMEOUT_MS', 120000],
+      ['RAG_WAIT_TIMEOUT_MS', 600000],
       ['CHUNKING_MODE', 'semantic'],
       ['RECONCILE_INTERVAL_MS', 60000],
       ['RAG_RETRY_INTERVAL_MS', 60000],
@@ -124,6 +127,7 @@ describe('REQ-BE-8.1.1', () => {
       FILE_STORAGE_DIR: path.resolve(BACKEND_ROOT, '../../data/backend/files'),
       RAG_TIMEOUT_MS: 30000,
       RAG_CAPTION_TIMEOUT_MS: 120000,
+      RAG_WAIT_TIMEOUT_MS: 600000,
       CHUNKING_MODE: 'semantic',
       RECONCILE_INTERVAL_MS: 60000,
       RAG_RETRY_INTERVAL_MS: 60000,
@@ -135,7 +139,7 @@ describe('REQ-BE-8.1.1', () => {
     };
 
     it.each(OPTIONAL_KEYS)('선택 키 %s가 빈 문자열이면 기본값이 나온다', (key) => {
-      expect(OPTIONAL_KEYS).toHaveLength(12);
+      expect(OPTIONAL_KEYS).toHaveLength(13);
       expect(load({ ...REQUIRED_ENV, [key]: '' })[key]).toBe(defaultsByKey[key]);
     });
 
@@ -171,6 +175,7 @@ describe('REQ-BE-8.1.1', () => {
       ['PORT', ' 3000'],
       ['RAG_TIMEOUT_MS', '0'],
       ['RAG_TIMEOUT_MS', '1e3'],
+      ['RAG_WAIT_TIMEOUT_MS', '0'],
       ['UPLOAD_MAX_FILES', '0'],
       ['LOG_RETENTION_DAYS', 'ninety'],
       ['CHUNKING_MODE', 'fixed-SENTINEL'],
@@ -194,6 +199,7 @@ describe('REQ-BE-8.1.1', () => {
       ['PORT', '1'],
       ['PORT', '65535'],
       ['RAG_TIMEOUT_MS', '1'],
+      ['RAG_WAIT_TIMEOUT_MS', '1'],
       ['RAG_SERVER_URL', 'https://rag.example.com/base'],
       ['RAG_SERVER_URL', 'http://localhost:8000'],
     ];

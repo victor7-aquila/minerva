@@ -14,6 +14,7 @@ import type {
   JobResultInfo,
 } from '../interfaces/indexing.events';
 import type {
+  IndexRejectionCode,
   IndexRequestInput,
   IndexRequestOutcome,
   RagEventNotification,
@@ -39,6 +40,15 @@ function unreachableFailure(): JobFailureInfo {
     headingPath: null,
     placeholderId: null,
   };
+}
+
+/** RAG Server가 색인 요청을 거부했으면 그 코드를, 아니면 null을 돌려준다 (REQ-BE-1.9.4). */
+function rejectionCodeOf(error: RagUnavailableError | RagRequestError): IndexRejectionCode | null {
+  if (!(error instanceof RagRequestError)) return null;
+  // ★ 상태와 코드가 함께 맞을 때만 거부로 본다. 그 밖은 연결 실패와 같이 unreachable이다
+  if (error.status === 413 && error.code === 'PAYLOAD_TOO_LARGE') return 'PAYLOAD_TOO_LARGE';
+  if (error.status === 400 && error.code === 'INVALID_REQUEST') return 'INVALID_REQUEST';
+  return null;
 }
 
 /** RAG Server 호출 실패(rag가 변환한 오류)인지 본다. */
@@ -122,7 +132,8 @@ export class IndexingService implements OnModuleInit {
     } catch (error) {
       if (!isRagFailure(error)) throw error;
       this.logRequestFailed('requestIndex', input.docId, error.code);
-      return { kind: 'unreachable' };
+      const rejected = rejectionCodeOf(error);
+      return rejected === null ? { kind: 'unreachable' } : { kind: 'rejected', code: rejected };
     }
     // ★ 계약 밖 값이 올 수 있다 (rag-wire는 검사하지 않는다)
     const outcome: string = accepted.outcome;
@@ -210,17 +221,19 @@ export class IndexingService implements OnModuleInit {
     return stages;
   }
 
-  /** RAG Server에 이름·판 정보 변경을 요청한다. 실패하면 예외 없이 거짓이다. */
+  /** RAG Server에 이름·판 정보 변경을 요청한다. 실패하거나 signal로 끊기면 예외 없이 거짓이다. */
   async updateMetadata(
     docId: string,
     name: string,
     edition: IndexRequestInput['edition'],
+    signal?: AbortSignal,
   ): Promise<boolean> {
     try {
       await this.rag.updateMetadata(
         docId,
         name,
         edition === null ? null : { label: edition.label, editionDate: edition.editionDate },
+        signal,
       );
       return true;
     } catch (error) {
@@ -230,10 +243,10 @@ export class IndexingService implements OnModuleInit {
     }
   }
 
-  /** RAG Server에 문서의 청크 삭제를 요청한다. 실패하면 예외 없이 거짓이다. */
-  async deleteChunks(docId: string): Promise<boolean> {
+  /** RAG Server에 문서의 청크 삭제를 요청한다. 실패하거나 signal로 끊기면 예외 없이 거짓이다. */
+  async deleteChunks(docId: string, signal?: AbortSignal): Promise<boolean> {
     try {
-      await this.rag.deleteDocument(docId);
+      await this.rag.deleteDocument(docId, signal);
       return true;
     } catch (error) {
       if (!isRagFailure(error)) throw error;

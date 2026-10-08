@@ -1456,7 +1456,12 @@ describe('REQ-BE-1.5.2', () => {
     expect(docOf(h.db, DOC_A).pendingRag.metadata).toBe(true);
     await h.drain();
     expect(h.indexing.updateMetadata).toHaveBeenCalledTimes(1);
-    expect(h.indexing.updateMetadata).toHaveBeenCalledWith(DOC_A, '새 이름', null);
+    expect(h.indexing.updateMetadata).toHaveBeenCalledWith(
+      DOC_A,
+      '새 이름',
+      null,
+      expect.any(AbortSignal),
+    );
     expect(docOf(h.db, DOC_A).pendingRag.metadata).toBe(false);
   });
 

@@ -55,6 +55,8 @@ interface RagCall<T> {
   /** multipart 본문 */
   form?: FormData;
   timeoutMs: number;
+  /** 시간 제한 전이라도 중단되면 요청을 끊는다 */
+  signal?: AbortSignal;
   /** 성공 본문(최상위 객체)을 결과로 바꾼다. 없으면 본문을 해석하지 않고 undefined를 돌려준다 */
   parse?: (body: Record<string, unknown>) => T;
 }
@@ -76,6 +78,12 @@ function errorCodeOf(text: string): string | undefined {
   }
 }
 
+/** 요청이 끝내 실패한 까닭의 로그 코드다. 부른 쪽이 끊은 것과 시간 초과를 가른다. */
+function abortCodeOf(timeout: AbortSignal, caller: AbortSignal | undefined): string {
+  if (caller?.aborted) return 'ABORTED';
+  return timeout.aborted ? 'TIMEOUT' : 'CONNECTION_FAILED';
+}
+
 /** RAG Server API 클라이언트다. */
 @Injectable()
 export class RagClient {
@@ -83,6 +91,7 @@ export class RagClient {
   private readonly token: string;
   private readonly timeoutMs: number;
   private readonly captionTimeoutMs: number;
+  private readonly waitTimeoutMs: number;
 
   constructor(
     @Inject(ConfigService) config: ConfigService<AppConfig, true>,
@@ -94,6 +103,7 @@ export class RagClient {
     this.token = config.get('RAG_SERVER_API_TOKEN', { infer: true });
     this.timeoutMs = config.get('RAG_TIMEOUT_MS', { infer: true });
     this.captionTimeoutMs = config.get('RAG_CAPTION_TIMEOUT_MS', { infer: true });
+    this.waitTimeoutMs = config.get('RAG_WAIT_TIMEOUT_MS', { infer: true });
   }
 
   /** 표 마크다운을 한 문장으로 요약한다. */
@@ -145,13 +155,14 @@ export class RagClient {
     });
   }
 
-  /** 문서를 RAG Server에서 지운다. */
-  deleteDocument(docId: string): Promise<void> {
+  /** 문서를 RAG Server에서 지운다. ★ 색인 중인 작업을 기다리므로 긴 시간 제한을 쓴다. */
+  deleteDocument(docId: string, signal?: AbortSignal): Promise<void> {
     return this.call<void>({
       operation: 'deleteDocument',
       method: 'DELETE',
       path: `/v1/documents/${encodeURIComponent(docId)}`,
-      timeoutMs: this.timeoutMs,
+      timeoutMs: this.waitTimeoutMs,
+      signal,
     });
   }
 
@@ -187,14 +198,20 @@ export class RagClient {
     return states;
   }
 
-  /** 문서의 이름·판 정보를 고친다. */
-  updateMetadata(docId: string, name: string, edition: RagEdition | null): Promise<void> {
+  /** 문서의 이름·판 정보를 고친다. ★ 색인 중인 작업을 기다리므로 긴 시간 제한을 쓴다. */
+  updateMetadata(
+    docId: string,
+    name: string,
+    edition: RagEdition | null,
+    signal?: AbortSignal,
+  ): Promise<void> {
     return this.call<void>({
       operation: 'updateMetadata',
       method: 'PUT',
       path: `/v1/documents/${encodeURIComponent(docId)}/metadata`,
       json: { name, edition: edition === null ? null : toEditionBody(edition) },
-      timeoutMs: this.timeoutMs,
+      timeoutMs: this.waitTimeoutMs,
+      signal,
     });
   }
 
@@ -248,7 +265,8 @@ export class RagClient {
       body = JSON.stringify(spec.json);
     }
 
-    const signal = AbortSignal.timeout(spec.timeoutMs);
+    const timeout = AbortSignal.timeout(spec.timeoutMs);
+    const signal = spec.signal ? AbortSignal.any([timeout, spec.signal]) : timeout;
     const startedAt = performance.now();
 
     // ★ try 범위는 fetch와 본문 읽기뿐이다. 오류 종류는 가르지 않는다 (Jest 교차 realm)
@@ -265,12 +283,7 @@ export class RagClient {
       status = res.status;
       text = await res.text();
     } catch {
-      this.fail(
-        spec.operation,
-        status,
-        signal.aborted ? 'TIMEOUT' : 'CONNECTION_FAILED',
-        startedAt,
-      );
+      this.fail(spec.operation, status, abortCodeOf(timeout, spec.signal), startedAt);
       // ★ 원래 오류를 cause로 붙이지 않는다 (호스트·포트 노출)
       throw new RagUnavailableError();
     }

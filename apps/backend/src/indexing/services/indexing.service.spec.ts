@@ -48,9 +48,9 @@ const fakeRag = {
   getIndexStates: jest.fn<Promise<RagIndexState[]>, [docIds: readonly string[]]>(),
   updateMetadata: jest.fn<
     Promise<void>,
-    [docId: string, name: string, edition: RagEdition | null]
+    [docId: string, name: string, edition: RagEdition | null, signal?: AbortSignal]
   >(),
-  deleteDocument: jest.fn<Promise<void>, [docId: string]>(),
+  deleteDocument: jest.fn<Promise<void>, [docId: string, signal?: AbortSignal]>(),
 };
 
 let db: FakeDb;
@@ -263,10 +263,35 @@ describe('REQ-BE-3.1.1', () => {
     expect(lines[0].level).toBe(40);
   });
 
-  it('T-REQ-4 RAG Server가 오류로 응답해도 unreachable이고 코드를 남긴다', async () => {
-    fakeRag.submitIndexJob.mockRejectedValue(new RagRequestError(400, 'INVALID_REQUEST'));
-    await expect(service.requestIndex(input())).resolves.toEqual({ kind: 'unreachable' });
-    expect(logsOf('indexing.request_failed')[0].code).toBe('INVALID_REQUEST');
+  it('T-REQ-4 거부가 아닌 오류 응답은 unreachable이고 코드를 남긴다', async () => {
+    const causes: Array<[RagRequestError, string]> = [
+      [new RagRequestError(500, 'INTERNAL_ERROR'), 'INTERNAL_ERROR'],
+      [new RagRequestError(401, 'UNAUTHORIZED'), 'UNAUTHORIZED'],
+      // 상태와 코드가 함께 맞지 않으면 거부로 보지 않는다
+      [new RagRequestError(500, 'PAYLOAD_TOO_LARGE'), 'PAYLOAD_TOO_LARGE'],
+      [new RagRequestError(400, 'UNKNOWN'), 'UNKNOWN'],
+    ];
+    for (const [error, code] of causes) {
+      capture.clear();
+      fakeRag.submitIndexJob.mockRejectedValue(error);
+      await expect(service.requestIndex(input())).resolves.toEqual({ kind: 'unreachable' });
+      expect(logsOf('indexing.request_failed')[0].code).toBe(code);
+    }
+  });
+
+  it('T-REQ-4b RAG Server가 색인 요청을 거부하면 그 코드로 rejected다', async () => {
+    const causes: Array<[RagRequestError, string]> = [
+      [new RagRequestError(413, 'PAYLOAD_TOO_LARGE'), 'PAYLOAD_TOO_LARGE'],
+      [new RagRequestError(400, 'INVALID_REQUEST'), 'INVALID_REQUEST'],
+    ];
+    for (const [error, code] of causes) {
+      capture.clear();
+      fakeRag.submitIndexJob.mockRejectedValue(error);
+      await expect(service.requestIndex(input())).resolves.toEqual({ kind: 'rejected', code });
+      const failed = logsOf('indexing.request_failed');
+      expect(failed).toHaveLength(1);
+      expect(payloadOf(failed[0])).toEqual({ operation: 'requestIndex', docId: 'doc-1', code });
+    }
   });
 
   it('T-REQ-5 계약 밖 outcome이면 INVALID_RESPONSE로 unreachable이다', async () => {
@@ -1434,14 +1459,16 @@ describe('REQ-BE-3.4.1', () => {
       service.updateMetadata('doc-1', NAME_SENT, { label: LABEL_SENT, editionDate: DATE_SENT }),
     ).resolves.toBe(true);
     expect(fakeRag.updateMetadata).toHaveBeenCalledTimes(1);
-    expect(fakeRag.updateMetadata).toHaveBeenCalledWith('doc-1', NAME_SENT, {
-      label: LABEL_SENT,
-      editionDate: DATE_SENT,
-    });
+    expect(fakeRag.updateMetadata).toHaveBeenCalledWith(
+      'doc-1',
+      NAME_SENT,
+      { label: LABEL_SENT, editionDate: DATE_SENT },
+      undefined,
+    );
 
     fakeRag.updateMetadata.mockClear();
     await expect(service.updateMetadata('doc-1', NAME_SENT, null)).resolves.toBe(true);
-    expect(fakeRag.updateMetadata).toHaveBeenCalledWith('doc-1', NAME_SENT, null);
+    expect(fakeRag.updateMetadata).toHaveBeenCalledWith('doc-1', NAME_SENT, null, undefined);
   });
 });
 
@@ -1459,6 +1486,30 @@ describe('REQ-BE-3.4.2', () => {
       expect(failed).toHaveLength(1);
       expect(payloadOf(failed[0])).toEqual({ operation: 'updateMetadata', docId: 'doc-1', code });
     }
+  });
+
+  it('T-META-5 받은 signal을 rag에 그대로 넘기고, 끊기면 예외 없이 거짓이다', async () => {
+    const controller = new AbortController();
+    fakeRag.updateMetadata.mockResolvedValue(undefined);
+    fakeRag.deleteDocument.mockResolvedValue(undefined);
+    await service.updateMetadata('doc-1', NAME_SENT, null, controller.signal);
+    await service.deleteChunks('doc-1', controller.signal);
+    expect(fakeRag.updateMetadata).toHaveBeenCalledWith(
+      'doc-1',
+      NAME_SENT,
+      null,
+      controller.signal,
+    );
+    expect(fakeRag.deleteDocument).toHaveBeenCalledWith('doc-1', controller.signal);
+
+    // rag는 끊긴 요청을 RagUnavailableError로 낸다
+    fakeRag.updateMetadata.mockRejectedValue(new RagUnavailableError());
+    fakeRag.deleteDocument.mockRejectedValue(new RagUnavailableError());
+    controller.abort();
+    await expect(service.updateMetadata('doc-1', NAME_SENT, null, controller.signal)).resolves.toBe(
+      false,
+    );
+    await expect(service.deleteChunks('doc-1', controller.signal)).resolves.toBe(false);
   });
 
   it('T-META-3 예상 밖 예외는 그대로 던진다', async () => {
@@ -1485,7 +1536,7 @@ describe('REQ-BE-1.8.4', () => {
     fakeRag.deleteDocument.mockResolvedValue(undefined);
     await expect(service.deleteChunks('doc-1')).resolves.toBe(true);
     expect(fakeRag.deleteDocument).toHaveBeenCalledTimes(1);
-    expect(fakeRag.deleteDocument).toHaveBeenCalledWith('doc-1');
+    expect(fakeRag.deleteDocument).toHaveBeenCalledWith('doc-1', undefined);
 
     fakeRag.deleteDocument.mockRejectedValue(new RagUnavailableError());
     await expect(service.deleteChunks('doc-1')).resolves.toBe(false);
