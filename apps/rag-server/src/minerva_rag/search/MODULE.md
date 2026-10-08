@@ -39,6 +39,7 @@
 ```text
 src/minerva_rag/search/
 ├── MODULE.md
+├── searcher.py             # 검색 (REQ-RAG-4). Searcher
 └── glossary.py             # 용어집 헬퍼 (REQ-RAG-5). 검색(REQ-RAG-4) 코드와 한 파일에 두지 않는다 (ARCHITECT.md 「폴더 구조와 배치 규칙」)
 
 config/glossary.yaml        # 관리자가 고치는 용어집 (위치는 RAG_GLOSSARY_PATH)

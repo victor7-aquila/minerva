@@ -103,7 +103,7 @@ flowchart LR
 | indexing | import | `Indexer`, `decide_index`, `IndexInput` | indexing `MODULE.md` | `REQ-RAG-10.3`, `REQ-RAG-10.5`, `REQ-RAG-10.6`, `REQ-RAG-7.5.3` |
 | search | import | `Searcher.search`, `Searcher.document_chunks`, `Searcher.load_glossary` | search `MODULE.md` | `REQ-RAG-10.4`, `REQ-RAG-10.1.1` |
 | evaluation | import | `Evaluator.evaluate` | evaluation `MODULE.md` | `REQ-RAG-10.7` |
-| resource | import (조립·기동·종료·상태 확인, 요약·캡션 생성만) | `ModelHub.prepare`·`close`·`ollama_available`·`generate`, `LlmRole`, `ChunkStore.connect`·`close`·`ping` | resource `MODULE.md` | `REQ-RAG-10.1`, `REQ-RAG-1.1.1`, `REQ-RAG-1.2.1` |
+| resource | import (조립·기동·종료·상태 확인, 요약·캡션 생성만) | `ModelHub.prepare`·`close`·`ollama_available`·`embedding_dimension`·`generate`, `LlmRole`, `ChunkStore.connect`·`close`·`ping` | resource `MODULE.md` | `REQ-RAG-10.1`, `REQ-RAG-1.1.1`, `REQ-RAG-1.2.1` |
 | Backend | HTTP `POST` | 작업 상태 알림 | 루트 `IF-2` | `REQ-RAG-7.7` |
 | SQLite 파일 | 파일 | 「데이터 계약」 | 이 문서 | `REQ-RAG-7.5.1` |
 | core | import | `Settings`, `get_settings`, `get_logger`, 오류 클래스, `JobFailureCode`, `FailureLocation`, `find_placeholders`, `Edition` | core `MODULE.md` | `REQ-RAG-10`, `REQ-RAG-7`, `REQ-RAG-1` |
@@ -687,7 +687,7 @@ stateDiagram-v2
     RUNNING --> FAILED: JobFailure, 다른 예외, 재시작 때 recover 거짓
 ```
 
-1. **기동** — 수명주기 서비스가 Qdrant 연결과 모델 준비를 마친 뒤 `start(recover)`를 부르고, 그다음 요청을 받는다. 작업 큐는 남은 작업을 `recover`로 확인해 완료나 실패로 끝맺은 뒤에 새 작업을 실행한다. (`REQ-RAG-10.1.1`, `REQ-RAG-7.5`)
+1. **기동** — 수명주기 서비스가 `REQ-RAG-10.1.1`의 순서대로 용어집 읽기, 모델 준비, Qdrant 연결을 마친 뒤 `start(recover)`를 부르고, 그다음 요청을 받는다. 작업 큐는 남은 작업을 `recover`로 확인해 완료나 실패로 끝맺은 뒤에 새 작업을 실행한다. (`REQ-RAG-10.1.1`, `REQ-RAG-7.5`)
 2. **접수** — 색인 서비스가 `find_open`과 체크섬 확인을 거쳐 `submit`한다. 작업 큐는 같은 문서의 `QUEUED` 작업을 `SUPERSEDED`로 바꾼 뒤 새 작업을 `QUEUED`로 기록한다. 두 변경을 한 트랜잭션에서 하고, 각각 알린다. (`REQ-RAG-3.5`, `REQ-RAG-10.3.1`, `REQ-RAG-7.1`, `REQ-RAG-7.3.4`)
 3. **실행** — 상한과 문서별 순차 조건을 만족하는 가장 먼저 접수된 작업을 `RUNNING`으로 바꾸고 `IndexRunner`를 부른다. (`REQ-RAG-7.3`)
 4. **종료** — `IndexOutcome`이면 `SUCCEEDED`로 기록하고 그 문서의 `searchable_job_id`를 이 작업으로 바꾼다. 예외면 `FAILED`로 기록하며 `searchable_job_id`는 그대로 둔다. (`REQ-RAG-7.2`, `REQ-RAG-7.6.1`)
