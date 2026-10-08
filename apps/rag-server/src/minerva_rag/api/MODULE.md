@@ -84,7 +84,7 @@ def create_app(services: Services | None = None) -> FastAPI:
 
 **`REQ-RAG-9.1.2`** 형식이 잘못된 요청 거부
 
-- 처리 계약: 요청 검증 오류(필수 필드 없음, 타입 불일치, `top_n` 1 미만, `doc_ids` 1~100개 밖, `edition_scope`가 `specific`인데 `edition` 없음 등 `API.md`의 제약 위반)와 service의 `InvalidRequestError`를 `400 INVALID_REQUEST`로 바꾼다. 검증에 실패하면 service를 부르지 않는다
+- 처리 계약: 요청 검증 오류(필수 필드 없음, 타입 불일치, `top_n` 1 미만, `POST /v1/documents/index-states`의 `doc_ids` 1~100개 밖, `edition_scope`가 `specific`인데 `edition` 없음 등 `API.md`의 제약 위반)와 service의 `InvalidRequestError`를 `400 INVALID_REQUEST`로 바꾼다. 검증에 실패하면 service를 부르지 않는다
 - 충족 기준: 필수 필드가 빠진 요청이 `400`과 `{"error": {"code": "INVALID_REQUEST", ...}}`로 거부되고 service 호출이 없다
 
 **`REQ-RAG-9.1.3`** 크기 한도를 넘는 요청 거부

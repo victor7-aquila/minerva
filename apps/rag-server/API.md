@@ -49,7 +49,7 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 | 위치 | 이름 | 타입 | 필수 | 제약 |
 | :--- | :--- | :--- | :--- | :--- |
-| body | `table_markdown` | `string` | 필수 | 표 하나의 Markdown |
+| body | `table_markdown` | `string` | 필수 | 표 하나의 Markdown. 인용문·목록 안의 표는 블록 접두를 뗀 모양이다. 칸 안에 이미지 Markdown(`![대체 텍스트](경로)`)이 있을 수 있다 — 표 안 이미지는 표의 일부라 따로 캡션을 요청하지 않는다 |
 
 **응답**
 
@@ -70,7 +70,7 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 | 위치 | 이름 | 타입 | 필수 | 제약 |
 | :--- | :--- | :--- | :--- | :--- |
-| body | `image` | 파일 | 필수 | 이미지 파일 하나. 설정한 한도(기본 20MB) 이하 (`REQ-RAG-9.1.3`) |
+| body | `image` | 파일 | 필수 | 이미지 파일 하나. 설정한 한도(기본 20MB) 이하 (`REQ-RAG-9.1.3`). 파트의 `Content-Type`과 파일 이름은 형식 판단에 쓰지 않는다 — Backend는 PNG·JPEG·GIF·SVG·WebP를 형식 표시 없이 보낸다 |
 
 **응답**
 
@@ -80,7 +80,7 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
-| `502` | `CAPTION_FAILED` | 캡션을 만들지 못했다 (`REQ-RAG-1.2.3`) |
+| `502` | `CAPTION_FAILED` | 캡션을 만들지 못했다. 모델이 읽지 못하는 형식의 이미지도 같다 (`REQ-RAG-1.2.3`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
 
 ### `POST /v1/index-jobs`
@@ -127,10 +127,10 @@ POST /v1/index-jobs
 Content-Type: application/json
 
 {
-  "doc_id": "doc-001",
+  "doc_id": "3f2b8c1e-5d4a-4e7b-9c6f-0a1b2c3d4e5f",
   "version": "3",
-  "markdown": "# 설치\n\n[[minerva:table:t01 | 환경 변수 표]]",
-  "assets": [{"placeholder_id": "t01", "text": "환경 변수별 타입과 기본값을 정리한 표"}],
+  "markdown": "# 설치\n\n[[minerva:table:t1 | 환경 변수 표]]",
+  "assets": [{"placeholder_id": "t1", "text": "환경 변수별 타입과 기본값을 정리한 표"}],
   "name": "IEEE 1609.2.1",
   "edition": {"label": "2025", "edition_date": "2025-01-31"},
   "chunking": "semantic",
@@ -142,7 +142,7 @@ Content-Type: application/json
 {
   "outcome": "queued",
   "job_id": "job-7f3a",
-  "doc_id": "doc-001",
+  "doc_id": "3f2b8c1e-5d4a-4e7b-9c6f-0a1b2c3d4e5f",
   "version": "3"
 }
 ```
@@ -184,7 +184,7 @@ Content-Type: application/json
 **동작**
 
 - 아직 시작하지 않은 이 문서의 작업은 `failed`(사유: 문서 삭제)가 된다 (`REQ-RAG-10.5.1`)
-- 이 문서에 색인 중인 작업이 있으면 그 작업이 끝난 뒤 지우고 응답한다 (`REQ-RAG-10.5.2`)
+- 이 문서에 색인 중인 작업이 있으면 그 작업이 끝난 뒤 지우고 응답한다. 그래서 응답이 늦어질 수 있고, Backend는 응답을 기다리지 못하면 실패로 보고 같은 요청을 다시 보낸다. 같은 요청을 여러 번 받아도 결과가 같다 (`REQ-RAG-10.5.2`, `REQ-RAG-3.4.3`)
 - Backend는 삭제한 문서와, 같은 판의 다른 문서로 교체된 문서를 이 요청으로 지운다 (`REQ-RAG-3.6.6`)
 
 ### `GET /v1/documents/{doc_id}/index-state`
@@ -233,7 +233,7 @@ Content-Type: application/json
 
 **동작**
 
-- 이 문서에 색인 중인 작업이 있으면 그 작업이 끝난 뒤 바꾸고 응답한다 (`REQ-RAG-10.6.1`)
+- 이 문서에 색인 중인 작업이 있으면 그 작업이 끝난 뒤 바꾸고 응답한다. 그래서 응답이 늦어질 수 있고, Backend는 응답을 기다리지 못하면 실패로 보고 같은 요청을 다시 보낸다. 같은 요청을 여러 번 받아도 결과가 같다 (`REQ-RAG-10.6.1`, `REQ-RAG-3.6.7`)
 - 바꾼 이름·판 정보와 같은 다른 문서의 청크는 지우지 않는다 (`REQ-RAG-3.6.6`)
 - 이 문서와 관련된 이름의 최신판 표시가 다시 맞춰진다 (`REQ-RAG-3.6.3`)
 
@@ -261,7 +261,7 @@ Content-Type: application/json
 | :--- | :--- | :--- | :--- | :--- |
 | body | `query` | `string` | 필수 | |
 | body | `top_n` | `integer` | 선택 | 1 이상. 빠지면 설정한 기본 개수 (`REQ-RAG-4.3.2`) |
-| body | `doc_ids` | `string[]` | 선택 | 주면 이 문서들 안에서만 검색한다 (`REQ-RAG-4.1.3`) |
+| body | `doc_ids` | `string[]` | 선택 | 주면 이 문서들 안에서만 검색한다. 개수 상한은 없다 — Backend는 이름으로 찾은 문서 ID를 모두 담는다 (`REQ-RAG-4.1.3`) |
 | body | `edition_scope` | `string` | 선택 | `all`(전체), `latest`(이름마다 최신판만), `specific`(`edition`의 판만). 기본값 `all`. `latest`·`all`에서는 판 정보가 없는 문서도 나오고, `specific`에서는 나오지 않는다 (`REQ-RAG-4.5.3`, `REQ-RAG-4.5.4`, `REQ-RAG-4.5.6`) |
 | body | `edition` | `EditionRef` | 조건부 | `edition_scope`가 `specific`이면 필수, 아니면 쓰지 않는다 |
 | body | `expand_neighbors` | `boolean` | 선택 | `true`면 결과마다 앞뒤 청크를 함께 넣는다. 기본값 `false` (`REQ-RAG-4.4.4`) |
@@ -299,7 +299,7 @@ Content-Type: application/json
     {
       "rank": 1,
       "score": 0.87,
-      "doc_id": "doc-001",
+      "doc_id": "3f2b8c1e-5d4a-4e7b-9c6f-0a1b2c3d4e5f",
       "version": "3",
       "heading_path": ["인증서", "갱신"],
       "name": "IEEE 1609.2.1",
