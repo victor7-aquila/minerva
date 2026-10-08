@@ -70,6 +70,10 @@ export class DocumentLifecycle {
    * ★ 기동 처리와 요청 처리가 같은 버전을 두 번 돌리지 않게 한다
    */
   private readonly active = new Set<string>();
+  /** 기동 처리의 색인 확인(requestIndexIfIdle)이 잡고 있는 키다. */
+  private readonly idleChecking = new Set<string>();
+  /** 기동 처리의 색인 확인 중에 들어와 미뤄 둔 처리 시작 요청이다. 키는 active와 같다. */
+  private readonly pendingStart = new Map<string, { startAt: 'hints' | 'index'; force: boolean }>();
 
   constructor(
     @Inject(DocumentsCrudService) private readonly repo: DocumentsCrudService,
@@ -217,7 +221,11 @@ export class DocumentLifecycle {
     // ★ 종료 중이면 tasks.run이 작업을 받지 않아 키가 풀리지 않는다 — 키를 잡지 않고 끝낸다
     if (this.tasks.stopping) return;
     const key = activeKey(docId, version);
-    if (this.active.has(key)) return;
+    if (this.active.has(key)) {
+      // ★ 기동 처리의 색인 확인이 키를 잡고 있으면 버리지 않고 미뤄 둔다 — 버리면 captioning에 갇힌다
+      if (this.idleChecking.has(key)) this.pendingStart.set(key, opts);
+      return;
+    }
     // ★ 호출 즉시(동기로) 잡는다 — setImmediate로 작업이 시작되기 전의 틈도 막는다
     this.active.add(key);
     this.tasks.run(opts.startAt === 'hints' ? 'process' : 'index', docId, async () => {
@@ -234,6 +242,8 @@ export class DocumentLifecycle {
     const key = activeKey(docId, version);
     if (this.active.has(key)) return false;
     this.active.add(key);
+    this.idleChecking.add(key);
+    let requested = false;
     try {
       const doc = await this.repo.findDocument(docId);
       const ver = await this.repo.findVersion(docId, version);
@@ -247,10 +257,18 @@ export class DocumentLifecycle {
       ) {
         return false;
       }
-      await this.requestIndexFor(docId, version, force);
-      return true;
+      // ★ queued에서만 바꾼다 — 그사이 재색인이 captioning으로 바꿨으면 임시 설명을 다시 만들어야 한다
+      requested = await this.requestIndexFor(docId, version, force, ['queued']);
+      return requested;
     } finally {
       this.active.delete(key);
+      this.idleChecking.delete(key);
+      const pending = this.pendingStart.get(key);
+      this.pendingStart.delete(key);
+      // ★ 미뤄 둔 시작을 잇는다. 색인을 이미 요청했으면 색인부터의 시작은 중복이라 버린다
+      if (pending && (pending.startAt === 'hints' || !requested)) {
+        this.startProcessing(docId, version, pending);
+      }
     }
   }
 
@@ -281,16 +299,21 @@ export class DocumentLifecycle {
     await this.requestIndexFor(docId, version, opts.force);
   }
 
-  /** 색인 대기로 바꾸고 색인을 요청해 결과를 반영한다. */
-  async requestIndexFor(docId: string, version: string, force: boolean): Promise<void> {
+  /** 색인 대기로 바꾸고 색인을 요청해 결과를 반영한다. 색인을 요청했으면 참이다. */
+  async requestIndexFor(
+    docId: string,
+    version: string,
+    force: boolean,
+    from: readonly ProcessingState[] = ['captioning', 'queued'],
+  ): Promise<boolean> {
     if (this.tasks.stopping) {
       await this.logStopped(docId, version);
-      return;
+      return false;
     }
     // ★ 색인 요청보다 먼저 queued를 쓴다 — 기동 처리가 작업 ID 없는 색인 대기를 찾는다
-    if (!(await this.transition(docId, version, ['captioning', 'queued'], 'queued'))) {
+    if (!(await this.transition(docId, version, from, 'queued'))) {
       await this.logStopped(docId, version);
-      return;
+      return false;
     }
     const doc = await this.repo.findDocument(docId);
     const ver = await this.repo.findVersion(docId, version);
@@ -342,7 +365,7 @@ export class DocumentLifecycle {
       }
     } else {
       await this.transition(docId, version, ['queued'], 'failed', RAG_UNREACHABLE_FAILURE);
-      return;
+      return true;
     }
 
     // ★ 색인 요청 도중 삭제·교체됐으면 청크 삭제를 다시 요청한다 (D22)
@@ -351,6 +374,7 @@ export class DocumentLifecycle {
       await this.repo.updateDocument({ docId }, { 'pendingRag.deleteChunks': true });
       this.scheduleChunkDeletion(docId);
     }
+    return true;
   }
 
   /** IF-BE-1 색인 작업 상태 이벤트를 반영한다. */

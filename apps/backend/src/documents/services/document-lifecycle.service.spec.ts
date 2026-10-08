@@ -1551,4 +1551,79 @@ describe('REQ-BE-1.9.10', () => {
     expect(await h.lifecycle.requestIndexIfIdle(DOC_B, '1', false)).toBe(false);
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });
+
+  /** 재색인이 v2를 선점해 queued로 쓴 상태를 시드한다(v2는 작업 ID가 없다). */
+  async function seedReindexClaim(): Promise<void> {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, processingState: 'queued', latestVersion: '2' })],
+      [
+        versionRecord({ docId: DOC_A, version: '1', jobId: 'job-1' }),
+        versionRecord({ docId: DOC_A, version: '2', jobId: null }),
+      ],
+    );
+  }
+
+  /** 다음 한 번의 조회를 gate가 풀릴 때까지 멈춘다. 조회에 닿으면 reached가 풀린다. */
+  function holdNext(method: 'findDocument' | 'findVersion') {
+    const reached = deferred<void>();
+    const gate = deferred<void>();
+    release = () => gate.resolve();
+    const original = h.repo[method].bind(h.repo) as (...args: unknown[]) => Promise<unknown>;
+    jest.spyOn(h.repo, method).mockImplementationOnce((async (...args: unknown[]) => {
+      reached.resolve();
+      await gate.promise;
+      return original(...args);
+    }) as never);
+    return { reached: reached.promise, open: () => gate.resolve() };
+  }
+
+  it('T-PR3-IDLE-1 확인이 문서를 읽기 전에 재색인이 captioning으로 바꾸면 미뤄 둔 표·이미지 처리를 잇는다', async () => {
+    await seedReindexClaim();
+    const hold = holdNext('findDocument');
+    const checking = h.lifecycle.requestIndexIfIdle(DOC_A, '2', true);
+    await hold.reached;
+    // ★ 재색인이 임시 설명을 찾아 captioning으로 바꾸고 처리를 시작한다
+    await patchDoc(DOC_A, { processingState: 'captioning' });
+    h.lifecycle.startProcessing(DOC_A, '2', { startAt: 'hints', force: true });
+    hold.open();
+    expect(await checking).toBe(false);
+    await h.drain();
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+    expect(h.indexing.requestIndex.mock.calls[0][0]).toMatchObject({ version: '2', force: true });
+    expect(docOf(h.db, DOC_A)?.processingState).toBe('queued');
+    expect(versionOf(h.db, DOC_A, '2')?.jobId).toBe('job-new');
+  });
+
+  it('T-PR3-IDLE-2 확인이 문서를 읽은 뒤 재색인이 captioning으로 바꾸면 확인은 색인하지 않고 표·이미지 처리부터 잇는다', async () => {
+    await seedReindexClaim();
+    const hold = holdNext('findVersion');
+    const checking = h.lifecycle.requestIndexIfIdle(DOC_A, '2', true);
+    await hold.reached;
+    await patchDoc(DOC_A, { processingState: 'captioning' });
+    h.lifecycle.startProcessing(DOC_A, '2', { startAt: 'hints', force: true });
+    hold.open();
+    expect(await checking).toBe(false);
+    await h.drain();
+    // ★ 색인 요청은 표·이미지 처리를 마친 뒤 한 번만 나간다
+    expect(h.assets.generateHints).toHaveBeenCalledTimes(1);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+    expect(h.assets.generateHints.mock.invocationCallOrder[0]).toBeLessThan(
+      h.indexing.requestIndex.mock.invocationCallOrder[0],
+    );
+    expect(docOf(h.db, DOC_A)?.processingState).toBe('queued');
+  });
+
+  it('T-PR3-IDLE-3 확인이 색인을 요청했으면 그사이 들어온 색인부터의 시작은 버린다', async () => {
+    await seedReindexClaim();
+    const hold = holdNext('findVersion');
+    const checking = h.lifecycle.requestIndexIfIdle(DOC_A, '2', true);
+    await hold.reached;
+    h.lifecycle.startProcessing(DOC_A, '2', { startAt: 'index', force: true });
+    hold.open();
+    expect(await checking).toBe(true);
+    await h.drain();
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
+  });
 });
