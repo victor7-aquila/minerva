@@ -566,7 +566,8 @@ describe('REQ-BE-5.2.3', () => {
     }
     expect(unhandled).toEqual([]);
     expect(records()[0].outcome).toBe('evaluating');
-    // ★ 원래 오류와 보조 갱신 실패가 각각 남는다 — 보조 갱신 실패(fail_records)가 먼저, 원래 오류(evaluate)가 다음이다
+    // ★ 원래 오류와 보조 갱신 실패가 각각 남는다 — 보조 갱신 실패(fail_records)가 먼저, 원래 오류(evaluate)가 다음이다.
+    //   한 건 평가의 보조 갱신이라 둘 다 그 골든셋 ID다
     const failed = linesOf('evaluation.task_failed');
     expect(
       failed.map((line) => ({
@@ -575,7 +576,7 @@ describe('REQ-BE-5.2.3', () => {
         errorName: line.errorName,
       })),
     ).toEqual([
-      { task: 'fail_records', goldenSetId: null, errorName: 'Error' },
+      { task: 'fail_records', goldenSetId: view.golden_set_id, errorName: 'Error' },
       { task: 'evaluate', goldenSetId: view.golden_set_id, errorName: 'Error' },
     ]);
   });
@@ -734,7 +735,7 @@ describe('REQ-BE-5.2.4', () => {
     expect(records().filter((r) => r.outcome === 'evaluating')).toEqual([]);
   });
 
-  it('T-FU-EVR-7 지우기와 error 끝내기가 모두 실패하면 기록은 평가 중으로 남고 fail_records 작업 실패 로그가 하나 남는다', async () => {
+  it('T-FU-EVR-7 지우기와 error 끝내기가 모두 실패하면 기록은 평가 중으로 남고 fail_records 작업 실패 로그가 실패마다 하나씩 남는다', async () => {
     await failPartialInsert();
     h.db.failNext('deleteMany', new Error('delete down'));
     h.db.failNext('updateMany', new Error('update down'));
@@ -742,11 +743,33 @@ describe('REQ-BE-5.2.4', () => {
     const added = records().filter((r) => !r.recordId.startsWith('r-'));
     expect(added).toHaveLength(2);
     expect(added.map((r) => r.outcome)).toEqual(['evaluating', 'evaluating']);
+    // ★ 지우기 실패, 끝내기 실패 순서다. 여러 골든셋에 걸친 기록이라 goldenSetId는 null이다
+    const failed = linesOf('evaluation.task_failed');
+    expect(
+      failed.map((line) => ({
+        task: line.task,
+        goldenSetId: line.goldenSetId,
+        errorName: line.errorName,
+      })),
+    ).toEqual([
+      { task: 'fail_records', goldenSetId: null, errorName: 'Error' },
+      { task: 'fail_records', goldenSetId: null, errorName: 'Error' },
+    ]);
+  });
+
+  it('T-FU-EVR-9 지우기만 실패하고 error 끝내기가 성공해도 지우기 실패가 fail_records 작업 실패 로그로 남는다', async () => {
+    await failPartialInsert();
+    h.db.failNext('deleteMany', new Error('SECRET-DELETE-78'));
+    await expect(h.service.evaluateAll()).rejects.toThrow('db down');
+    const added = records().filter((r) => !r.recordId.startsWith('r-'));
+    expect(added.map((r) => r.outcome)).toEqual(['error', 'error']);
     const failed = linesOf('evaluation.task_failed');
     expect(failed).toHaveLength(1);
     expect(failed[0].task).toBe('fail_records');
     expect(failed[0].goldenSetId).toBeNull();
     expect(failed[0].errorName).toBe('Error');
+    // ★ 오류 메시지는 남기지 않는다
+    for (const line of capture.lines) expect(line).not.toContain('SECRET-DELETE-78');
   });
 
   it('T-FU-EVR-8 기록 지우기는 이번 요청의 평가 중 기록만 대상으로 한다', async () => {
@@ -1300,8 +1323,8 @@ describe('REQ-BE-8.2.1', () => {
     expect(failed[0].errorName).toBe('Error');
   });
 
-  it('T-FU-LOG-4 보조 갱신 실패 로그는 작업 이름·골든셋 ID(null)·오류 이름만 남기고 오류 메시지는 남기지 않는다', async () => {
-    await h.service.create(body());
+  it('T-FU-LOG-4 보조 갱신 실패 로그는 작업 이름·골든셋 ID·오류 이름만 남기고 오류 메시지는 남기지 않는다', async () => {
+    const view = await h.service.create(body());
     h.db.failNext('updateOne', new Error('db down 1'));
     h.db.failNext('updateMany', new Error('SECRET-UPDATE-77'));
     await h.tasks.drain();
@@ -1309,7 +1332,8 @@ describe('REQ-BE-8.2.1', () => {
     expect(failed).toHaveLength(1);
     expect(failed[0].level).toBe(40);
     expect(extraKeys(failed[0])).toEqual(['errorName', 'goldenSetId', 'task']);
-    expect(failed[0].goldenSetId).toBeNull();
+    // ★ 한 건 평가의 보조 갱신이라 그 골든셋 ID다
+    expect(failed[0].goldenSetId).toBe(view.golden_set_id);
     for (const line of capture.lines) expect(line).not.toContain('SECRET-UPDATE-77');
   });
 });
