@@ -664,8 +664,10 @@ describe('REQ-BE-2.1.1', () => {
     expect(result.assets.map((asset) => asset.placeholderId)).toEqual(['i1', 't1']);
     expect(rebuild(md, result)).toBe(md);
   });
+});
 
-  // ── 블록 건너뛰기는 <pre>만이다 — 주석·script·style·textarea는 scanHtmlTags가 그 안만 건너뛴다 ──
+describe('REQ-BE-2.1.2', () => {
+  // ── HTML 블록은 건너뛰지 않는다 — 주석·pre·script·style·textarea는 그 안만 건너뛴다 ──
 
   it('T-FU-SKIP-1 주석으로 시작하는 HTML 블록에서 주석 뒤의 <img>를 등록한다', () => {
     const md = '<!-- c --> <img src="a.png">';
@@ -695,9 +697,7 @@ describe('REQ-BE-2.1.1', () => {
     const md = lines('<preview>', '<img src="p.png">', '</preview>');
     expect(pathsOf(extractAssets(md))).toEqual(['p.png']);
   });
-});
 
-describe('REQ-BE-2.1.2', () => {
   it.each([
     ['``` 펜스', lines('```', '| a | b |', '| - | - |', '![f](f.png)', '```')],
     ['~~~ 펜스', lines('~~~', '| a | b |', '| - | - |', '![f](f.png)', '~~~')],
@@ -778,6 +778,41 @@ describe('REQ-BE-2.1.2', () => {
     const result = extractAssets(md);
     expect(result.assets).toEqual([]);
     expect(result.indexingMarkdown).toBe(md);
+  });
+
+  it('T-FU-SKIP-6 <pre>로 시작하는 HTML 블록에서 닫는 </pre> 뒤의 <img>는 등록한다', () => {
+    const md = '<pre>x</pre><img src="a.png">';
+    const result = extractAssets(md);
+    expect(pathsOf(result)).toEqual(['a.png']);
+    expect(result.indexingMarkdown).toBe('<pre>x</pre>[[minerva:image:i1 | a.png]]');
+    expect(rebuild(md, result)).toBe(md);
+  });
+
+  it('T-FU-SKIP-7 <pre> 안의 <img>는 등록하지 않고 같은 블록의 닫는 태그 뒤 표는 등록한다', () => {
+    const md = '<pre><img src="b.png"></pre><table><tr><th>H</th></tr></table>';
+    const result = extractAssets(md);
+    expect(kindsOf(result)).toEqual(['table']);
+    expect(result.assets[0].tableMarkdown).toBe('<table><tr><th>H</th></tr></table>');
+    expect(rebuild(md, result)).toBe(md);
+  });
+
+  it('T-FU-SKIP-8 닫히지 않은 <pre>는 그 HTML 블록 끝까지 등록하지 않고 다음 블록은 등록한다', () => {
+    const md = lines('<div><pre><img src="c.png">', '<img src="d.png">', '', '![e](e.png)');
+    const result = extractAssets(md);
+    expect(pathsOf(result)).toEqual(['e.png']);
+  });
+
+  it('T-FU-SKIP-9 블록 중간의 <pre> 안 표·이미지도 등록하지 않는다', () => {
+    const md = lines(
+      '<div>',
+      '<img src="a.png">',
+      '<pre><table><tr><td><img src="b.png"></td></tr></table></pre>',
+      '<img src="c.png">',
+      '</div>',
+    );
+    const result = extractAssets(md);
+    expect(kindsOf(result)).toEqual(['image', 'image']);
+    expect(pathsOf(result)).toEqual(['a.png', 'c.png']);
   });
 
   it('T-FU-CODE-4 표 밖의 코드 펜스를 사이에 둔 두 표는 각자 표이고 펜스는 색인용 MD에 그대로 남는다', () => {
@@ -991,6 +1026,46 @@ describe('REQ-BE-2.2.3', () => {
       ),
     );
     expect(result.assets[0].description).toBe('A, B');
+  });
+
+  it('T-FU-DESC-1 HTML 표 머리 칸 안 코드 블록은 펜스 줄을 빼고 코드 내용만 설명에 남긴다', () => {
+    const md = lines(
+      '<table><tr><td>',
+      '',
+      '```js',
+      'x',
+      '```',
+      '',
+      '</td><td>',
+      '',
+      '~~~',
+      'y',
+      '~~~',
+      '',
+      '</td></tr></table>',
+    );
+    const result = extractAssets(md);
+    expect(kindsOf(result)).toEqual(['table']);
+    const { description } = result.assets[0];
+    expect(description).toBe('x, y');
+    expect(description).not.toContain('`');
+    expect(description).not.toContain('~');
+    expect(result.indexingMarkdown).toBe('[[minerva:table:t1 | x, y]]');
+  });
+
+  it('T-FU-DESC-2 열린 펜스보다 짧은 펜스 모양 줄은 코드 내용으로 남는다', () => {
+    const md = lines('<table><tr><td>', '', '````', '```', 'z', '````', '', '</td></tr></table>');
+    expect(extractAssets(md).assets[0].description).toBe('``` z');
+  });
+
+  it('T-FU-DESC-3 여는 칸 태그와 같은 줄의 펜스 모양 글자는 코드 블록이 아니라 칸 글자로 남는다', () => {
+    const md = lines(
+      '<table>',
+      '<tr><th>```</th><th>B</th></tr>',
+      '<tr><td>1</td><td>2</td></tr>',
+      '</table>',
+    );
+    expect(extractAssets(md).assets[0].description).toBe('```, B');
   });
 
   // ★ 결정 D10의 fallback("정리 결과가 비면 `표`") 근거다. 머리 칸이 모두 비면 쉼표만 남지 않고 `표`가 된다
