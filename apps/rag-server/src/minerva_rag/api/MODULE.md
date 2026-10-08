@@ -56,7 +56,7 @@ tests/unit/api/
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
 | 요청 처리 | `create_app()` | 「요청 처리 — REQ-RAG-9.1」 | `REQ-RAG-9.1` |
-| 요청 처리 | `POST /v1/captions/table`, `POST /v1/captions/image` | `API.md` | `REQ-RAG-10.2`, `REQ-RAG-10.2` |
+| 요청 처리 | `POST /v1/captions/table`, `POST /v1/captions/image` | `API.md` | `REQ-RAG-10.2` |
 | 요청 처리 | `POST /v1/index-jobs`, `GET /v1/index-jobs/{job_id}` | `API.md` | `REQ-RAG-10.8`, `REQ-RAG-10.3` |
 | 요청 처리 | `DELETE /v1/documents/{doc_id}`, `PUT /v1/documents/{doc_id}/metadata` | `API.md` | `REQ-RAG-10.5`, `REQ-RAG-10.6` |
 | 요청 처리 | `GET /v1/documents/{doc_id}/index-state`, `POST /v1/documents/index-states` | `API.md` | `REQ-RAG-10.8.6` |

@@ -38,7 +38,7 @@ RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한
 
 ```text
 src/minerva_rag/resource/
-├── model_hub.py      # REQ-RAG-12 모델 연동
+├── model_hub.py      # REQ-RAG-12.1 모델 준비와 호출
 ├── chunk_store.py    # REQ-RAG-12.2 저장소
 └── MODULE.md
 
@@ -57,7 +57,7 @@ flowchart LR
     Search --> Store
     Service["service"] --> Hub
     Service --> Store
-    subgraph Boundary["resource — REQ-RAG-12, REQ-RAG-12.2"]
+    subgraph Boundary["resource — REQ-RAG-12"]
         Hub["ModelHub"]
         Store["ChunkStore"]
         Local[("임베딩·재정렬 모델")]

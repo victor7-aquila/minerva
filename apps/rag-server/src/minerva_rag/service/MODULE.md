@@ -72,7 +72,7 @@ tests/unit/service/
 ```mermaid
 flowchart LR
     API["api"] --> Services
-    subgraph Boundary["service — REQ-RAG-10, 7, 1"]
+    subgraph Boundary["service — REQ-RAG-10"]
         Services["서비스"]
         Queue["작업 큐"]
         Captioner["요약·캡션 생성"]
@@ -115,7 +115,7 @@ flowchart LR
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
 | 수명주기 서비스 | `build_services()`, `Services`, `LifecycleService`, `Health` | 「수명주기 서비스 — REQ-RAG-10.1」 | `REQ-RAG-10.1`, `REQ-RAG-9.2.1` |
-| 요약·캡션 서비스 | `CaptionService` | 「요약·캡션 서비스 — REQ-RAG-10.2」 | `REQ-RAG-10.2`, `REQ-RAG-10.2` |
+| 요약·캡션 서비스 | `CaptionService` | 「요약·캡션 서비스 — REQ-RAG-10.2」 | `REQ-RAG-10.2` |
 | 색인 서비스 | `IndexService`, `IndexRequest`, `IndexAccepted` | 「색인 서비스 — REQ-RAG-10.3」 | `REQ-RAG-10.3`, `REQ-RAG-10.8.2.2`, `REQ-RAG-10.8.6` |
 | 작업 상태, 문서 색인 상태 | `JobView`, `JobFailureInfo`, `IndexStateView`, `JobState`, `JobStage`, `IndexOutcome` | 「데이터 계약」, 「작업 관리 헬퍼 — REQ-RAG-10.8」 | `REQ-RAG-10.8.2`, `REQ-RAG-10.8.6` |
 | 검색 서비스 | `SearchService` | 「검색 서비스 — REQ-RAG-10.4」 | `REQ-RAG-10.4`, `REQ-RAG-4.7` |
@@ -592,7 +592,7 @@ class JobManager:  # JobQueue를 구현한다
 - 처리 계약: 모든 알림(재전송 포함)의 `X-Minerva-Token` 헤더에 `RAG_BACKEND_EVENTS_TOKEN`을 담는다(루트 `IF-2`). Backend가 `401`로 응답해도 다른 실패와 같이 다시 보낸다
 - 충족 기준: 가짜 수신자가 받은 모든 알림의 헤더 값이 설정한 토큰과 같고, `401` 응답에도 다시 보낸다
 
-### 요약·캡션 생성 헬퍼 — `REQ-RAG-10.2`
+### 요약·캡션 생성 헬퍼 — `REQ-RAG-10.2.2`, `REQ-RAG-10.2.3`
 
 ```python
 class Captioner:
