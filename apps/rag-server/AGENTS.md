@@ -13,7 +13,7 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 
 ## 코딩 규칙
 
-- 로그는 structlog 구조화 이벤트로만 남긴다. 모듈 맨 위에 `log = get_logger(__name__)`를 두고, 이벤트명은 `모듈.동작` 형식으로 쓴다 (예: `log.info("store.upsert", doc_id=doc_id, chunks=len(chunks))`). `print()`나 f-string으로 조립한 메시지를 로그로 남기지 않는다
+- 로그는 structlog 구조화 이벤트로만 남긴다. 모듈 맨 위에 `log = get_logger(__name__)`를 두고, 이벤트명은 `모듈.동작` 형식으로 쓴다 (예: `log.info("resource.upsert", doc_id=doc_id, chunks=len(chunks))`). `print()`나 f-string으로 조립한 메시지를 로그로 남기지 않는다
 - 서비스 계층의 공개 함수는 진입 시 로그 이벤트를 남긴다. 실패해도 정상 응답이 나갈 수 있는 함수(폴백이 있는 함수)는 종료 시에도 남긴다
 - 서비스 계층에서 도메인 예외는 `log.warning`으로 남기고 그대로 전파한다. 그 밖의 예외는 `log.exception`으로 스택을 남긴다. 라우터마다 try/except를 두지 않고 전역 예외 핸들러로 처리한다
 - Ollama·Qdrant 같은 I/O 호출은 `async`로 쓴다. BM25 스코어링·PyTorch 추론 같은 CPU 작업은 `asyncio.to_thread`로 감싼다 — 이벤트 루프를 막지 않기 위해서다
