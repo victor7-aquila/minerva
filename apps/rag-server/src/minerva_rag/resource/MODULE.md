@@ -107,8 +107,8 @@ flowchart LR
 
 | 필드 | 타입 | 필수 | 불변 조건 |
 | :--- | :--- | :--- | :--- |
-| `doc_ids` | `tuple[str, ...] \| None` | 선택 | `None`이면 문서 제한 없음 |
-| `edition_name` | `str \| None` | 선택 | `edition_label`과 함께 있거나 함께 없다 |
+| `doc_ids` | `tuple[str, ...] \| None` | 선택 | `None`이면 문서 제한 없음. `()`이면 조회 결과가 없다 |
+| `edition_name` | `str \| None` | 선택 | `edition_label`과 함께 있거나 함께 없다. 하나만 있으면 만들 때 `ValueError` |
 | `edition_label` | `str \| None` | 선택 | 있으면 `name == edition_name`이고 `edition.label == edition_label`인 레코드만 |
 | `latest_or_unversioned` | `bool` | 필수 | `True`면 `is_latest_edition`이 `True`이거나 `edition`이 `None`인 레코드만 |
 
@@ -121,7 +121,7 @@ flowchart LR
 
 ### 변환·저장 경계
 
-- **저장** (`ChunkRecord` + 벡터 → Qdrant 포인트) — 보존: `ChunkRecord`와 `Chunk`의 모든 필드. 파생: 포인트 ID는 `chunk_id`. 제외: 색인 텍스트(`IF-RAG-1`). 형식: dense 벡터 이름 `dense`(코사인 거리), 키워드 벡터 이름 `sparse`(IDF 보정)
+- **저장** (`ChunkRecord` + 벡터 → Qdrant 포인트) — 보존: `ChunkRecord`와 `Chunk`의 모든 필드. 파생: 포인트 ID는 `chunk_id`에서 결정적으로 만든다(같은 `chunk_id`는 같은 포인트). `chunk_id`는 형식 제한 없이 받아 그대로 보존한다. 제외: 색인 텍스트(`IF-RAG-1`). 형식: dense 벡터 이름 `dense`(코사인 거리), 키워드 벡터 이름 `sparse`(IDF 보정)
 - **조회** (Qdrant 포인트 → `ChunkRecord`) — 보존: 저장한 필드 전부. `edition_date`는 `date`로 되돌린다
 
 ## 기능 그룹별 요구사항
@@ -166,11 +166,15 @@ class ModelHub:
     async def ollama_available(self) -> bool: ...
 ```
 
-- `generate`는 `role`에 대응하는 설정의 모델로 생성한다. `image`는 `IMAGE_CAPTION`에서만 쓴다. `json_schema`를 주면 그 스키마에 맞는 JSON 문자열을 요청한다
+- `prepare` 전에 `generate`·`embed_documents`·`embed_query`·`rerank`·`count_tokens`·`embedding_dimension`을 부르면 `RuntimeError`다(호출 순서 위반). `encode_sparse_documents`·`encode_sparse_query`·`embedding_model_name`·`ollama_available`·`close`는 `prepare` 없이 동작한다. `close`는 여러 번 불러도 된다
+- `generate`는 `role`에 대응하는 설정의 모델로 생성한다. `image`는 `IMAGE_CAPTION`에서만 쓰며, 다른 역할에 주면 `ValueError`다. `json_schema`를 주면 그 스키마에 맞는 JSON 문자열을 요청한다
 - `generate`는 모든 요청에 컨텍스트 크기 `RAG_LLM_CONTEXT_TOKENS`를 지정한다. `prompt`의 토큰 수가 `RAG_LLM_CONTEXT_TOKENS - RAG_LLM_OUTPUT_RESERVE_TOKENS`를 넘으면 Ollama에 보내지 않고 `PromptTooLongError`를 낸다. 이미지의 토큰은 세지 않는다
 - `generate`는 생각 모드를 끄고 요청한다. 그래도 응답 앞에 생각 블록(`<think>…</think>`)이 오면 지우고 나머지만 돌려준다
 - `embed_documents`·`rerank`의 반환 목록은 입력과 같은 길이·같은 순서다. `rerank`는 점수가 클수록 관련이 높다
-- `count_tokens`는 임베딩 모델의 토크나이저로 센다(core 「설정」)
+- `count_tokens`는 임베딩 모델의 토크나이저로 세며, 토크나이저가 붙이는 특수 토큰은 세지 않는다(core 「설정」)
+- `embed_query`는 임베딩 모델이 정의한 질의용 입력 형식(질의 지시문)을 쓰고, `embed_documents`는 문서용 형식을 쓴다
+- `embedding_model_name`은 `RAG_EMBEDDING_MODEL` 값이다
+- `ollama_available`은 오류를 내지 않고 Ollama에 닿는지만 돌려준다
 - 키워드 벡터의 토큰화는 「키워드 토큰화」를 따르며, `encode_sparse_documents`와 `encode_sparse_query`가 같은 토큰화를 쓴다
 - 임베딩·재정렬·키워드 벡터 계산은 이벤트 루프를 막지 않는다(`AGENTS.md`)
 
@@ -178,7 +182,7 @@ class ModelHub:
 
 형태소 분석(`REQ-RAG-3.7`, `REQ-RAG-4.6`)은 M-3이므로, M-1의 키워드 벡터는 아래 토큰화로 만든다. 문서와 질의가 같은 토큰화를 써야 키워드 검색이 맞는다.
 
-- 처리 계약: 텍스트를 NFKC로 정규화하고 영문을 소문자로 바꾼 뒤, 공백과 구두점으로 나눈 단어를 토큰으로 쓴다. 한글이 든 단어는 그 단어의 한글 연속 구간에서 이웃한 두 글자 조각도 토큰으로 더한다. 문서 벡터의 값은 토큰 빈도, 질의 벡터의 값은 1이며, 역문서빈도 보정은 저장할 때의 `sparse` 벡터 IDF 보정이 한다(「변환·저장 경계」)
+- 처리 계약: 텍스트를 NFKC로 정규화하고 영문을 소문자로 바꾼 뒤, 공백·구두점·기호·밑줄로 나눈 단어(문자·숫자의 연속)를 토큰으로 쓴다. 한글이 든 단어는 그 단어의 한글 연속 구간에서 이웃한 두 글자 조각도 토큰으로 더하되, 조각이 단어 자체와 같으면 더하지 않는다. 토큰의 인덱스는 프로세스·실행과 관계없이 같은 토큰에 같은 값이다(저장된 벡터와 새 질의 벡터가 맞아야 한다). 문서 벡터의 값은 토큰 빈도, 질의 벡터의 값은 1이며, 역문서빈도 보정은 저장할 때의 `sparse` 벡터 IDF 보정이 한다(「변환·저장 경계」)
 - 충족 기준: "인증서를"과 "인증서는"이 "인증"·"증서" 조각을 함께 갖고, "Certificate"와 "certificate"가 같은 토큰이며, 같은 텍스트를 문서·질의로 인코딩하면 같은 인덱스 집합이 나온다
 
 **`REQ-RAG-12.1.1`** 모델을 불러오지 못하면 기동하지 않음
@@ -189,7 +193,7 @@ class ModelHub:
 
 **`REQ-RAG-12.1.2`** 모델 서버 연결 실패 알림
 
-- 처리 계약: `prepare`가 끝난 뒤 `generate`가 Ollama에 연결할 수 없으면 `ModelUnavailableError`를 낸다. 연결은 됐지만 생성이 실패한 경우는 그 오류를 그대로 내며, 해석은 부른 단위가 한다
+- 처리 계약: `prepare`가 끝난 뒤 `generate`가 Ollama에 연결할 수 없으면(연결 거부, 연결 시간 초과) `ModelUnavailableError`를 낸다. 연결은 됐지만 생성이 실패한 경우는 그 오류를 그대로 내며, 해석은 부른 단위가 한다
 - 충족 기준: Ollama가 연결을 거부하면 `generate`가 `ModelUnavailableError`를 내고, `ollama_available()`이 `False`다
 
 ### 저장소 연결 — `REQ-RAG-12.2`
@@ -243,17 +247,19 @@ class ChunkStore:
     async def job_records(self, doc_id: str, job_id: str) -> list[ChunkRecord]: ...
 ```
 
-- `upsert`의 세 인자는 같은 길이·같은 순서다. 저장한 레코드의 `active`는 받은 값 그대로다
+- `connect` 전에 쓰기·조회 메서드를 부르면 `RuntimeError`다(호출 순서 위반). `connect` 전의 `ping`은 `False`, `close`는 아무 일 없이 끝나며 여러 번 불러도 된다
+- `upsert`의 세 인자는 같은 길이·같은 순서다. 길이가 다르거나 dense 벡터의 길이가 `connect`에 준 차원과 다르면 `ValueError`다. 저장한 레코드의 `active`는 받은 값 그대로다
+- 빈 입력은 집합 의미 그대로다: 빈 `upsert`·`activate_records`·`delete_records`는 아무것도 바꾸지 않고, `delete_records_except`에 빈 집합을 주면 그 문서의 레코드를 모두 지우며, `set_latest_editions`에 빈 집합을 주면 그 이름의 active 레코드를 모두 `False`로 한다
 - `activate_records`는 그 문서에서 `chunk_ids`에 든 레코드를 `active=True`로 바꾼다. `delete_records_except`는 그 문서에서 `chunk_ids`에 들지 않은 레코드를 모두 지운다. `delete_records`는 `chunk_ids`의 레코드만 지운다. 버전 문자열이 아니라 레코드 ID로 다루므로, 같은 버전을 다시 색인해도 이전 레코드와 섞이지 않는다
 - `delete_document`·`set_document_metadata`는 그 문서의 모든 버전 레코드에 적용한다. 레코드가 없으면 아무 일 없이 끝난다
 - `set_latest_editions`는 `name`이 같은 active 레코드 중 `doc_id`가 `latest_doc_ids`에 든 것은 `is_latest_edition=True`, 나머지는 `False`로 바꾼다
 - `active_records`는 그 문서의 active 레코드를 돌려주며 순서는 보장하지 않는다. `active_editions`는 `name`이 같은 active 레코드의 문서마다 판 정보를 돌려준다
-- `search_dense`·`search_sparse`는 점수 내림차순으로 최대 `limit`개를 돌려준다
+- `search_dense`·`search_sparse`는 점수 내림차순으로 최대 `limit`개를 돌려준다. `limit`이 1보다 작으면 `ValueError`다
 - `job_records`는 그 문서에서 `job_id`가 같은 레코드를 active 여부와 관계없이 돌려준다. 이 메서드만 active가 아닌 레코드를 돌려준다
 
 **`REQ-RAG-12.2.1`** Qdrant 연결 실패 알림
 
-- 처리 계약: `connect` 뒤 모든 쓰기·조회 메서드는 Qdrant에 연결할 수 없으면 `StoreUnavailableError`를 낸다. `ping`은 오류를 내지 않고 연결 여부를 돌려준다
+- 처리 계약: `connect` 뒤 모든 쓰기·조회 메서드는 Qdrant에 연결할 수 없으면(요청을 전달하거나 응답을 받지 못함) `StoreUnavailableError`를 낸다. Qdrant가 오류 응답을 돌려준 경우는 그 오류를 그대로 낸다. `ping`은 오류를 내지 않고 연결 여부를 돌려준다
 - 실패: `connect` 자체가 Qdrant에 연결하지 못하면 `StoreUnavailableError`를 내고, service가 기동을 멈춘다(service `MODULE.md` 「수명주기 서비스 — `REQ-RAG-10.1`」)
 - 충족 기준: Qdrant가 연결을 거부하면 쓰기·조회 메서드가 모두 `StoreUnavailableError`를 내고 `ping()`이 `False`다
 
@@ -294,7 +300,7 @@ class ChunkStore:
 ### 런타임·보안
 
 - **실행 형태** — 모든 Qdrant 호출은 `async`다(`AGENTS.md`)
-- **영속화·복원** — 데이터는 Qdrant가 보관한다. 컬렉션 구성은 `connect`가 맞추며, 기존 컬렉션의 데이터를 지우거나 다시 만들지 않는다
+- **영속화·복원** — 데이터는 Qdrant의 컬렉션 `minerva_chunks`가 보관한다(설정 키가 아니다). 컬렉션 구성은 `connect`가 맞추며, 기존 컬렉션의 데이터를 지우거나 다시 만들지 않는다
 
 ### 실패 모드
 
