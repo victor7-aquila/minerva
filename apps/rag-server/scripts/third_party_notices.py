@@ -43,6 +43,19 @@ _CLASSIFIER_TO_SPDX = {
     "The Unlicense (Unlicense)": "Unlicense",
 }
 
+# 레거시 `License` 필드의 표기를 SPDX로 옮긴다. ★ 표기만 바꾼다 — 표에 없는 표기는 원래 값으로
+# 남아 허용 목록 밖 판정을 받는다. 정확히 "BSD"는 본문으로 판정한다 (아래 _detect_bsd)
+_LEGACY_TO_SPDX = {
+    "Apache 2.0 License": "Apache-2.0",
+    "Apache License 2.0": "Apache-2.0",
+    "Apache 2.0": "Apache-2.0",
+    "ISC License": "ISC",
+    "3-Clause BSD License": "BSD-3-Clause",
+    "BSD 3-Clause": "BSD-3-Clause",
+    "New BSD License": "BSD-3-Clause",
+    "MIT License": "MIT",
+}
+
 # 라이선스 본문의 저작권 표시 줄이다. 본문 문장("copyright notice" 등)은 제외한다
 _COPYRIGHT_LINE = re.compile(
     r"^\s*(?:(?:portions\s+)?copyright\b"
@@ -148,7 +161,9 @@ def _raw_license(dist: Distribution, text: str | None) -> str:
         return expression.strip()
     legacy = (meta.get("License") or "").strip()
     if legacy and "\n" not in legacy and len(legacy) <= 60:
-        return legacy
+        if legacy == "BSD":
+            return _detect_bsd(text) or legacy
+        return _LEGACY_TO_SPDX.get(legacy, legacy)
     for classifier in meta.get_all("Classifier") or []:
         if not classifier.startswith("License :: "):
             continue
