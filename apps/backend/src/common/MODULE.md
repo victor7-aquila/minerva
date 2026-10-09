@@ -8,7 +8,7 @@ Backend의 모든 모듈이 기대는 공통 기반이다. 설정 키 정의와 
 
 - 설정은 `ConfigService`로만 읽고, 모든 "설정한 값"은 환경 변수로 바꿀 수 있다. 키 정의는 이 문서 「설정」 한 곳이다 (`REQ-BE-8.1.1`, `AGENTS.md`)
 - 문서 본문, 청크 텍스트, 질의 원문, 토큰은 애플리케이션 로그에 나가지 않는다. 금지 경로는 로거 설정이 지운다 (`REQ-BE-8.2.1`)
-- 경계 밖으로 나가는 실패는 모두 `DomainError`의 하위 클래스이고, 코드와 내부 정보 없는 한국어 메시지를 갖는다 (`REQ-BE-8.3`)
+- 경계 밖으로 나가는 실패는 모두 `DomainError`의 하위 클래스이고, 코드와 내부 정보 없는 한국어 메시지를 갖는다 (`REQ-BE-8.3`). 예외는 순수 함수 `kstDayRange`의 `RangeError` 하나이며, 사용자 입력을 받는 호출자는 이를 `InvalidRequestError`로 바꾸는 `parseKstDayRange`를 쓴다 (`REQ-BE-8.4.1`)
 - 시각은 UTC ISO 8601로 주고받고, 날짜 필터는 KST 하루로 해석한다. 두 변환은 이 모듈의 함수로만 한다. 요청의 날짜 필터는 `parseKstDayRange`를 거쳐, 날짜가 틀리면 `InvalidRequestError`를 낸다 (`REQ-BE-8.4.1`, `REQ-BE-1.3.4`, `REQ-BE-6.2.2`)
 
 **기능 그룹**
@@ -96,7 +96,7 @@ export class CommonModule {}
 
 - 처리 계약: 기동할 때 「설정」의 모든 키를 환경 변수에서 읽어 타입과 제약을 검증한다. 환경 변수가 없으면 기본값을 쓴다. 상대 경로는 Backend 앱 폴더(`apps/backend`) 기준으로 푼다. 다른 모듈은 `ConfigService`로만 읽는다
 - 실패: 필수 키가 없거나 제약에 맞지 않으면 기동하지 않는다. 이유에는 키 이름만 담고 값은 담지 않는다
-- 충족 기준: 「설정」의 각 키를 환경 변수로 주면 그 값이, 주지 않으면 기본값이 `ConfigService`로 읽히고, 필수 키가 빠지면 기동이 실패하며 그 이유에 값이 없다
+- 충족 기준: 「설정」의 각 키를 환경 변수로 주면 그 값이, 주지 않으면 기본값이 `ConfigService`로 읽히고, 필수 키가 빠지거나 값이 제약에 맞지 않으면(예: 5필드 cron 표현식이 아닌 `INDEX_SCHEDULE_CRON`) 기동이 실패하며 그 이유에 키 이름만 있고 값이 없다
 
 ### 로그 — `REQ-BE-8.2`
 
@@ -217,7 +217,7 @@ export type SearchState = 'searchable' | 'not_searchable' | 'replaced';
 | `RAG_CAPTION_TIMEOUT_MS` | `number` | `120000` | 1 이상 | `REQ-BE-10.1.3` |
 | `RAG_WAIT_TIMEOUT_MS` | `number` | `600000` | 1 이상. 문서 삭제·이름 변경 호출 | `REQ-BE-10.1.3` |
 | `CHUNKING_MODE` | `'semantic' \| 'rule'` | `semantic` | | `REQ-BE-3.1.3` |
-| `INDEX_SCHEDULE_CRON` | `string` | `0 0 * * *` (매일 00:00) | cron 표현식. 한국 표준시(KST, `Asia/Seoul`)로 해석한다 | `REQ-BE-1.10.1` |
+| `INDEX_SCHEDULE_CRON` | `string` | `0 0 * * *` (매일 00:00) | 표준 5필드 cron 표현식(분 시 일 월 요일). 한국 표준시(KST, `Asia/Seoul`)로 해석한다 | `REQ-BE-1.10.1` |
 | `RECONCILE_INTERVAL_MS` | `number` | `60000` | 1 이상 | `REQ-BE-3.3.1` |
 | `RAG_RETRY_INTERVAL_MS` | `number` | `60000` | 1 이상. 청크 삭제·이름·판 정보 변경 재요청 주기 | `REQ-BE-1.8.4`, `REQ-BE-3.4.2` |
 | `LOG_RETENTION_DAYS` | `number` | `90` | 1 이상 | `REQ-BE-6.3.1` |
@@ -256,7 +256,7 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-BE-8.1.1` | unit | 키별 환경 변수 반영과 기본값, 필수 키 누락 시 기동 실패와 이유에 값 없음 | 환경 변수 | `src/common/**/*.spec.ts` |
+| `REQ-BE-8.1.1` | unit | 키별 환경 변수 반영과 기본값, 필수 키 누락·`INDEX_SCHEDULE_CRON` 형식 오류 시 기동 실패와 이유에 값 없음 | 환경 변수 | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.2.1` | unit | 금지 키·본문·토큰 헤더 제거, 허용 필드 유지 | 로그 출력 캡처 | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.3.1` | unit | 모든 오류의 코드·한국어 메시지, 코드가 `API.md` 목록에 있음 | | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.3.2` | unit | 기본 메시지에 내부 표현 없음, 감싼 오류 문자열 비노출 | | `src/common/**/*.spec.ts` |

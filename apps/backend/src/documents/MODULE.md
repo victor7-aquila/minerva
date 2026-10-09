@@ -355,7 +355,7 @@ classDiagram
 **`REQ-BE-1.5.2`** 이름·판 정보만 바뀌면 재색인 없음
 
 - 처리 계약: 새 버전을 만들지 않고 처리 상태를 바꾸지 않는다. 검색되는 버전이 있으면 편집 갱신에서 `pendingRag.metadata`를 참으로 두고, 백그라운드로 `indexing.updateMetadata`를 불러 참이고 그사이 `updatedAt`이 그대로면 지운다. 검색되는 버전이 없으면 보내지 않는다(다음 예약 색인의 요청이 새 값을 싣는다). 대기열은 그대로 둔다
-- 충족 기준: 이름만 바꾸면 색인 요청이 없고 이름·판 정보 변경 요청이 가며, 실패하면 다음 주기에 다시 간다
+- 충족 기준: 이름만 바꾸면 색인 요청이 없고 `queuedVersion`이 그대로이며 이름·판 정보 변경 요청이 가고, 실패하면 다음 주기에 다시 간다
 
 **`REQ-BE-1.5.3`** 편집으로 같은 판이 되면 편집한 문서가 남음
 
@@ -410,7 +410,7 @@ classDiagram
 **`REQ-BE-1.8.1`** 바로 삭제됨 표시
 
 - 처리 계약: 조건부 갱신 하나로 `deleted`를 참으로, `pendingRag.deleteChunks`를 참으로, `queuedVersion`을 `null`로(`REQ-BE-1.10.7`) 두고 `delete` 기록(`success`)을 남긴 뒤 응답한다. logs의 `document_deleted` 판정이 이 기록에 기댄다(`REQ-BE-6.1.1`, logs `MODULE.md` 「조회」). 청크 삭제는 응답 뒤 백그라운드로 한다(`REQ-BE-1.8.4`)
-- 충족 기준: 삭제 요청이 RAG Server 응답을 기다리지 않고 `204`이며 `deleted`가 참이다
+- 충족 기준: 삭제 요청이 RAG Server 응답을 기다리지 않고 `204`이며 `deleted`가 참이고 `queuedVersion`이 `null`이다
 
 **`REQ-BE-1.8.2`** 목록·조회·검색에서 빠짐
 
@@ -464,7 +464,7 @@ classDiagram
 **`REQ-BE-1.9.5`** 작업 상태 → 처리 상태
 
 - 처리 계약: 마지막 버전의 이벤트만 반영하며, 바꿀 수 있는 출발 상태는 `indexing`←`queued`, `completed`·`failed`←`queued`·`indexing`이다. 그 밖의 경우(같은 버전의 `completed`·`failed` 뒤에 늦게 온 `queued`·`running`)는 처리 상태를 바꾸지 않는다. 처리 상태를 `queued` 밖으로 바꾸는 갱신은 같은 갱신에서 대기열에서 뺀다(`REQ-BE-1.10.7`). `queued` 이벤트는 대기열에 넣지 않는다(`REQ-BE-1.10.2`의 계기가 아니다). `searchableVersion`은 이벤트 값이 지금 값보다 클 때만 쓴다(이벤트로 지우지 않는다)
-- 충족 기준: 마지막 버전의 `queued`·`running`·`succeeded`·`failed` 이벤트가 각각 `queued`·`indexing`·`completed`·`failed`를 만들고, `failed`면 실패 사유가 버전에 남는다
+- 충족 기준: 마지막 버전의 `queued`·`running`·`succeeded`·`failed` 이벤트가 각각 `queued`·`indexing`·`completed`·`failed`를 만들고, `failed`면 실패 사유가 버전에 남는다. 처리 상태가 `failed`인 문서는 어떤 작업 상태 이벤트로도 바뀌지 않고(`REQ-BE-1.10.5`의 1단계가 이에 기댄다), `queued` 이벤트 뒤에 `queuedVersion`이 `null`이다(대기열에 넣지 않는다)
 
 **`REQ-BE-1.9.6`** 반영하지 않는 이벤트
 
@@ -516,7 +516,7 @@ classDiagram
 
 **`REQ-BE-1.10.5`** 실패 문서를 색인 대기로 바꾸기
 
-- 처리 계약: `POST /v1/documents/{doc_id}/queue`는 처리 상태가 `failed`이고 삭제됨·교체됨이 아닌 문서를, 새 버전을 만들지 않고 아래 순서로 색인 대기로 바꾼다. 먼저 문서를 읽어 이 조건이 아니면 아무것도 바꾸지 않고 아래 「실패」나 `REQ-BE-1.10.6`대로 거부한다. 세 단계의 순서를 바꾸지 않는다
+- 처리 계약: `POST /v1/documents/{doc_id}/queue`는 처리 상태가 `failed`이고 삭제됨·교체됨이 아닌 문서를, 새 버전을 만들지 않고 아래 순서로 색인 대기로 바꾼다. 먼저 문서를 읽어 이 조건이 아니면 아무것도 바꾸지 않고 아래 실패 항목이나 `REQ-BE-1.10.6`대로 거부한다. 세 단계의 순서를 바꾸지 않는다
   1. 읽은 마지막 버전 레코드의 `failure`를 기억해 두고, 같은 갱신 하나로 그 버전의 `jobId`를 비우고 `requestSeq`를 1 늘린다. 처리 상태가 아직 `failed`라 어떤 작업 상태 이벤트도 문서를 바꾸지 못하고(`REQ-BE-1.9.5`의 출발 상태에 `failed`가 없다), 새 작업의 이벤트가 지난 작업의 `jobId`에 막히지 않는다. 새 작업의 `jobId`가 기록된 뒤로는 지난 작업의 이벤트를 반영하지 않는다(`REQ-BE-1.9.6`). 늘린 `requestSeq` 때문에, 이 뒤에 늦게 온 지난 요청의 결과는 `jobId`를 다시 쓰지 못하고 버려진다(`REQ-BE-1.9.4`)
   2. 처리 상태가 `failed`이고 `latestVersion`이 읽은 값일 때만, 조건부 갱신 하나로 `queued`로 바꾸고 `queuedVersion`을 `latestVersion`으로 둔다(`REQ-BE-1.10.2`). 조건이 어긋나면 `REQ-BE-1.10.6`이다. 그 뒤 `processing_state` 기록을 남긴다(`REQ-BE-6.1.1`)
   3. 그 버전의 `failure`가 1단계에서 기억한 값과 같을 때만 조건부 갱신으로 비운다. 2단계와 3단계 사이에 예약 색인이 쓴 새 실패 사유(`REQ-BE-1.9.4`의 `rejected`)는 값이 달라 남는다. 이 단계 전에 프로세스가 멈춰도 남은 실패 사유는 보이지 않는다 — 실패 사유는 처리 상태가 실패일 때만 주고(`REQ-BE-1.4.2`), 그 버전의 다음 결과가 덮어쓴다
@@ -581,30 +581,29 @@ stateDiagram-v2
     uploaded --> captioning: 표·이미지 처리 시작
     completed --> captioning: 재색인 (임시 설명 있음)
     failed --> captioning: 재색인 (임시 설명 있음)
-    state queued {
-        inQueue: 대기열에 있음
-        atRag: 대기열 밖 (RAG 접수)
-        inQueue --> atRag: 예약 색인 accepted
-    }
-    captioning --> inQueue: 색인 준비 완료
-    completed --> inQueue: 요약·캡션 변경, 재색인
-    failed --> inQueue: 요약·캡션 변경, 재색인, 되돌리기
-    inQueue --> inQueue: 요약·캡션 변경, unreachable
-    inQueue --> uploaded: 내용 다시 올리기
-    inQueue --> completed: reused
-    inQueue --> failed: rejected
-    queued --> indexing: running
-    queued --> completed: succeeded
-    queued --> failed: failed
+    queued_in_queue: queued (대기열)
+    queued_at_rag: queued (RAG 접수)
+    queued_in_queue --> queued_at_rag: 예약 색인 accepted
+    captioning --> queued_in_queue: 색인 준비 완료
+    completed --> queued_in_queue: 요약·캡션 변경, 재색인
+    failed --> queued_in_queue: 요약·캡션 변경, 재색인, 되돌리기
+    queued_in_queue --> queued_in_queue: 요약·캡션 변경, unreachable
+    queued_in_queue --> uploaded: 내용 다시 올리기
+    queued_in_queue --> completed: reused, succeeded
+    queued_in_queue --> failed: rejected, failed
+    queued_in_queue --> indexing: running
+    queued_at_rag --> indexing: running
+    queued_at_rag --> completed: succeeded
+    queued_at_rag --> failed: failed
     indexing --> completed: succeeded
     indexing --> failed: failed
     completed --> uploaded: 내용 다시 올리기
     failed --> uploaded: 내용 다시 올리기
 ```
 
-- `queued`는 둘로 나뉜다. 대기열에 있음(`queuedVersion` 값 있음)은 예약 색인을 기다리고, 대기열 밖은 RAG Server가 접수한 작업이 시작을 기다린다(`REQ-BE-1.9.5`의 `queued` 이벤트도 이쪽이다). 대기열에 들어가는 계기는 색인 준비 완료(`REQ-BE-1.9.3`)와 실패 되돌리기(`REQ-BE-1.10.5`)뿐이다(`REQ-BE-1.10.2`). 다만 선점을 되돌리면 선점 전의 대기열이 되살아난다(`REQ-BE-1.10.4`, 「기동 때 선점 되돌리기」)
+- `queued`는 그림에서 둘로 나뉜다. `queued (대기열)`(`queuedVersion` 값 있음)은 예약 색인을 기다리고, `queued (RAG 접수)`(대기열 밖)는 RAG Server가 접수한 작업이 시작을 기다린다(`REQ-BE-1.9.5`의 `queued` 이벤트도 이쪽이다). 대기열에 들어가는 계기는 색인 준비 완료(`REQ-BE-1.9.3`)와 실패 되돌리기(`REQ-BE-1.10.5`)뿐이다(`REQ-BE-1.10.2`). 다만 선점을 되돌리면 선점 전의 대기열이 되살아난다(`REQ-BE-1.10.4`, 「기동 때 선점 되돌리기」)
 - `completed`·`failed`에서 대기열로 가는 재색인은 임시 설명이 없을 때다
-- 대기열에 있음에서 다른 상태로 가는 전이는 모두 같은 갱신에서 대기열에서 뺀다(`REQ-BE-1.10.3`, `REQ-BE-1.10.7`). `unreachable`은 상태도 대기열도 바꾸지 않는다
+- `queued (대기열)`에서 다른 상태로 가는 전이는 모두 같은 갱신에서 대기열에서 뺀다(`REQ-BE-1.10.3`, `REQ-BE-1.10.7`). `unreachable`은 상태도 대기열도 바꾸지 않는다
 - 교체됨이 되면 `uploaded`·`captioning`·`queued`·`indexing`에서 `failed`(`REPLACED`)로 간다(`REQ-BE-1.2.8`)
 
 ### 버전 처리
@@ -629,6 +628,8 @@ stateDiagram-v2
 | 둘 다 없고 `jobId`가 없다 | `queued` | 직전 버전 | 선점 전에 대기열에 있었다. 대기열에 되돌려 다음 예약 색인이 요청한다(`REQ-BE-1.10.4`, `REQ-BE-1.10.8`) |
 | 둘 다 없고 `jobId`가 있다 | `queued` | `null` | RAG Server가 접수한 작업이 있다. 대기열 밖 `queued`라 상태 맞추기가 맞춘다(`REQ-BE-3.3.1`) |
 
+직전 버전에 남은 `failure`는 `REQ-BE-1.10.5`가 3단계 전에 멈춰 남은 것일 수도 있다. 이때도 문서는 `failed`로 되돌아가며, 관리자가 다시 색인 대기로 바꾼다(`REQ-BE-1.10.5`).
+
 ### 교체
 
 1. **계기** — 문서가 `searchable`이 되거나, `searchable`인 문서의 이름·판 표기가 바뀐다. (`REQ-BE-1.2.5`)
@@ -640,9 +641,9 @@ stateDiagram-v2
 1. **기동** — 기동 처리는 이벤트 구독이 준비된 뒤(`EventEmitterReadinessWatcher.waitUntilReady()`, `onApplicationBootstrap` 이후) 한다. storage 연결 뒤 「기동 때 선점 되돌리기」를 하고, `captioning`·`uploaded` 문서의 표·이미지 처리를 잇고, 대기열에 없는 `queued`·`indexing` 문서로 `reconcile`을 부른다. 대기열에 있는 문서는 색인을 요청하지 않고 다음 예약 색인에 맡긴다. 교체됨·삭제됨은 뺀다. (`REQ-BE-1.9.9`, `REQ-BE-1.9.11`, `REQ-BE-1.10.8`, `REQ-BE-3.3.1`)
 2. **예약 색인** — `INDEX_SCHEDULE_CRON` 일정(KST)마다 `REQ-BE-1.10.1`을 실행한다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.11`)
 3. **상태 맞추기** — `RECONCILE_INTERVAL_MS`마다 대기열에 없는 `queued`·`indexing` 문서로 `reconcile`. (`REQ-BE-3.3.1`)
+4. **재요청** — `RAG_RETRY_INTERVAL_MS`마다 `pendingRag`가 남은 문서의 청크 삭제·이름·판 정보 변경을 다시 부르고, 성공하면 표시를 지운다. 청크 삭제가 성공한 삭제됨 문서는 데이터를 지운다. (`REQ-BE-1.8.4`, `REQ-BE-1.8.5`, `REQ-BE-3.4.2`)
 
 충족 기준(`REQ-BE-3.3.1`의 documents 쪽): 기동 처리와 상태 맞추기 모두 `queuedVersion`이 있는 `queued` 문서를 `reconcile`에 넘기지 않고, 대기열 밖 `queued`와 `indexing` 문서만 넘긴다.
-4. **재요청** — `RAG_RETRY_INTERVAL_MS`마다 `pendingRag`가 남은 문서의 청크 삭제·이름·판 정보 변경을 다시 부르고, 성공하면 표시를 지운다. 청크 삭제가 성공한 삭제됨 문서는 데이터를 지운다. (`REQ-BE-1.8.4`, `REQ-BE-1.8.5`, `REQ-BE-3.4.2`)
 
 ## 실행 계약
 
@@ -720,7 +721,7 @@ stateDiagram-v2
 | `REQ-BE-1.4.5` | unit | 검색 가능일 때만, RAG 버전으로 복원, RAG 불가 시 오류 | rag·assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.4.6` | e2e | 문서 조회의 대기열 여부와 다음 예약 시각 | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.5.1` | unit | 보낸 필드만 변경과 편집 기록 | `MONGO_DB` (가짜), logs (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.5.2` | unit | 재색인 없음, 변경 요청과 재요청 표시 | indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.5.2` | unit | 재색인 없음, 변경 요청과 재요청 표시, 대기열 그대로 | indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.5.3` | unit | 편집으로 같은 판이 될 때 교체 시점 | `MONGO_DB` (가짜), indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.5.4` | unit | 새 버전이 대기열에 들어가고 바로 요청하지 않음, 예약 색인 요청의 새 문장 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.5.5` | e2e | 처리 중·대기열 밖 `queued` 변경 `409`, 대기열 문서의 편집·다시 올리기 수용과 재색인 `409`, 동시 편집 하나만 | RAG Server (가짜) | `test/` |
@@ -730,7 +731,7 @@ stateDiagram-v2
 | `REQ-BE-1.6.3` | unit | 이어받은 새 버전 | assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.6.4` | e2e | 응답에 버전 필드 없음 | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.7.1` | unit | 임시 설명 유무별 경로, 바로 요청하지 않음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.8.1` | e2e | 즉시 `204`와 삭제됨 | RAG Server (가짜, 지연) | `test/` |
+| `REQ-BE-1.8.1` | e2e | 즉시 `204`와 삭제됨, 대기열 비움 | RAG Server (가짜, 지연) | `test/` |
 | `REQ-BE-1.8.2` | unit | 목록·조회·검색·이름 목록에서 빠짐 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.3` | unit | 삭제 뒤 남은 요청 없음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.4` | unit | 청크 삭제 재요청, 종료 때 요청을 끊고 표시를 남김 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
@@ -740,13 +741,13 @@ stateDiagram-v2
 | `REQ-BE-1.9.2` | unit | 요약·캡션 생성 중을 거침 | assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.3` | unit | 색인 준비 계기마다 `queued`와 대기열, 그때 요청 없음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.4` | unit | 결과별 상태와 작업 ID, 거부 코드별 실패 사유, 연결 실패 시 그대로, 마지막 버전이 아니면 상태 미반영이어도 `accepted`의 작업 ID 기록, `requestSeq`가 바뀌었으면 결과를 버림 | indexing (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.9.5` | unit | 이벤트별 처리 상태, 실패 사유 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.5` | unit | 이벤트별 처리 상태, 실패 사유, `failed` 문서는 어떤 이벤트로도 바뀌지 않음, `queued` 이벤트가 대기열에 넣지 않음 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.6` | unit | 반영하지 않는 이벤트 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.7` | unit | 검색 가능 전환과 교체 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.8` | unit | 새 버전 실패에도 검색 가능 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.9` | unit | 기동 때 남은 표·이미지만 | assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.11` | unit | 기동 처리·상태 맞추기·예약 색인에서 교체됨·삭제됨 제외 | indexing (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-3.3.1` | unit | 기동 처리·상태 맞추기에서 대기열 문서 제외, 대기열 밖 `queued`·`indexing`만 `reconcile`에 넘김 | indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-3.3.1` | unit | (documents 쪽, 대기열 제외) 기동 처리·상태 맞추기에서 대기열 문서 제외, 대기열 밖 `queued`·`indexing`만 `reconcile`에 넘김 | indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.1` | unit | 일정 시각에만 대기열 문서마다 요청, 재색인 버전만 `force`, 선점 중 문서 건너뜀 | indexing (가짜), 일정 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.2` | unit | 색인 대기 전환과 대기열 넣기가 한 갱신, 조건이 어긋나면 둘 다 그대로 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.3` | unit | 응답 결과별 대기열에서 빼기, 연결 실패면 남고 다음 일정에 다시 요청, `requestSeq`가 바뀌어 버린 결과는 대기열을 건드리지 않음 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |

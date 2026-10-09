@@ -163,7 +163,8 @@ export class IndexingService {
 **`REQ-BE-3.1.1`** 색인 요청 내용
 
 - 처리 계약: `requestIndex`는 `IndexRequestInput`을 `POST /v1/index-jobs` 본문(`apps/rag-server/API.md`)으로 옮겨 보낸다. 응답의 `outcome`이 `queued`·`joined`면 `accepted`, `reused`면 `reused`를 돌려준다. RAG Server가 색인 요청을 거부한 `RagRequestError`(`413 PAYLOAD_TOO_LARGE`, `400 INVALID_REQUEST`)면 그 코드로 `rejected`를 돌려준다(`REQ-BE-1.9.4`). 그 밖의 `RagRequestError`와 `RagUnavailableError`면 `unreachable`을 돌려준다. 어느 실패에도 예외를 내지 않는다
-- 충족 기준: 요청 본문에 색인용 MD, 자리표시마다 문장, 이름, 판 정보, `force`가 들어 있고, 세 응답과 실패가 각각 해당 결과로 바뀐다. `413 PAYLOAD_TOO_LARGE`·`400 INVALID_REQUEST`는 그 코드의 `rejected`, `401`·`500`·연결 실패는 `unreachable`이다
+  - 연결 실패, 시간 초과, `5xx`, `401`은 모두 `unreachable`이다. documents는 `unreachable`을 "색인을 요청하지 못함"으로 다뤄(`REQ-BE-1.9.4`, `REQ-BE-1.10.3`) 문서를 대기열에 둔 채 다음 일정에 다시 요청한다. 같은 실패가 되풀이되는지는 documents의 `documents.index_scheduled` 로그의 `unreachable` 수로 본다
+- 충족 기준: 요청 본문에 색인용 MD, 자리표시마다 문장, 이름, 판 정보, `force`가 들어 있고, 세 응답과 실패가 각각 해당 결과로 바뀐다. `413 PAYLOAD_TOO_LARGE`·`400 INVALID_REQUEST`는 그 코드의 `rejected`, `401`·`500`·시간 초과·연결 실패는 `unreachable`이다
 
 **`REQ-BE-3.1.2`** 접수한 작업 ID
 
