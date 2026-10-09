@@ -14,3 +14,9 @@ data/
 node_modules/
 dist/
 coverage/
+
+# Python 가상환경과 캐시
+.venv/
+__pycache__/
+.ruff_cache/
+.pytest_cache/

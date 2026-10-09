@@ -1,0 +1,88 @@
+[project]
+name = "minerva-rag"
+version = "0.0.0"
+description = "minerva RAG Server"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "deptry>=0.24",
+    "basedpyright>=1.40",
+    "import-linter>=2.5",
+    "pytest>=8.4",
+    "ruff>=0.14",
+]
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"
+
+# ── 정적 검사 ──────────────────────────────────────────────
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+# ★ 명세 문서(MODULE.md 등)의 코드 블록은 고치지 않는다
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "N"]
+
+# ★ mypy는 pathspec(MPL-2.0)을 끌어와 허용 라이선스 밖이라 basedpyright를 쓴다
+[tool.basedpyright]
+pythonVersion = "3.12"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+reportMissingParameterType = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+
+# ★ 의존 규칙의 정본은 ARCHITECT.md 「의존 규칙」이다. 규칙을 바꿀 때는 그 문서부터 바꾼다
+[tool.importlinter]
+root_package = "minerva_rag"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "계층: api → service → evaluation → chunking·indexing·search → resource → core"
+type = "layers"
+layers = [
+    "minerva_rag.api",
+    "minerva_rag.service",
+    "minerva_rag.evaluation",
+    "minerva_rag.chunking | minerva_rag.indexing | minerva_rag.search",
+    "minerva_rag.resource",
+    "minerva_rag.core",
+]
+
+[[tool.importlinter.contracts]]
+name = "api는 service와 core만 쓴다"
+type = "forbidden"
+source_modules = ["minerva_rag.api"]
+forbidden_modules = [
+    "minerva_rag.chunking",
+    "minerva_rag.indexing",
+    "minerva_rag.search",
+    "minerva_rag.evaluation",
+    "minerva_rag.resource",
+]
+
+[[tool.importlinter.contracts]]
+name = "evaluation은 search와 core만 쓴다"
+type = "forbidden"
+source_modules = ["minerva_rag.evaluation"]
+forbidden_modules = [
+    "minerva_rag.chunking",
+    "minerva_rag.indexing",
+    "minerva_rag.resource",
+]
+
+# ── 테스트 ────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers"]
+markers = ["req(id): 테스트가 검증하는 REQ ID (예: REQ-RAG-4.1.1)"]
