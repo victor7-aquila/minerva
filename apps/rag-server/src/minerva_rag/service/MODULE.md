@@ -47,7 +47,7 @@ api 아래에서 요청마다 처리 순서를 정하고 기능 단위를 엮는
 
 ### 예상 배치
 
-`ARCHITECT.md` 「폴더 구조와 배치 규칙」에 따라 서비스 하나가 파일 하나이고, 작업 관리와 요약·캡션 생성은 서비스 파일들이 쓰는 헬퍼 파일이다. 단위 조립은 수명주기 서비스 파일이 맡는다.
+`ARCHITECT.md` 「폴더 구조와 배치 규칙」에 따라 서비스 하나가 파일 하나이고, 작업 관리와 요약·캡션 생성은 서비스 파일들이 쓰는 헬퍼 파일이다. 단위 조립은 수명주기 서비스 파일이 맡는다. 서비스 파일들이 함께 쓰는 준비 상태 확인과 예외 로그는 `_guard.py`에 둔다.
 
 ```text
 src/minerva_rag/service/
@@ -60,6 +60,8 @@ src/minerva_rag/service/
 ├── evaluation_service.py    # REQ-RAG-10.7 평가
 ├── jobs.py                  # REQ-RAG-10.8 작업 관리 (헬퍼)
 ├── captioner.py             # REQ-RAG-10.2.2, REQ-RAG-10.2.3 요약·캡션 생성 (헬퍼)
+├── _guard.py                # 준비 상태 확인과 서비스 메서드 예외 로그 (헬퍼, 내보내지 않음)
+├── __init__.py              # 공개 표면 내보내기
 └── MODULE.md
 
 data/rag-server/jobs.sqlite3     # 작업 목록 (위치는 RAG_JOBS_DB_PATH)
@@ -177,11 +179,38 @@ api는 service와 core만 import할 수 있으므로(`ARCHITECT.md` 「의존 �
 ### 변환·저장 경계
 
 - **색인 요청 → 작업** (`IndexRequest` → `IndexInput`·`IndexRunner`) — 보존: `doc_id`, `version`, `markdown`, `assets`, `name`, `edition`. 파생: 체크섬(indexing), `chunking_mode`는 `ChunkingMode` 값. 실패 시: 검증 실패면 작업을 만들지 않는다
-- **작업 상태 변경 → 알림 본문** (루트 `IF-2`) — 상태를 바꾸는 같은 트랜잭션에서 `last_sequence`를 1 올려 그 알림의 `sequence`로 쓴다. `index_state`는 그 트랜잭션이 끝난 시점의 `IndexStateView`다. 실패 시: 트랜잭션 전체를 되돌리고 알림을 보내지 않는다
+- **작업 상태 변경 → 알림 본문** (루트 `IF-2`) — 상태를 바꾸는 같은 트랜잭션에서 `last_sequence`를 1 올려 그 알림의 `sequence`로 쓴다. `index_state`는 그 트랜잭션이 끝난 시점의 `IndexStateView`다. 본문의 `index_state`에는 그 값에서 `doc_id`를 뺀 네 필드(`searchable_version`, `latest_job_id`, `latest_job_state`, `latest_job_stage`)만 담고, 본문 최상위에도 루트 `IF-2` 표의 필드만 담는다. 표에 없는 필드가 있으면 Backend가 `400`으로 거부한다. 실패 시: 트랜잭션 전체를 되돌리고 알림을 보내지 않는다
 
 ## 기능 그룹별 요구사항
 
-모든 서비스 메서드는 진입할 때 `service.{서비스}.{동작}` 로그 이벤트를 남긴다. 도메인 예외(`MinervaError`)는 warning으로 남기고 그대로 전파하며, 그 밖의 예외는 스택과 함께 남긴다(`AGENTS.md`).
+모든 서비스 메서드는 진입할 때 `service.{서비스}.{동작}` 로그 이벤트를 info로 남긴다. `{서비스}`는 파일 이름에서 `_service`를 뺀 것(`lifecycle`·`caption`·`index`·`search`·`delete`·`metadata`·`evaluation`)이고 `{동작}`은 메서드 이름이다. 서비스 메서드가 예외로 끝나면 `service.failed`를 남기고 그 예외를 그대로 전파한다 — 도메인 예외(`MinervaError`)는 warning, 그 밖의 예외는 스택과 함께 error다(`AGENTS.md`). `startup`은 `service.failed` 대신 `service.lifecycle.startup_failed`를 남긴다.
+
+```python
+class Readiness(Protocol):  # _guard.py
+    """서비스가 요청을 받을 수 있는지 알려 준다. LifecycleService가 구현한다."""
+    @property
+    def ready(self) -> bool: ...
+
+
+# 서비스 생성자 — I/O를 하지 않는다
+class LifecycleService:
+    def __init__(self, model_hub: ModelHub, chunk_store: ChunkStore, searcher: Searcher,
+                 indexer: Indexer, jobs: JobQueue, settings: Settings) -> None: ...
+class CaptionService:
+    def __init__(self, captioner: Captioner, readiness: Readiness) -> None: ...
+class IndexService:
+    def __init__(self, chunker: Chunker, indexer: Indexer, jobs: JobManager, readiness: Readiness) -> None: ...
+class SearchService:
+    def __init__(self, searcher: Searcher, readiness: Readiness) -> None: ...
+class DeleteService:
+    def __init__(self, indexer: Indexer, jobs: JobManager, readiness: Readiness) -> None: ...
+class MetadataService:
+    def __init__(self, indexer: Indexer, jobs: JobQueue, readiness: Readiness) -> None: ...
+class EvaluationService:
+    def __init__(self, evaluator: Evaluator, readiness: Readiness) -> None: ...
+```
+
+`build_services`는 같은 `LifecycleService`를 모든 서비스의 `readiness`로 넘긴다. `Readiness`는 모듈 밖으로 내보내지 않는다.
 
 ### 수명주기 서비스 — `REQ-RAG-10.1`
 
@@ -225,7 +254,7 @@ class LifecycleService:
 **`REQ-RAG-10.1.1`** 준비를 마친 뒤 요청 받기
 
 - 처리 계약: `startup`은 용어집 읽기(`Searcher.load_glossary`) → 모델 준비 → Qdrant 연결(임베딩 차원으로) → 작업 처리기 시작(`JobQueue.start(Indexer.recover)`) 순으로 하고, 모두 끝난 뒤에만 `ready`를 참으로 바꾼다. 차원 불일치는 기동을 막지 않는다(resource `MODULE.md`)
-- 실패: `GlossaryError`, `ModelLoadError`, Qdrant 연결의 `StoreUnavailableError` 중 하나라도 나면 이유를 error 로그로 남기고 그 예외를 낸다. `ready`는 거짓으로 남고, 프로세스를 끝내는 일은 api가 한다(`REQ-RAG-12.1.1`)
+- 실패: `GlossaryError`, `ModelLoadError`, Qdrant 연결의 `StoreUnavailableError` 중 하나라도 나면 이유를 error 로그로 남기고 그 예외를 낸다. `ready`는 거짓으로 남고, 프로세스를 끝내는 일은 api가 한다(`REQ-RAG-12.1.1`). 위 셋이 아닌 예외(작업 처리기 시작 중의 SQLite 오류나 `recover`의 예외 등)도 같게 처리한다
 - 충족 기준: 단계 순서가 위와 같고, 작업 처리기 시작 때 남은 `RUNNING` 작업에 `Indexer.recover`가 불리며, 마지막 단계 전에는 `ready`가 거짓이고, 한 단계가 실패하면 뒤 단계가 불리지 않고 예외가 난다
 
 **`REQ-RAG-10.1.2`** 준비 전 요청은 "준비 중"
@@ -235,7 +264,7 @@ class LifecycleService:
 
 **`REQ-RAG-10.1.3`** 종료 때 작업 기다리기
 
-- 처리 계약: `shutdown`은 `JobQueue.stop(RAG_SHUTDOWN_TIMEOUT_SECONDS)`을 부른 뒤 resource의 연결과 모델을 닫는다. `stop(timeout_seconds)`는 새 접수를 막고 `RUNNING` 작업을 `timeout_seconds`까지 기다린다. 그 안에 끝난 작업은 결과를 기록하고, 끝나지 않은 작업은 실행을 취소해 `RUNNING`으로 남긴다. 남긴 작업은 다음 `start`가 끝맺는다(`REQ-RAG-10.8.5.2`, `REQ-RAG-10.8.5.3`)
+- 처리 계약: `shutdown`은 `JobQueue.stop(RAG_SHUTDOWN_TIMEOUT_SECONDS)`을 부른 뒤 resource의 연결과 모델을 닫는다. `stop(timeout_seconds)`는 새 접수를 막고 `RUNNING` 작업을 `timeout_seconds`까지 기다린다. 그 안에 끝난 작업은 결과를 기록하고, 끝나지 않은 작업은 실행을 취소해 `RUNNING`으로 남긴다. 남긴 작업은 다음 `start`가 끝맺는다(`REQ-RAG-10.8.5.2`, `REQ-RAG-10.8.5.3`). `shutdown`은 `ready`를 바꾸지 않는다. 종료 중 색인 요청이 `ServerNotReadyError`가 아니라 `ShuttingDownError`를 받게 하기 위해서다
 - 충족 기준: `shutdown`이 설정한 시간으로 `stop`을 부르고, 그다음 색인 요청은 `ShuttingDownError`를 낸다. `stop`은 `RUNNING` 작업을 `timeout_seconds`까지 기다려, 그 안에 끝난 작업은 그 결과(`SUCCEEDED`·`FAILED`)로 기록하고, 끝나지 않은 작업은 취소해 `RUNNING`으로 남기며 그 작업은 다음 `start`에서 끝맺어진다
 
 `health`는 `ChunkStore.ping`과 `ModelHub.ollama_available`의 결과를 돌려주며 오류를 내지 않는다(`REQ-RAG-9.2.1`, api `MODULE.md`).
@@ -460,6 +489,8 @@ class JobManager:  # JobQueue를 구현한다
 
 `start`, `stop`, `submit`, `find_open`, `fail_queued`, `wait_running`은 `JobManager`가 구현한다. `stop`·`fail_queued`·`wait_running`의 처리 계약은 그것을 쓰는 서비스의 REQ(`REQ-RAG-10.1.3`, `REQ-RAG-10.5.1`, `REQ-RAG-10.5.2`)에 있다.
 
+`start`가 끝나기 전에 `stop` 말고 다른 메서드를 부르면 `RuntimeError`다(호출 순서 위반 — 수명주기 서비스가 준비 전 요청을 막으므로 운영 중에는 생기지 않는다). `stop`은 `start` 전에도 부를 수 있고, 그 뒤의 `submit`은 `ShuttingDownError`다.
+
 ### 작업 접수 — `REQ-RAG-10.8.1`
 
 **`REQ-RAG-10.8.1.1`** 처리를 기다리지 않고 작업 ID 반환
@@ -485,8 +516,8 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.2.3`** 색인 중 단계
 
-- 처리 계약: `ProgressReporter.stage`로 받은 단계를 `RUNNING` 작업의 `stage`로 기록한다. `RUNNING`이 아닌 작업의 `stage`는 `None`이다
-- 충족 기준: `IndexRunner`가 `EMBEDDING`을 알린 직후 `get_job`의 `stage`가 `EMBEDDING`이고, 끝난 뒤에는 `None`이다
+- 처리 계약: `ProgressReporter.stage`로 받은 단계를 `RUNNING` 작업의 `stage`로 기록한다. `RUNNING`이 아닌 작업의 `stage`는 `None`이다. 작업을 `RUNNING`으로 바꿀 때 같은 트랜잭션에서 `stage`를 `CHUNKING`으로 기록한다. 그래서 `RUNNING` 작업의 `stage`는 항상 값이 있다(`API.md` `IndexJob.stage`)
+- 충족 기준: `IndexRunner`가 `EMBEDDING`을 알린 직후 `get_job`의 `stage`가 `EMBEDDING`이고, 끝난 뒤에는 `None`이다. 러너가 단계를 알리기 전에도 `RUNNING` 작업의 `stage`는 `CHUNKING`이다
 
 **`REQ-RAG-10.8.2.4`** 실패 사유 코드와 한국어 설명
 
@@ -495,6 +526,7 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.2.5`** 실패 위치
 
+- 처리 계약: `JobFailure.location`의 `heading_path`·`placeholder_id`가 모두 `None`이면 위치를 모르는 것으로 보고 기록하지 않는다(`failure.location`이 `None`)
 - 충족 기준: `JobFailure`에 `FailureLocation`이 있으면 `failure.location`이 같은 값이고, 없으면 `None`이다
 
 **`REQ-RAG-10.8.2.6`** 완료 결과
@@ -549,8 +581,8 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.5.3`** 결과가 이미 검색에 쓰이면 완료
 
-- 처리 계약: `start`는 남은 `RUNNING` 작업마다 `recover(doc_id, job_id)`를 부른다. 참이고 `prepared` 결과가 있으면 그 결과로 `SUCCEEDED`를 기록하고 `searchable_job_id`를 그 작업으로 바꾼 뒤 알린다. 남은 정리(이전 레코드 삭제, 최신판 표시)는 `recover`가 한다(indexing `MODULE.md` 「기동 복구」). `prepared`는 레코드를 활성화하기 전에 기록되므로 `recover`가 참인 작업에는 항상 `prepared` 결과가 있다
-- 충족 기준: 남은 `RUNNING` 작업마다 `recover`가 그 작업의 `(doc_id, job_id)`로 불린다. `prepared` 결과가 있는 `RUNNING` 작업에 `recover`가 참이면 `SUCCEEDED`와 그 결과로 조회되고 `searchable_version`이 그 버전이며 `succeeded` 알림이 나간다. `recover`가 거짓이면 `SERVER_RESTARTED` 실패다
+- 처리 계약: `start`는 남은 `RUNNING` 작업마다 `recover(doc_id, job_id)`를 부른다. 참이고 `prepared` 결과가 있으면 그 결과로 `SUCCEEDED`를 기록하고 `searchable_job_id`를 그 작업으로 바꾼 뒤 알린다. 남은 정리(이전 레코드 삭제, 최신판 표시)는 `recover`가 한다(indexing `MODULE.md` 「기동 복구」). `prepared`는 레코드를 활성화하기 전에 기록되므로 `recover`가 참인 작업에는 항상 `prepared` 결과가 있다. `recover`가 예외를 내면 그 작업을 바꾸지 않고 `start`가 그 예외를 그대로 낸다(기동 실패). 이미 끝맺은 작업은 되돌리지 않으며, 다음 `start`가 남은 작업을 다시 확인한다(`recover`는 여러 번 불러도 결과가 같다 — indexing `MODULE.md` 「기동 복구」)
+- 충족 기준: 남은 `RUNNING` 작업마다 `recover`가 그 작업의 `(doc_id, job_id)`로 불린다. `prepared` 결과가 있는 `RUNNING` 작업에 `recover`가 참이면 `SUCCEEDED`와 그 결과로 조회되고 `searchable_version`이 그 버전이며 `succeeded` 알림이 나간다. `recover`가 거짓이면 `SERVER_RESTARTED` 실패다. `recover`가 예외를 내면 `start`가 그 예외를 내고, 그 작업은 다음 `start`에서 다시 확인된다
 
 ### 문서 색인 상태 — `REQ-RAG-10.8.6`
 
@@ -573,8 +605,8 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.7.1`** 상태가 바뀔 때마다 알림
 
-- 처리 계약: 접수(`QUEUED`)를 포함해 상태가 바뀔 때마다 알림 하나를 보낸다. 알림 전송은 작업 실행을 막지 않는다
-- 충족 기준: 접수부터 완료까지 `queued`·`running`·`succeeded` 알림 세 개가 그 순번 순으로 나가고, 각 본문의 `index_state`가 그 시점 값이다. `superseded`·`failed`로 바뀔 때도 알림이 하나씩 나가며, 수신자가 응답을 늦게 줘도 작업 실행이 기다리지 않는다
+- 처리 계약: 접수(`QUEUED`)를 포함해 상태가 바뀔 때마다 알림 하나를 보낸다. 알림 전송은 작업 실행을 막지 않는다. 같은 문서의 알림은 순번 순으로 하나씩 보낸다 — 앞 알림이 2xx를 받거나 버려진 뒤에 다음 알림을 보낸다. 다른 문서의 알림은 서로 기다리지 않는다
+- 충족 기준: 접수부터 완료까지 `queued`·`running`·`succeeded` 알림 세 개가 그 순번 순으로 나가고, 각 본문의 `index_state`가 그 시점 값이다. `superseded`·`failed`로 바뀔 때도 알림이 하나씩 나가며, 수신자가 응답을 늦게 줘도 작업 실행이 기다리지 않는다. 한 문서의 알림이 응답을 기다리는 동안 그 문서의 다음 알림은 나가지 않고, 다른 문서의 알림은 나간다
 
 **`REQ-RAG-10.8.7.2`** 단계 변경은 알리지 않음
 
@@ -744,6 +776,8 @@ stateDiagram-v2
 | `service.job_state` | 작업 상태 변경 | info | `job_id`, `doc_id`, `version`, `state`, `failure_code` | `REQ-RAG-10.8.2` |
 | `service.job_notify_failed` | 재전송을 모두 실패해 알림을 버릴 때 | warning | `job_id`, `doc_id`, `sequence`, `attempts` | `REQ-RAG-10.8.7.3` |
 | `service.job_restart_resolved` | `start`에서 끝나지 않은 작업을 끝맺을 때 | warning | `failed`, `recovered` (개수) | `REQ-RAG-10.8.5.2`, `REQ-RAG-10.8.5.3` |
+| `service.failed` | 서비스 메서드가 예외로 끝날 때(`startup` 제외) | `MinervaError`는 warning, 그 밖은 error(스택 포함) | `operation`, `error_type`, `code` | `REQ-RAG-10` |
+| `service.job_error` | 작업 큐의 백그라운드 처리(러너 실행, 결과 기록, 실행 배정, 알림 전송)에서 `JobFailure`가 아닌 예외가 날 때 | error(스택 포함) | `job_id`, `doc_id`, `step`, `error_type` | `REQ-RAG-10.8.2.4` |
 | `service.caption_failed` | `CaptionFailedError`를 낼 때 | warning | `kind`(`table`·`image`), `input_chars` 또는 `image_bytes` | `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.3` |
 
 그 밖의 서비스 메서드도 진입 이벤트를 남기며, 질의 원문·문서 본문 대신 글자 수만 남긴다. 표 Markdown과 생성한 요약·캡션은 문서 내용이므로 로그에 넣지 않는다.
