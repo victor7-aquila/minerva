@@ -1,0 +1,111 @@
+[project]
+name = "minerva-rag"
+version = "0.0.0"
+description = "minerva RAG Server"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.40",
+    "deptry>=0.25",
+    "import-linter>=2.15",
+    "pytest>=9.1",
+    "ruff>=0.16",
+]
+
+[build-system]
+requires = ["uv_build>=0.9"]
+build-backend = "uv_build"
+
+# ── 정적 검사 ──────────────────────────────────────────────
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+# ★ 명세 문서(MODULE.md 등)의 코드 블록은 고치지 않는다
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "N"]
+
+# ★ mypy는 pathspec(MPL-2.0)을 끌어와 허용 라이선스 밖이라 basedpyright를 쓴다
+[tool.basedpyright]
+pythonVersion = "3.12"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "standard"
+reportMissingParameterType = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+
+# ★ 의존 규칙의 정본은 ARCHITECT.md 「의존 규칙」이다. 규칙을 바꿀 때는 그 문서부터 바꾼다
+[tool.importlinter]
+root_package = "minerva_rag"
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "계층: api → service → evaluation → chunking·indexing·search → resource → core"
+type = "layers"
+layers = [
+    "minerva_rag.api",
+    "minerva_rag.service",
+    "minerva_rag.evaluation",
+    "minerva_rag.chunking | minerva_rag.indexing | minerva_rag.search",
+    "minerva_rag.resource",
+    "minerva_rag.core",
+]
+
+[[tool.importlinter.contracts]]
+name = "api는 service와 core만 쓴다"
+type = "forbidden"
+# ★ api → service → 기능 단위처럼 허용된 경로를 거친 간접 import는 막지 않는다. 직접 import만 막는다
+allow_indirect_imports = true
+source_modules = ["minerva_rag.api"]
+forbidden_modules = [
+    "minerva_rag.chunking",
+    "minerva_rag.indexing",
+    "minerva_rag.search",
+    "minerva_rag.evaluation",
+    "minerva_rag.resource",
+]
+
+[[tool.importlinter.contracts]]
+name = "evaluation은 search와 core만 쓴다"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["minerva_rag.evaluation"]
+forbidden_modules = [
+    "minerva_rag.chunking",
+    "minerva_rag.indexing",
+    "minerva_rag.resource",
+]
+
+[[tool.importlinter.contracts]]
+name = "Qdrant와 모델(Ollama·sentence-transformers)에는 resource만 접근한다"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = [
+    "minerva_rag.api",
+    "minerva_rag.service",
+    "minerva_rag.chunking",
+    "minerva_rag.indexing",
+    "minerva_rag.search",
+    "minerva_rag.evaluation",
+    "minerva_rag.core",
+]
+forbidden_modules = ["qdrant_client", "ollama", "sentence_transformers"]
+
+# ★ 아래 금지 의존은 모듈 import로 표현할 수 없어 계약으로 두지 않는다 — 리뷰와 테스트로 본다
+# - 청크 저장·삭제는 indexing만 resource로 하고, search는 조회만 한다
+# - service가 resource를 직접 쓰는 것은 조립·기동·종료·상태 확인·요약·캡션 생성뿐이다
+# - Backend로 보내는 HTTP 호출은 service의 작업 상태 알림뿐이다 (HTTP 클라이언트 라이브러리가 정해지면 계약을 더한다)
+
+# ── 테스트 ────────────────────────────────────────────────
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers"]
+markers = ["req(id): 테스트가 검증하는 REQ ID (예: REQ-RAG-4.1.1)"]

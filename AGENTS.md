@@ -61,7 +61,7 @@ minerva는 AI가 개발 문서를 검색해 활용하도록 하는 RAG 서버의
 ## 라이선스
 
 - 의존성을 추가하거나 버전을 바꿀 때마다, 설치 결과의 하위 의존성까지 모든 패키지의 라이선스를 확인한다. package.json·pyproject 메타데이터에 표기가 없으면 라이선스 파일을 열어 확인한다
-- 허용 라이선스: MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, Apache-2.0, Unlicense, CC0-1.0, Python-2.0, 그리고 이 중 하나를 고를 수 있는 이중 라이선스(예: `MPL-2.0 OR Apache-2.0`)
+- 허용 라이선스: MIT, ISC, BSD-2-Clause, BSD-3-Clause, 0BSD, Apache-2.0, Unlicense, CC0-1.0, Python-2.0, PSF-2.0, 그리고 이 중 하나를 고를 수 있는 이중 라이선스(예: `MPL-2.0 OR Apache-2.0`)
 - 개발 의존성(devDependencies)에 한해 CC-BY-4.0(caniuse-lite)과 BlueOak-1.0.0도 허용한다. 런타임 의존성에는 적용하지 않는다
 - 허용 라이선스 밖(EPL, MPL 단독, LGPL, GPL, AGPL, SSPL, 상용 라이선스 등)의 패키지가 들어오면 설치를 멈추고, 그 패키지와 그것을 끌어온 상위 패키지, 대안(다른 버전·다른 라이브러리)을 사용자에게 알린다
 - 확인을 마치면 그 앱 폴더의 `NOTICE`(제3자 라이선스 고지)를 같은 커밋에서 다시 만든다. 런타임 의존성만 대상으로 하고, 라이선스별로 패키지·버전·저작권 표시와 라이선스 전문(Apache-2.0은 NOTICE 포함)을 적는다. 이중 라이선스는 고른 라이선스를 적는다
