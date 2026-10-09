@@ -25,6 +25,7 @@ const ALL_KEYS = [
   'RAG_CAPTION_TIMEOUT_MS',
   'RAG_WAIT_TIMEOUT_MS',
   'CHUNKING_MODE',
+  'INDEX_SCHEDULE_CRON',
   'RECONCILE_INTERVAL_MS',
   'RAG_RETRY_INTERVAL_MS',
   'LOG_RETENTION_DAYS',
@@ -68,6 +69,7 @@ describe('REQ-BE-8.1.1', () => {
       ['RAG_CAPTION_TIMEOUT_MS', '90000', 90000],
       ['RAG_WAIT_TIMEOUT_MS', '45000', 45000],
       ['CHUNKING_MODE', 'rule', 'rule'],
+      ['INDEX_SCHEDULE_CRON', '30 6 * * *', '30 6 * * *'],
       ['RECONCILE_INTERVAL_MS', '5000', 5000],
       ['RAG_RETRY_INTERVAL_MS', '7000', 7000],
       ['LOG_RETENTION_DAYS', '30', 30],
@@ -83,7 +85,7 @@ describe('REQ-BE-8.1.1', () => {
       expect(typeof result[key]).toBe(typeof expected);
     });
 
-    it('반환 객체의 키 집합이 17개와 정확히 같고 모르는 환경 변수는 섞이지 않는다', () => {
+    it('반환 객체의 키 집합이 18개와 정확히 같고 모르는 환경 변수는 섞이지 않는다', () => {
       const result = load({
         ...REQUIRED_ENV,
         PATH: '/usr/bin',
@@ -101,6 +103,7 @@ describe('REQ-BE-8.1.1', () => {
       ['RAG_CAPTION_TIMEOUT_MS', 120000],
       ['RAG_WAIT_TIMEOUT_MS', 600000],
       ['CHUNKING_MODE', 'semantic'],
+      ['INDEX_SCHEDULE_CRON', '0 0 * * *'],
       ['RECONCILE_INTERVAL_MS', 60000],
       ['RAG_RETRY_INTERVAL_MS', 60000],
       ['LOG_RETENTION_DAYS', 90],
@@ -129,6 +132,7 @@ describe('REQ-BE-8.1.1', () => {
       RAG_CAPTION_TIMEOUT_MS: 120000,
       RAG_WAIT_TIMEOUT_MS: 600000,
       CHUNKING_MODE: 'semantic',
+      INDEX_SCHEDULE_CRON: '0 0 * * *',
       RECONCILE_INTERVAL_MS: 60000,
       RAG_RETRY_INTERVAL_MS: 60000,
       LOG_RETENTION_DAYS: 90,
@@ -139,7 +143,7 @@ describe('REQ-BE-8.1.1', () => {
     };
 
     it.each(OPTIONAL_KEYS)('선택 키 %s가 빈 문자열이면 기본값이 나온다', (key) => {
-      expect(OPTIONAL_KEYS).toHaveLength(13);
+      expect(OPTIONAL_KEYS).toHaveLength(14);
       expect(load({ ...REQUIRED_ENV, [key]: '' })[key]).toBe(defaultsByKey[key]);
     });
 
@@ -206,6 +210,67 @@ describe('REQ-BE-8.1.1', () => {
 
     it.each(valid)('경계 %s=%s 는 통과한다', (key, value) => {
       expect(() => validateConfig({ ...REQUIRED_ENV, [key]: value })).not.toThrow();
+    });
+  });
+
+  describe('T-CFG-CRON-1 INDEX_SCHEDULE_CRON이 받는 값', () => {
+    // ★ cron 4.4.0이 받고 공백으로 나눈 필드가 정확히 5개인 표현식이다
+    const accepted = [
+      '0 0 * * *',
+      '*/15 9-18 * * 1-5',
+      '0 0 1,15 * *',
+      '30 2 * JAN-MAR mon',
+      '0 0 * * 7',
+      '5/10 * * * *',
+      '  0 0 * * *  ',
+      // 문법은 맞지만 오지 않는 일정이다. 기동은 허용한다(P-3)
+      '0 0 31 2 *',
+    ];
+
+    it.each(accepted)('%j 는 받는다', (value) => {
+      const result = load({ ...REQUIRED_ENV, INDEX_SCHEDULE_CRON: value });
+      expect(result.INDEX_SCHEDULE_CRON).toBe(value);
+    });
+  });
+
+  describe('T-CFG-CRON-2 INDEX_SCHEDULE_CRON이 거부하는 값', () => {
+    // ★ 앞 둘은 cron 패키지는 받지만 5필드가 아니라 거부한다
+    const rejected = [
+      '0 0 0 * * *',
+      '@daily',
+      '0 0 * *',
+      '60 0 * * *',
+      '0 24 * * *',
+      '0 0 0 * *',
+      '0 0 * 13 *',
+      '0 0 * * 8',
+      '*/0 * * * *',
+      '5-1 * * * *',
+      '0 0 ? * *',
+      '0 0 L * *',
+      'abc',
+    ];
+
+    it.each(rejected)('%j 는 실패하고 이유에 키 이름만 있다', (value) => {
+      const env = { ...REQUIRED_ENV, INDEX_SCHEDULE_CRON: value };
+      expect(() => validateConfig(env)).toThrow(ConfigValidationError);
+      const error = catchError(env);
+      expect(error.keys).toEqual(['INDEX_SCHEDULE_CRON']);
+      expect(error.message).toContain('INDEX_SCHEDULE_CRON');
+      expect(error.message).not.toContain(value);
+    });
+
+    it('센티널 값이 오류 메시지에 없다', () => {
+      const env = { ...REQUIRED_ENV, INDEX_SCHEDULE_CRON: '0 0 * * SENTINEL' };
+      const { message } = catchError(env);
+      expect(message).toContain('INDEX_SCHEDULE_CRON');
+      expect(message).not.toContain('SENTINEL');
+    });
+
+    it('빈 문자열은 없는 것으로 보아 기본값을 쓴다', () => {
+      expect(load({ ...REQUIRED_ENV, INDEX_SCHEDULE_CRON: '' }).INDEX_SCHEDULE_CRON).toBe(
+        '0 0 * * *',
+      );
     });
   });
 

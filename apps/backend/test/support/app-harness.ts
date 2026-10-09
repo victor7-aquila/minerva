@@ -6,9 +6,10 @@ import { ConfigModule } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 import type { Db } from 'mongodb';
 import { LoggerModule } from 'nestjs-pino';
-import { AppLoggerModule, createLoggerParams } from '../../libs/logger';
 import { AppModule } from '../../src/api';
-import { CommonModule } from '../../src/common';
+// ★ DocumentsScheduler는 배럴에 없는 내부 파일이다. 테스트 전용 예외로 직접 import한다(runScheduledIndex 용)
+import { DocumentsScheduler } from '../../src/documents/services/documents.scheduler';
+import { CommonModule, createLoggerParams } from '../../src/common';
 import type { AppConfig } from '../../src/common';
 // ★ 배럴에 없는 내부 파일이다. 테스트 전용 예외로 직접 import한다
 import { validateConfig } from '../../src/common/helpers/validate-config';
@@ -23,8 +24,14 @@ export interface AppHarness {
   close(): Promise<void>;
 }
 
-/** CommonModule 대신 쓸 모듈을 만든다. 실제 validateConfig를 쓰되 .env·process.env를 읽지 않는다. */
-export function createAppTestCommonModule(env: Record<string, string>): Type<unknown> {
+/**
+ * CommonModule 대신 쓸 모듈을 만든다. 설정과 로거를 함께 전역으로 준다.
+ * 실제 validateConfig·createLoggerParams를 쓰되 .env·process.env를 읽지 않고 로그를 stream으로 보낸다.
+ */
+export function createAppTestCommonModule(
+  env: Record<string, string>,
+  stream: Writable,
+): Type<unknown> {
   @Global()
   @Module({
     imports: [
@@ -35,22 +42,12 @@ export function createAppTestCommonModule(env: Record<string, string>): Type<unk
         skipProcessEnv: true,
         load: [() => validateConfig(env)],
       }),
+      LoggerModule.forRoot(createLoggerParams(stream)),
     ],
-    exports: [ConfigModule],
+    exports: [ConfigModule, LoggerModule],
   })
   class AppTestCommonModule {}
   return AppTestCommonModule;
-}
-
-/** AppLoggerModule 대신 쓸 모듈을 만든다. 실제 createLoggerParams를 쓰되 출력을 stream으로 보낸다. */
-export function createAppTestLoggerModule(stream: Writable): Type<unknown> {
-  @Global()
-  @Module({
-    imports: [LoggerModule.forRoot(createLoggerParams(stream))],
-    exports: [LoggerModule],
-  })
-  class AppTestLoggerModule {}
-  return AppTestLoggerModule;
 }
 
 /** AppModule에 테스트 전용 컨트롤러를 더해 띄우고 127.0.0.1 빈 포트에서 듣는다. */
@@ -65,9 +62,7 @@ export async function bootAppHarness(options: {
     controllers: options.controllers ?? [],
   })
     .overrideModule(CommonModule)
-    .useModule(createAppTestCommonModule(buildFullTestEnv(options.env)))
-    .overrideModule(AppLoggerModule)
-    .useModule(createAppTestLoggerModule(options.stream))
+    .useModule(createAppTestCommonModule(buildFullTestEnv(options.env), options.stream))
     .compile();
   const app = moduleRef.createNestApplication();
   try {
@@ -88,4 +83,9 @@ export async function bootAppHarness(options: {
     await app.close();
     throw error;
   }
+}
+
+/** 예약 색인을 한 번 돌린다(일정을 기다리지 않는다). 앞 실행이 끝나지 않았으면 바로 끝난다. */
+export async function runScheduledIndex(harness: AppHarness): Promise<void> {
+  await harness.app.get(DocumentsScheduler).runScheduledIndex();
 }

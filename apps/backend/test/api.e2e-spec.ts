@@ -149,6 +149,7 @@ const API_ENDPOINTS: readonly ApiEndpoint[] = [
   { method: 'PATCH', path: '/v1/documents/e2e-doc', module: 'documents' },
   { method: 'POST', path: '/v1/documents/e2e-doc/contents', module: 'documents' },
   { method: 'POST', path: '/v1/documents/e2e-doc/reindex', module: 'documents' },
+  { method: 'POST', path: '/v1/documents/e2e-doc/queue', module: 'documents' },
   { method: 'DELETE', path: '/v1/documents/e2e-doc', module: 'documents' },
   { method: 'POST', path: '/v1/search', module: 'search' },
   { method: 'GET', path: '/v1/golden-sets', module: 'evaluation', list: true },
@@ -182,7 +183,7 @@ beforeAll(async () => {
   fake = await startFakeRagServer();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minerva-api-e2e-'));
   dbName = createTestDbName();
-  // ★ overrideModule(CommonModule·AppLoggerModule)로 .env·process.env를 막고 로그를 캡처한다
+  // ★ overrideModule(CommonModule)로(설정과 로거를 함께) .env·process.env를 막고 로그를 캡처한다
   harness = await bootAppHarness({
     env: {
       MONGODB_URI: testMongoUri(dbName),
@@ -239,8 +240,8 @@ function filePart(filename: string, size: number, name = 'files') {
 }
 
 describe('REQ-BE-7.1.1', () => {
-  it('T-E2E-BOOT-1 지금 있는 엔드포인트는 모두 경로가 있고 목록은 21행이다', async () => {
-    expect(API_ENDPOINTS).toHaveLength(21);
+  it('T-E2E-BOOT-1 지금 있는 엔드포인트는 모두 경로가 있고 목록은 22행이다', async () => {
+    expect(API_ENDPOINTS).toHaveLength(22);
     const live = API_ENDPOINTS.filter((row) => !PENDING_MODULES.has(row.module));
     expect(live.length).toBeGreaterThanOrEqual(1);
     // ★ 아직 없는 모듈은 404 NOT_FOUND여야 한다. 모듈이 들어오면 이 단언이 깨져 PENDING_MODULES 갱신을 강제한다

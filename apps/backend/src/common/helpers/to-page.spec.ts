@@ -2,7 +2,7 @@ import { plainToInstance } from 'class-transformer';
 import { IsOptional, IsString, validateSync } from 'class-validator';
 import { PageQueryDto } from '../interfaces/page-query.dto';
 import type { Page } from '../interfaces/page';
-import { toPage } from './page';
+import { toPage } from './to-page';
 
 /** 쿼리 문자열 값을 변환·검증한다. api의 전역 ValidationPipe와 같은 경로다. */
 function check<T extends PageQueryDto>(cls: new () => T, plain: Record<string, unknown>) {

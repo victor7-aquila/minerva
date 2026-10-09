@@ -17,5 +17,5 @@
     "incremental": false,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src", "libs", "test"]
+  "include": ["src", "test"]
 }

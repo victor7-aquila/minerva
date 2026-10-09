@@ -17,7 +17,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import type { ValidationOptions } from 'class-validator';
-import { kstDayRange, PageQueryDto } from '../../../libs/utils';
+import { kstDayRange, PageQueryDto } from '../../common';
 import type { ProcessingState, SearchState } from '../../common';
 import type { DocumentSortColumn } from './documents.types';
 

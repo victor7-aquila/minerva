@@ -3,7 +3,7 @@ import { Controller, Post } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { LoggerModule, PinoLogger } from 'nestjs-pino';
 import request from 'supertest';
-import { createLoggerParams } from './helpers/logger-options';
+import { createLoggerParams } from './logger-options';
 
 // ★ nestjs-pino는 루트 로거를 모듈 레지스트리당 하나만 만든다. 다른 spec의 LoggerModule과 섞이지 않게 파일을 분리했다
 

@@ -76,6 +76,7 @@ export function docRecord(over: Partial<DocumentRecord> = {}): DocumentRecord {
     editionEnteredAt: new Date(BASE_TIME),
     searchState: 'searchable',
     processingState: 'completed',
+    queuedVersion: null,
     latestVersion: '1',
     searchableVersion: '1',
     deleted: false,
@@ -97,6 +98,7 @@ export function versionRecord(over: Partial<DocumentVersionRecord> = {}): Docume
     originalMarkdown: MD_SENT,
     indexingMarkdown: IDX_SENT,
     jobId: 'job-1',
+    requestSeq: 0,
     result: { chunkCount: 3, fallbackUsed: false },
     failure: null,
     ...over,
@@ -301,16 +303,32 @@ export function createFakeRag() {
   return { getDocumentChunks: jest.fn<Promise<RagDocumentChunks>, [docId: string]>() };
 }
 
-/** 부를 때마다 1초씩 늦은 시각을 주는 가짜 시계를 만든다. peek()은 마지막으로 준 값이다. */
-export function createFakeClock(startIso = '2026-10-04T00:00:00Z') {
+/**
+ * 부를 때마다 1초씩 늦은 시각을 주는 가짜 시계를 만든다. peek()은 마지막으로 준 값이다.
+ * wallNow()는 now()와 상태를 공유하지 않는 벽시계다(다음 예약 색인 시각 계산용). 기본은 KST 12:00이고 setWall로 바꾼다.
+ */
+export function createFakeClock(
+  startIso = '2026-10-04T00:00:00Z',
+  wallIso = '2026-10-09T03:00:00Z',
+) {
   let next = new Date(startIso).getTime();
   let last = new Date(next);
+  let wall = new Date(wallIso);
   const now = jest.fn((): Date => {
     last = new Date(next);
     next += 1000;
     return last;
   });
-  return { now, peek: (): Date => last };
+  const wallNow = jest.fn((): Date => new Date(wall.getTime()));
+  return {
+    now,
+    wallNow,
+    peek: (): Date => last,
+    /** 벽시계를 바꾼다 */
+    setWall: (iso: string): void => {
+      wall = new Date(iso);
+    },
+  };
 }
 
 /** buildDocumentsTestModule이 받는 옵션이다. */
@@ -320,7 +338,7 @@ export interface DocumentsTestOptions {
   db?: FakeDb;
   /** 기본 설정을 덮어쓴다 */
   config?: Partial<AppConfig>;
-  clock?: { now: () => Date };
+  clock?: { now(): Date; wallNow(): Date };
   ready?: { waitUntilReady: () => Promise<void> };
 }
 
@@ -340,7 +358,7 @@ export interface DocumentsHarness {
   tasks: DocumentTasks;
   /** 백그라운드 작업을 모두 기다린다 */
   drain(): Promise<void>;
-  /** drain → 인터벌 삭제 → 모듈 닫기. afterEach에서 부른다 */
+  /** drain → 인터벌·크론 작업 삭제 → 모듈 닫기. afterEach에서 부른다 */
   close(): Promise<void>;
 }
 
@@ -360,6 +378,7 @@ export async function buildDocumentsTestModule(
   const config: Partial<AppConfig> = {
     UPLOAD_MAX_MD_BYTES: 1000,
     UPLOAD_MAX_IMAGE_BYTES: 2000,
+    INDEX_SCHEDULE_CRON: '0 0 * * *',
     RECONCILE_INTERVAL_MS: 60000,
     RAG_RETRY_INTERVAL_MS: 60000,
     ...opts.config,
@@ -405,6 +424,8 @@ export async function buildDocumentsTestModule(
     close: async () => {
       await tasks.drain();
       for (const name of registry.getIntervals()) registry.deleteInterval(name);
+      // ★ 예약 색인 크론 작업도 지운다. 남기면 타이머가 Jest를 붙잡는다
+      for (const name of registry.getCronJobs().keys()) registry.deleteCronJob(name);
       await moduleRef.close();
     },
   };

@@ -1,5 +1,5 @@
 import type { AssetViewData } from '../../assets';
-import { toIsoUtc } from '../../../libs/utils';
+import { toIsoUtc } from '../../common';
 import type { ProcessingState, SearchState } from '../../common';
 import type { RagDocumentChunk } from '../../rag';
 import type {
@@ -161,8 +161,10 @@ export function toSummary(
     siblings: EditionView[];
     stage: DocumentSummaryView['stage'];
     failureMessage: string | null;
+    nextIndexAt: Date | null;
   },
 ): DocumentSummaryView {
+  const queued = doc.processingState === 'queued';
   return {
     doc_id: doc.docId,
     name: doc.name,
@@ -172,6 +174,8 @@ export function toSummary(
     processing_state: doc.processingState,
     stage: doc.processingState === 'indexing' ? extra.stage : null,
     failure_message: doc.processingState === 'failed' ? extra.failureMessage : null,
+    in_index_queue: queued ? (doc.queuedVersion ?? null) !== null : null,
+    next_index_at: queued && extra.nextIndexAt !== null ? toIsoUtc(extra.nextIndexAt) : null,
     uploaded_at: toIsoUtc(doc.uploadedAt),
     updated_at: toIsoUtc(doc.updatedAt),
   };
@@ -197,6 +201,7 @@ export function toDetail(
     siblings: EditionView[];
     stage: DocumentSummaryView['stage'];
     assets: readonly AssetViewData[];
+    nextIndexAt: Date | null;
   },
 ): DocumentDetailView {
   // ★ 응답 어디에도 version 키를 넣지 않는다 (REQ-BE-1.6.4)
@@ -204,6 +209,7 @@ export function toDetail(
     siblings: extra.siblings,
     stage: extra.stage,
     failureMessage: version.failure?.message ?? null,
+    nextIndexAt: extra.nextIndexAt,
   });
   const result =
     doc.processingState === 'completed' && version.result !== null

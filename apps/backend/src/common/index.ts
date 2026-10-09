@@ -19,5 +19,15 @@ export {
 } from './interfaces/domain-errors';
 export type { ErrorCode } from './interfaces/domain-errors';
 export type { ProcessingState, SearchState } from './interfaces/document-state';
-// ★ libs/utils의 kstDayRange(RangeError)를 도메인 오류로 바꾸는 얇은 래퍼다
+export { toIsoUtc, kstDayRange } from './helpers/time';
+// ★ kstDayRange(RangeError)를 도메인 오류로 바꾸는 얇은 래퍼다
 export { parseKstDayRange } from './helpers/parse-kst-day-range';
+export { toPage } from './helpers/to-page';
+export { PageQueryDto } from './interfaces/page-query.dto';
+export type { Page } from './interfaces/page';
+export { REDACTED_LOG_PATHS } from './interfaces/log-constants';
+export {
+  createLoggerParams,
+  createPinoHttpOptions,
+  scrubForbiddenKeys,
+} from './helpers/logger-options';

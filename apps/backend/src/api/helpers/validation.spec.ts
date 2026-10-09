@@ -2,8 +2,7 @@ import 'reflect-metadata';
 import type { ValidationError } from '@nestjs/common';
 import { Type } from 'class-transformer';
 import { IsArray, IsInt, IsOptional, IsString, ValidateNested } from 'class-validator';
-import { InvalidRequestError } from '../../common';
-import { PageQueryDto } from '../../../libs/utils';
+import { InvalidRequestError, PageQueryDto } from '../../common';
 import { RequestValidationError, collectFieldPaths, createValidationPipe } from './validation';
 
 class EditionDto {

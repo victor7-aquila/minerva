@@ -11,6 +11,7 @@ export interface AppConfig {
   RAG_CAPTION_TIMEOUT_MS: number;
   RAG_WAIT_TIMEOUT_MS: number;
   CHUNKING_MODE: 'semantic' | 'rule';
+  INDEX_SCHEDULE_CRON: string;
   RECONCILE_INTERVAL_MS: number;
   RAG_RETRY_INTERVAL_MS: number;
   LOG_RETENTION_DAYS: number;

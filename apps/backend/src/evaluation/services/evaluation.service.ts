@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { OnModuleInit } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
-import { toPage } from '../../../libs/utils';
-import type { Page } from '../../../libs/utils';
+import { toPage } from '../../common';
+import type { Page } from '../../common';
 import {
   AnswerSpanNotFoundError,
   DocumentNotFoundError,

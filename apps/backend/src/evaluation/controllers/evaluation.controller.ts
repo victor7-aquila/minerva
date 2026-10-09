@@ -9,7 +9,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import type { Page } from '../../../libs/utils';
+import type { Page } from '../../common';
 import {
   CreateGoldenSetDto,
   GoldenSetIdParamDto,

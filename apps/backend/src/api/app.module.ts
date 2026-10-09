@@ -3,7 +3,6 @@ import { APP_FILTER, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { FilesInterceptor, MulterModule } from '@nestjs/platform-express';
 import { ScheduleModule } from '@nestjs/schedule';
-import { AppLoggerModule } from '../../libs/logger';
 import { AssetsModule } from '../assets';
 import { CommonModule } from '../common';
 import { DocumentsModule } from '../documents';
@@ -25,10 +24,8 @@ import { createValidationPipe } from './helpers/validation';
 /** 앱 모듈이다. 모든 기능 모듈을 조립한다. */
 @Module({
   imports: [
-    // ★ 첫 줄 고정 — 설정을 전역으로 준다
+    // ★ 첫 줄 고정 — 설정과 로거를 전역으로 준다
     CommonModule,
-    // ★ 로거는 라이브러리(libs/logger)의 전역 모듈이다. 설정(CommonModule) 다음에 가져온다
-    AppLoggerModule,
     // ★ 모듈 사이 이벤트·주기 작업은 앱 전체에 한 번만 가져온다. 기능 모듈은 forRoot를 부르지 않는다
     EventEmitterModule.forRoot(),
     ScheduleModule.forRoot(),

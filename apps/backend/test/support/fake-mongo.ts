@@ -33,6 +33,13 @@ export interface FakeAggregateCursor {
   toArray(): Promise<Doc[]>;
 }
 
+/** 가짜가 받는 update다. $set과 $inc만 지원한다. */
+export interface FakeUpdate {
+  $set?: Doc;
+  /** 숫자 필드에 더한다. 없는 필드는 0에서 시작한다 */
+  $inc?: Doc;
+}
+
 /** 메모리 가짜 컬렉션이다. assets·indexing·documents 저장소가 쓰는 연산만 지원한다. */
 export interface FakeCollection {
   createIndex(
@@ -47,11 +54,11 @@ export interface FakeCollection {
   aggregate(pipeline: Doc[]): FakeAggregateCursor;
   updateOne(
     filter: Doc,
-    update: { $set: Doc },
+    update: FakeUpdate,
   ): Promise<{ matchedCount: number; modifiedCount: number }>;
   updateMany(
     filter: Doc,
-    update: { $set: Doc },
+    update: FakeUpdate,
   ): Promise<{ matchedCount: number; modifiedCount: number }>;
   deleteMany(filter: Doc): Promise<{ deletedCount: number }>;
 }
@@ -187,6 +194,7 @@ function matchField(actual: unknown, expected: unknown): boolean {
   return Object.entries(expected).every(([op, operand]) => {
     if (op === '$in') return (operand as unknown[]).some((item) => valuesEqual(actual, item));
     if (op === '$nin') return !(operand as unknown[]).some((item) => valuesEqual(actual, item));
+    if (op === '$eq') return valuesEqual(actual, operand);
     if (op === '$ne') return !valuesEqual(actual, operand);
     if (op === '$regex') return matchRegex(actual, operand, expected.$options);
     // ★ $options는 $regex와 함께 위에서 소비한다. 혼자 쓰이면 오류다
@@ -435,19 +443,29 @@ export function createFakeDb(): FakeDb {
   /** 일치한 문서의 값을 바꾸고 반환 값을 만든다. */
   const applySet = (
     targets: Doc[],
-    update: { $set: Doc },
+    update: FakeUpdate,
   ): { matchedCount: number; modifiedCount: number } => {
     const keys = Object.keys(update);
-    if (keys.length !== 1 || keys[0] !== '$set') {
-      throw new Error('fake-mongo: 지원하지 않는 update 연산자 ($set만 지원)');
+    if (keys.length === 0 || keys.some((key) => key !== '$set' && key !== '$inc')) {
+      throw new Error('fake-mongo: 지원하지 않는 update 연산자 ($set·$inc만 지원)');
     }
+    const sets = Object.entries(update.$set ?? {});
+    const incs = Object.entries(update.$inc ?? {});
     let modifiedCount = 0;
     for (const doc of targets) {
-      const changed = Object.entries(update.$set).some(
-        ([key, value]) => !valuesEqual(getPath(doc, key), value),
-      );
-      for (const [key, value] of Object.entries(update.$set)) {
+      const changed =
+        sets.some(([key, value]) => !valuesEqual(getPath(doc, key), value)) ||
+        incs.some(([, by]) => by !== 0);
+      for (const [key, value] of sets) {
         setPath(doc, key, structuredClone(value));
+      }
+      for (const [key, by] of incs) {
+        const current = getPath(doc, key);
+        // ★ 실제 MongoDB처럼 숫자가 아닌 필드에 $inc하면 오류다. 없는 필드는 0에서 시작한다
+        if (current !== undefined && typeof current !== 'number') {
+          throw new Error('fake-mongo: $inc 대상이 숫자가 아니다');
+        }
+        setPath(doc, key, ((current as number | undefined) ?? 0) + (by as number));
       }
       if (changed) modifiedCount += 1;
     }

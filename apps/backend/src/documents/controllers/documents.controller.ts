@@ -11,7 +11,7 @@ import {
   Query,
   UploadedFiles,
 } from '@nestjs/common';
-import type { Page } from '../../../libs/utils';
+import type { Page } from '../../common';
 import {
   DocIdParamDto,
   DocumentNamesQueryDto,
@@ -106,6 +106,13 @@ export class DocumentsController {
   @HttpCode(202)
   reindex(@Param() params: DocIdParamDto): Promise<void> {
     return this.documents.reindex(params.doc_id);
+  }
+
+  /** 실패 문서를 색인 대기로 바꾼다. */
+  @Post('documents/:doc_id/queue')
+  @HttpCode(202)
+  requeue(@Param() params: DocIdParamDto): Promise<void> {
+    return this.documents.requeue(params.doc_id);
   }
 
   /** 문서를 지운다. */

@@ -1,4 +1,4 @@
-import { toIsoUtc } from '../../../libs/utils';
+import { toIsoUtc } from '../../common';
 import type { DocumentRefData } from '../../documents';
 import type { RagEvaluationMetrics } from '../../rag';
 import { EVALUATION_MESSAGES } from '../interfaces/evaluation.types';

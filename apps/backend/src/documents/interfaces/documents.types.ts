@@ -26,6 +26,8 @@ export interface DocumentRecord {
   editionEnteredAt: Date;
   searchState: SearchState;
   processingState: ProcessingState;
+  /** 색인 대기열. 값이 있으면 그 버전이 대기열에 있다 (REQ-BE-1.10) */
+  queuedVersion: string | null;
   latestVersion: string;
   searchableVersion: string | null;
   deleted: boolean;
@@ -71,6 +73,8 @@ export interface DocumentVersionRecord {
   originalMarkdown: string;
   indexingMarkdown: string | null;
   jobId: string | null;
+  /** 이 버전을 다시 요청 대상으로 돌린 횟수. 만들 때 0, REQ-BE-1.10.5 1단계에서만 1 늘어난다 */
+  requestSeq: number;
   result: VersionResult | null;
   failure: VersionFailure | null;
 }
@@ -117,6 +121,8 @@ export interface DocumentSummaryView {
   processing_state: ProcessingState;
   stage: 'chunking' | 'embedding' | 'storing' | null;
   failure_message: string | null;
+  in_index_queue: boolean | null;
+  next_index_at: string | null;
   uploaded_at: string;
   updated_at: string;
 }
@@ -168,13 +174,6 @@ export interface OriginalView {
 export type DocumentSortColumn =
   'name' | 'search_state' | 'processing_state' | 'uploaded_at' | 'updated_at';
 
-/** RAG Server에 색인을 요청하지 못한 실패 사유다. */
-export const RAG_UNREACHABLE_FAILURE: VersionFailure = {
-  code: 'RAG_UNREACHABLE',
-  message: 'RAG Server에 색인을 요청하지 못했습니다',
-  headingPath: null,
-  placeholderId: null,
-};
 /** RAG Server가 색인 요청을 거부한 실패 사유다. 코드는 RAG Server의 오류 코드다 (REQ-BE-1.9.4). */
 export const RAG_REJECTED_FAILURES: Readonly<Record<IndexRejectionCode, VersionFailure>> = {
   PAYLOAD_TOO_LARGE: {

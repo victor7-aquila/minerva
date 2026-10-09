@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { isURL } from 'class-validator';
+import { validateCronExpression } from 'cron';
 import { ConfigValidationError } from '../interfaces/app-config';
 import type { AppConfig } from '../interfaces/app-config';
 
@@ -57,6 +58,14 @@ function nonEmpty(raw: string): string | undefined {
   return raw.length >= 1 ? raw : undefined;
 }
 
+/** 5필드 cron 표현식을 검증한다. */
+function cronExpression(raw: string): string | undefined {
+  // ★ cron 패키지는 6필드(초)와 @daily 같은 매크로도 받는다. 5필드 개수를 따로 확인한다
+  if (raw.trim().split(/\s+/).length !== 5) return undefined;
+  // ★ cron의 오류 메시지에는 입력값이 들어 있어 쓰지 않는다
+  return validateCronExpression(raw).valid ? raw : undefined;
+}
+
 /** 허용 값 목록 중 하나인지 검증하는 파서를 만든다. */
 function oneOf<T extends string>(allowed: readonly T[]): (raw: string) => T | undefined {
   return (raw) => allowed.find((value) => value === raw);
@@ -79,6 +88,7 @@ const KEY_SPECS: { readonly [K in keyof AppConfig]: KeySpec<AppConfig[K]> } = {
   RAG_CAPTION_TIMEOUT_MS: { fallback: '120000', parse: intIn(1) },
   RAG_WAIT_TIMEOUT_MS: { fallback: '600000', parse: intIn(1) },
   CHUNKING_MODE: { fallback: 'semantic', parse: oneOf(['semantic', 'rule'] as const) },
+  INDEX_SCHEDULE_CRON: { fallback: '0 0 * * *', parse: cronExpression },
   RECONCILE_INTERVAL_MS: { fallback: '60000', parse: intIn(1) },
   RAG_RETRY_INTERVAL_MS: { fallback: '60000', parse: intIn(1) },
   LOG_RETENTION_DAYS: { fallback: '90', parse: intIn(1) },

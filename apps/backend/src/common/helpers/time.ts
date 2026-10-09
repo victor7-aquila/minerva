@@ -12,7 +12,7 @@ export function toIsoUtc(at: Date): string {
 }
 
 /** KST 날짜 문자열(YYYY-MM-DD) 하루를 UTC 시각 범위 [start, end)로 바꾼다. */
-// ★ 형식·달력이 틀리면 RangeError를 던진다. 도메인 오류(InvalidRequestError)로 바꾸는 일은 호출하는 쪽(src/common의 parseKstDayRange)이 한다
+// ★ 형식·달력이 틀리면 RangeError를 던진다. 도메인 오류(InvalidRequestError)로 바꾸는 일은 호출하는 쪽(같은 모듈의 parseKstDayRange)이 한다
 export function kstDayRange(day: string): { start: Date; end: Date } {
   // ★ 오류 메시지에 입력값을 넣지 않는다
   const invalid = (): RangeError => new RangeError('날짜는 YYYY-MM-DD 형식이어야 합니다');

@@ -369,3 +369,44 @@ describe('REQ-BE-1.3.2', () => {
     );
   });
 });
+
+// ★ REQ-BE-1.10.5 1단계(requeueVersion)가 $set과 $inc를 한 번에 쓴다. 가짜가 같은 모양을 받아야 단위 테스트가 거짓 초록을 내지 않는다.
+describe('REQ-BE-1.10.5', () => {
+  it('T-FAKE-INC-1 $set과 $inc를 한 갱신에 받고, 없는 필드에 $inc하면 1이 되며, 조건이 어긋나면 아무것도 바뀌지 않는다', async () => {
+    const db = createFakeDb();
+    const c = db.collection('c');
+    await c.insertMany([
+      { id: 1, jobId: 'job-1', requestSeq: 2 },
+      { id: 2, jobId: 'job-2' },
+    ]);
+    // 한 번에 두 필드가 바뀐다
+    const hit = await c.updateOne({ id: 1 }, { $set: { jobId: null }, $inc: { requestSeq: 1 } });
+    expect(hit.matchedCount).toBe(1);
+    expect(hit.modifiedCount).toBe(1);
+    expect(db.dump('c')[0]).toMatchObject({ jobId: null, requestSeq: 3 });
+    // 없는 필드는 0에서 시작한다
+    await c.updateOne({ id: 2 }, { $set: { jobId: null }, $inc: { requestSeq: 1 } });
+    expect(db.dump('c')[1]).toMatchObject({ jobId: null, requestSeq: 1 });
+    // 조건이 어긋나면 matchedCount 0이고 아무것도 안 바뀐다
+    const missed = await c.updateOne(
+      { id: 1, requestSeq: 0 },
+      { $set: { jobId: 'x' }, $inc: { requestSeq: 1 } },
+    );
+    expect(missed.matchedCount).toBe(0);
+    expect(db.dump('c')[0]).toMatchObject({ jobId: null, requestSeq: 3 });
+    // $set·$inc 밖의 연산자는 오류다
+    await expect(c.updateOne({ id: 1 }, { $unset: { jobId: 1 } } as never)).rejects.toThrow(
+      'fake-mongo',
+    );
+  });
+
+  it('T-FAKE-INC-2 { requestSeq: null } 조건이 필드 없는 문서와 맞고 값이 있는 문서와는 맞지 않는다', async () => {
+    const db = createFakeDb();
+    const c = db.collection('c');
+    await c.insertMany([{ id: 1 }, { id: 2, requestSeq: 0 }, { id: 3, requestSeq: null }]);
+    const ids = async (filter: Record<string, unknown>) =>
+      (await c.find(filter).toArray()).map((d) => d.id);
+    expect(await ids({ requestSeq: null })).toEqual([1, 3]);
+    expect(await ids({ requestSeq: 0 })).toEqual([2]);
+  });
+});

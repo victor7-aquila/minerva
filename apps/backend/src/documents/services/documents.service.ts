@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { CronTime } from 'cron';
+import type { Filter } from 'mongodb';
 import { PinoLogger } from 'nestjs-pino';
 import { AssetsService } from '../../assets';
 import type { UploadedImage } from '../../assets';
@@ -13,14 +15,16 @@ import {
   RagUnavailableError,
 } from '../../common';
 import type { AppConfig, DomainError, ProcessingState } from '../../common';
-import { toPage } from '../../../libs/utils';
-import type { Page } from '../../../libs/utils';
+import { toPage } from '../../common';
+import type { Page } from '../../common';
 import { IndexingService } from '../../indexing';
 import { LogsService } from '../../logs';
 import { RagClient, RagRequestError } from '../../rag';
 import { DocumentClock } from './document-clock';
 import { DocumentLifecycle } from './document-lifecycle.service';
-import { EDITABLE_STATES, isLocked, nextVersion, previousVersion } from '../helpers/document-state';
+import { acceptsChange, nextVersion, previousVersion } from '../helpers/document-state';
+import type { ChangeKind } from '../helpers/document-state';
+import { createIndexCronTime, nextIndexTime } from '../helpers/index-schedule';
 import {
   bucketWindows,
   latestEditionPairs,
@@ -84,6 +88,7 @@ function sameEdition(a: EditionValue | null, b: EditionValue | null): boolean {
 @Injectable()
 export class DocumentsService implements OnModuleInit {
   private readonly limits: UploadSizeLimits;
+  private readonly cronTime: CronTime;
 
   constructor(
     @Inject(DocumentsCrudService) private readonly repo: DocumentsCrudService,
@@ -101,6 +106,8 @@ export class DocumentsService implements OnModuleInit {
       maxMdBytes: config.get('UPLOAD_MAX_MD_BYTES', { infer: true }),
       maxImageBytes: config.get('UPLOAD_MAX_IMAGE_BYTES', { infer: true }),
     };
+    // 설정 검증을 통과한 값이라 던지지 않는다
+    this.cronTime = createIndexCronTime(config.get('INDEX_SCHEDULE_CRON', { infer: true }));
   }
 
   /** 인덱스를 준비한다. */
@@ -117,45 +124,69 @@ export class DocumentsService implements OnModuleInit {
     return doc;
   }
 
-  /** 바꿀 수 없는 문서면 DocumentLockedError를 던진다. */
-  private assertEditable(doc: DocumentRecord): void {
-    if (isLocked(doc)) throw new DocumentLockedError();
+  /** 다음 예약 색인 시각을 준다. 오지 않는 일정이면 null이다. */
+  private nextIndexAt(): Date | null {
+    return nextIndexTime(this.cronTime, this.clock.wallNow());
+  }
+
+  /** 그 변경을 받을 수 없는 문서면 DocumentLockedError를 던진다. */
+  private assertAccepts(doc: DocumentRecord, kind: ChangeKind): void {
+    if (!acceptsChange(doc, kind)) throw new DocumentLockedError();
+  }
+
+  /** 마지막 버전 레코드가 없으면(선점 중인 문서) DocumentLockedError를 던진다. */
+  private async assertLatestRecord(doc: DocumentRecord): Promise<void> {
+    if ((await this.repo.findVersion(doc.docId, doc.latestVersion)) === null) {
+      throw new DocumentLockedError();
+    }
   }
 
   /** 조건부 갱신이 어긋났을 때 던질 오류를 정한다. */
-  private async lockedOrNotFound(docId: string): Promise<DomainError> {
+  private async lockedOrNotFound(docId: string, kind: ChangeKind): Promise<DomainError> {
     const current = await this.repo.findDocument(docId);
     if (current === null || current.deleted) return new DocumentNotFoundError();
-    if (isLocked(current)) return new DocumentLockedError();
+    if (!acceptsChange(current, kind)) return new DocumentLockedError();
     // ★ 처리 상태는 그대로인데 어긋났다면 그사이 다른 편집이 반영된 것이다 (D5)
     return new DocumentLockedError(CONCURRENT_EDIT_MESSAGE);
   }
 
+  /** 읽은 값 그대로를 조건으로 하는 변경 갱신의 공통 조건이다. */
+  private changeFilter(doc: DocumentRecord): Filter<DocumentRecord> {
+    return {
+      docId: doc.docId,
+      deleted: false,
+      searchState: { $ne: 'replaced' },
+      processingState: doc.processingState,
+      latestVersion: doc.latestVersion,
+      updatedAt: doc.updatedAt,
+      // ★ 빠진 필드는 null 조건이 맞춘다 (마이그레이션 없음)
+      queuedVersion: doc.queuedVersion ?? null,
+    };
+  }
+
   /**
-   * 새 버전 번호를 선점한다. 조건부 갱신 하나로 처리 상태와 마지막 버전을 바꾼다.
+   * 새 버전 번호를 선점한다. 조건부 갱신 하나로 처리 상태·마지막 버전·대기열을 바꾼다.
    * ★ 성공하면 선점 표시를 잡은 채 돌려준다. 호출자가 endClaim으로 푼다
    */
   private async claimNewVersion(
     doc: DocumentRecord,
+    kind: ChangeKind,
     to: ProcessingState,
+    queueNext: boolean,
     extraSet: DocumentUpdate,
   ): Promise<string> {
     const next = nextVersion(doc.latestVersion);
-    // ★ 조건부 갱신 전에 표시한다 — 기동 처리가 쓰기 전의 선점을 되돌리지 않게 한다
+    // ★ 조건부 갱신 전에 표시한다 — 기동 처리와 예약 색인이 쓰기 전의 선점을 건드리지 않게 한다
     this.lifecycle.beginClaim(doc.docId, next);
     try {
-      const ok = await this.repo.updateDocument(
-        {
-          docId: doc.docId,
-          deleted: false,
-          searchState: { $ne: 'replaced' },
-          processingState: { $in: [...EDITABLE_STATES] },
-          latestVersion: doc.latestVersion,
-          updatedAt: doc.updatedAt,
-        },
-        { processingState: to, latestVersion: next, ...extraSet },
-      );
-      if (!ok) throw await this.lockedOrNotFound(doc.docId);
+      // ★ 이전 버전을 대기열에서 빼고 새 버전을 넣는 일을 같은 갱신에서 한다 (REQ-BE-1.10.2, 1.10.4)
+      const ok = await this.repo.updateDocument(this.changeFilter(doc), {
+        processingState: to,
+        latestVersion: next,
+        queuedVersion: queueNext ? next : null,
+        ...extraSet,
+      });
+      if (!ok) throw await this.lockedOrNotFound(doc.docId, kind);
     } catch (error) {
       this.lifecycle.endClaim(doc.docId, next);
       throw error;
@@ -171,10 +202,18 @@ export class DocumentsService implements OnModuleInit {
   ): Promise<void> {
     try {
       const reverted = await this.repo.updateDocument(
-        { docId: doc.docId, latestVersion: next, processingState: claimed },
+        {
+          docId: doc.docId,
+          deleted: false,
+          searchState: { $ne: 'replaced' },
+          latestVersion: next,
+          processingState: claimed,
+        },
         {
           processingState: doc.processingState,
           latestVersion: doc.latestVersion,
+          // ★ 대기열을 요청 전과 같게 되돌린다 (REQ-BE-1.10.4)
+          queuedVersion: doc.queuedVersion ?? null,
           updatedAt: doc.updatedAt,
           name: doc.name,
           edition: doc.edition,
@@ -183,9 +222,10 @@ export class DocumentsService implements OnModuleInit {
         },
       );
       if (!reverted) {
-        // ★ 그사이 교체되면 처리 상태가 failed로 바뀌어 위 조건이 맞지 않는다. 마지막 버전만 되돌린다 — 처리·검색 상태는 교체 규칙대로 둔다
+        // ★ 그사이 교체·삭제되면 위 조건이 맞지 않는다. 마지막 버전만 되돌린다 —
+        //   처리·검색 상태와 대기열은 교체·삭제 규칙대로 둔다. 교체·삭제가 비운 대기열을 되살리지 않는다
         await this.repo.updateDocument(
-          { docId: doc.docId, latestVersion: next, searchState: 'replaced' },
+          { docId: doc.docId, latestVersion: next },
           { latestVersion: doc.latestVersion },
         );
       }
@@ -223,7 +263,7 @@ export class DocumentsService implements OnModuleInit {
     }
     // ★ 모두 성공한 뒤에만 처리를 시작한다. 응답 뒤에 돈다 (REQ-BE-1.1.9)
     for (const docId of docIds) {
-      this.lifecycle.startProcessing(docId, '1', { startAt: 'hints', force: false });
+      this.lifecycle.startProcessing(docId, '1');
     }
     return { documents: created.map((c) => c.view) };
   }
@@ -243,6 +283,7 @@ export class DocumentsService implements OnModuleInit {
       originalMarkdown: input.markdown,
       indexingMarkdown: prepared.indexingMarkdown,
       jobId: null,
+      requestSeq: 0,
       result: null,
       failure: null,
     });
@@ -254,6 +295,7 @@ export class DocumentsService implements OnModuleInit {
       editionEnteredAt: now,
       searchState: 'not_searchable',
       processingState: 'uploaded',
+      queuedVersion: null,
       latestVersion: '1',
       searchableVersion: null,
       deleted: false,
@@ -350,11 +392,14 @@ export class DocumentsService implements OnModuleInit {
     );
     const editionRows = await this.repo.findEditionRows([...new Set(pageDocs.map((d) => d.name))]);
 
+    // ★ 요청마다 한 번 계산해 모든 항목에 넘긴다 (REQ-BE-1.3.9)
+    const nextIndexAt = this.nextIndexAt();
     const items = pageDocs.map((doc) =>
       toSummary(doc, {
         siblings: siblingEditions(doc, editionRows),
         stage: stages.get(doc.docId) ?? null,
         failureMessage: failureMessages.get(doc.docId) ?? null,
+        nextIndexAt,
       }),
     );
     return toPage(items, total, query);
@@ -434,7 +479,7 @@ export class DocumentsService implements OnModuleInit {
         : null;
     const siblings = siblingEditions(doc, await this.repo.findEditionRows([doc.name]));
     const assets = await this.assets.listViews(docId, version);
-    return toDetail(doc, record, { siblings, stage, assets });
+    return toDetail(doc, record, { siblings, stage, assets, nextIndexAt: this.nextIndexAt() });
   }
 
   /** 마지막 원본 MD와 이미지 주소를 준다. */
@@ -488,7 +533,8 @@ export class DocumentsService implements OnModuleInit {
   /** 이름·판 정보·요약·캡션을 고친다. */
   async edit(docId: string, body: EditDocumentDto): Promise<DocumentDetailView> {
     const doc = await this.activeDocument(docId);
-    this.assertEditable(doc);
+    this.assertAccepts(doc, 'edit');
+    await this.assertLatestRecord(doc);
 
     const newName = body.name?.trim();
     const nameChanged = newName !== undefined && newName !== doc.name;
@@ -543,50 +589,43 @@ export class DocumentsService implements OnModuleInit {
     };
 
     if (hintChanges.size > 0) {
-      const next = await this.claimNewVersion(doc, 'queued', set);
+      const next = await this.claimNewVersion(doc, 'edit', 'queued', true, set);
       try {
-        const prev = await this.repo.findVersion(docId, doc.latestVersion);
-        if (prev === null) throw new Error('version record missing');
-        await this.assets.inheritVersion(docId, doc.latestVersion, next, hintChanges);
-        await this.repo.replaceVersion({
-          docId,
-          version: next,
-          origin: 'hints',
-          fileName: prev.fileName,
-          originalMarkdown: prev.originalMarkdown,
-          indexingMarkdown: prev.indexingMarkdown,
-          jobId: null,
-          result: null,
-          failure: null,
-        });
-      } catch (error) {
-        await this.rollbackClaim(doc, next, 'queued');
-        await this.lifecycle.recheckAfterVersionWrite(docId);
-        throw error;
+        try {
+          const prev = await this.repo.findVersion(docId, doc.latestVersion);
+          if (prev === null) throw new Error('version record missing');
+          await this.assets.inheritVersion(docId, doc.latestVersion, next, hintChanges);
+          await this.repo.replaceVersion({
+            docId,
+            version: next,
+            origin: 'hints',
+            fileName: prev.fileName,
+            originalMarkdown: prev.originalMarkdown,
+            indexingMarkdown: prev.indexingMarkdown,
+            jobId: null,
+            requestSeq: 0,
+            result: null,
+            failure: null,
+          });
+        } catch (error) {
+          await this.rollbackClaim(doc, next, 'queued');
+          await this.lifecycle.recheckAfterVersionWrite(docId);
+          throw error;
+        }
+        // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록을 건너뛴다 —
+        //   교체가 남긴 실패 기록 뒤에 선점 기록이 남아 순서가 뒤집히지 않게 한다
+        const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
+        await this.logs.record(editLog);
+        // ★ 색인 요청은 하지 않는다. 대기열에 넣기까지만 한다 (REQ-BE-1.5.4)
+        if (lost === null) await this.lifecycle.recordStateChange(doc, 'queued');
       } finally {
-        // ★ 롤백·recheck가 끝난 뒤에 푼다
+        // ★ 롤백·recheck·상태 기록이 끝난 뒤에 푼다 — 그 전에 예약 색인이 이 문서를 요청하지 않게 한다
         this.lifecycle.endClaim(docId, next);
       }
-      // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록·처리 시작을 건너뛴다 —
-      //   교체가 남긴 실패 기록 뒤에 선점 기록이 남아 순서가 뒤집히지 않게 한다
-      const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
-      await this.logs.record(editLog);
-      if (lost === null) {
-        await this.lifecycle.recordStateChange(doc, 'queued');
-        this.lifecycle.startProcessing(docId, next, { startAt: 'index', force: false });
-      }
     } else {
-      const ok = await this.repo.updateDocument(
-        {
-          docId,
-          deleted: false,
-          searchState: { $ne: 'replaced' },
-          processingState: { $in: [...EDITABLE_STATES] },
-          updatedAt: doc.updatedAt,
-        },
-        set,
-      );
-      if (!ok) throw await this.lockedOrNotFound(docId);
+      // ★ 이름·판만 바뀌면 대기열은 건드리지 않는다 (REQ-BE-1.5.2)
+      const ok = await this.repo.updateDocument(this.changeFilter(doc), set);
+      if (!ok) throw await this.lockedOrNotFound(docId, 'edit');
       await this.logs.record(editLog);
     }
 
@@ -604,11 +643,15 @@ export class DocumentsService implements OnModuleInit {
     files: readonly UploadFile[] | undefined,
   ): Promise<UploadedDocumentView> {
     const doc = await this.activeDocument(docId);
-    this.assertEditable(doc);
+    this.assertAccepts(doc, 'content');
+    await this.assertLatestRecord(doc);
     const classified = classifyUpload(files, this.limits, 'content');
     const md = classified.markdowns[0];
 
-    const next = await this.claimNewVersion(doc, 'uploaded', { updatedAt: this.clock.now() });
+    // ★ 대기열의 이전 버전은 같은 갱신에서 뺀다 (REQ-BE-1.10.4)
+    const next = await this.claimNewVersion(doc, 'content', 'uploaded', false, {
+      updatedAt: this.clock.now(),
+    });
     let unmatched: string[];
     try {
       const prepared = await this.assets.prepareVersion(
@@ -626,6 +669,7 @@ export class DocumentsService implements OnModuleInit {
         originalMarkdown: md.markdown,
         indexingMarkdown: prepared.indexingMarkdown,
         jobId: null,
+        requestSeq: 0,
         result: null,
         failure: null,
       });
@@ -649,7 +693,7 @@ export class DocumentsService implements OnModuleInit {
     if (lost === null) {
       await this.lifecycle.recordStateChange(doc, 'uploaded');
       // ★ 검색 상태·searchableVersion은 건드리지 않는다 — 이전 버전이 계속 검색된다 (REQ-BE-1.6.2)
-      this.lifecycle.startProcessing(docId, next, { startAt: 'hints', force: false });
+      this.lifecycle.startProcessing(docId, next);
     }
     return {
       doc_id: docId,
@@ -659,60 +703,94 @@ export class DocumentsService implements OnModuleInit {
     };
   }
 
+  /** 실패 문서를 색인 대기로 바꾼다. */
+  async requeue(docId: string): Promise<void> {
+    const doc = await this.activeDocument(docId);
+    this.assertAccepts(doc, 'queue');
+    const ver = await this.repo.findVersion(docId, doc.latestVersion);
+    if (ver === null) throw new DocumentLockedError();
+    const remembered = ver.failure;
+    // ★ 세 단계 순서를 바꾸지 않는다 (REQ-BE-1.10.5)
+    // 1단계: 작업 ID를 비우고 requestSeq를 늘린다 — 진행 중인 예약 색인 결과가 이 새 요청을 덮지 못한다
+    await this.repo.requeueVersion(docId, doc.latestVersion);
+    // 2단계: 처리 상태와 대기열을 갱신 하나로 바꾼다. 어긋나면 실패다 (REQ-BE-1.10.6)
+    const ok = await this.repo.updateDocument(
+      {
+        docId,
+        deleted: false,
+        searchState: { $ne: 'replaced' },
+        processingState: 'failed',
+        latestVersion: doc.latestVersion,
+      },
+      { processingState: 'queued', queuedVersion: doc.latestVersion },
+    );
+    if (!ok) throw await this.lockedOrNotFound(docId, 'queue');
+    await this.lifecycle.recordStateChange(doc, 'queued');
+    // 3단계: 기억한 값과 같은 실패 사유만 비운다
+    if (remembered !== null) {
+      await this.lifecycle.clearFailureIfSame(docId, doc.latestVersion, remembered);
+    }
+  }
+
   /** 같은 내용의 새 버전으로 강제 재색인한다. */
   async reindex(docId: string): Promise<void> {
     const doc = await this.activeDocument(docId);
-    this.assertEditable(doc);
+    this.assertAccepts(doc, 'reindex');
+    await this.assertLatestRecord(doc);
     // ★ updatedAt을 바꾸지 않는다 — 내용 변경·편집이 아니다
-    const next = await this.claimNewVersion(doc, 'queued', {});
-    let count: number;
+    const next = await this.claimNewVersion(doc, 'reindex', 'queued', true, {});
     try {
-      const prev = await this.repo.findVersion(docId, doc.latestVersion);
-      if (prev === null) throw new Error('version record missing');
-      await this.assets.inheritVersion(docId, doc.latestVersion, next, new Map());
-      await this.repo.replaceVersion({
-        docId,
-        version: next,
-        origin: 'reindex',
-        fileName: prev.fileName,
-        originalMarkdown: prev.originalMarkdown,
-        indexingMarkdown: prev.indexingMarkdown,
-        jobId: null,
-        result: null,
-        failure: null,
-      });
-      count = await this.assets.markTemporaryForRegeneration(docId, next);
-    } catch (error) {
-      await this.rollbackClaim(doc, next, 'queued');
-      await this.lifecycle.recheckAfterVersionWrite(docId);
-      throw error;
+      let count: number;
+      try {
+        const prev = await this.repo.findVersion(docId, doc.latestVersion);
+        if (prev === null) throw new Error('version record missing');
+        await this.assets.inheritVersion(docId, doc.latestVersion, next, new Map());
+        await this.repo.replaceVersion({
+          docId,
+          version: next,
+          origin: 'reindex',
+          fileName: prev.fileName,
+          originalMarkdown: prev.originalMarkdown,
+          indexingMarkdown: prev.indexingMarkdown,
+          jobId: null,
+          requestSeq: 0,
+          result: null,
+          failure: null,
+        });
+        count = await this.assets.markTemporaryForRegeneration(docId, next);
+      } catch (error) {
+        await this.rollbackClaim(doc, next, 'queued');
+        await this.lifecycle.recheckAfterVersionWrite(docId);
+        throw error;
+      }
+      // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록·처리 시작을 건너뛴다
+      const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
+      if (lost !== null) return;
+
+      if (count > 0) {
+        // ★ 임시 설명이 있으면 다시 만든다. 대기열에서 빼고 captioning으로 바꾼다. 기록에는 최종 상태만 남긴다 (D6)
+        const ok = await this.repo.updateDocument(
+          {
+            docId,
+            deleted: false,
+            searchState: { $ne: 'replaced' },
+            latestVersion: next,
+            processingState: 'queued',
+            queuedVersion: next,
+          },
+          { processingState: 'captioning', queuedVersion: null },
+        );
+        if (!ok) return;
+        await this.lifecycle.recordStateChange(doc, 'captioning');
+        this.lifecycle.startProcessing(docId, next);
+        return;
+      }
+      // 대기열에는 선점 때 이미 들어 있다. 색인 요청은 예약 색인이 force로 한다
+      await this.lifecycle.recordStateChange(doc, 'queued');
     } finally {
-      // ★ 롤백·recheck가 끝난 뒤에 푼다
+      // ★ 위가 끝난 뒤에 푼다 — 그 전에 예약 색인이 임시 설명이 남은 버전을 요청하지 않게 한다
       this.lifecycle.endClaim(docId, next);
     }
-    // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록·처리 시작을 건너뛴다
-    const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
-    if (lost !== null) return;
-
-    if (count > 0) {
-      // ★ 임시 설명이 있으면 다시 만든다. 기록에는 최종 상태만 남긴다 (D6)
-      const ok = await this.repo.updateDocument(
-        {
-          docId,
-          deleted: false,
-          searchState: { $ne: 'replaced' },
-          latestVersion: next,
-          processingState: 'queued',
-        },
-        { processingState: 'captioning' },
-      );
-      if (!ok) return;
-      await this.lifecycle.recordStateChange(doc, 'captioning');
-      this.lifecycle.startProcessing(docId, next, { startAt: 'hints', force: true });
-      return;
-    }
-    await this.lifecycle.recordStateChange(doc, 'queued');
-    this.lifecycle.startProcessing(docId, next, { startAt: 'index', force: true });
   }
 
   /** 문서를 삭제됨으로 표시하고 정리를 시작한다. */
@@ -720,7 +798,7 @@ export class DocumentsService implements OnModuleInit {
     const doc = await this.activeDocument(docId);
     const ok = await this.repo.updateDocument(
       { docId, deleted: false },
-      { deleted: true, 'pendingRag.deleteChunks': true },
+      { deleted: true, queuedVersion: null, 'pendingRag.deleteChunks': true },
     );
     if (!ok) throw new DocumentNotFoundError();
     await this.logs.record({

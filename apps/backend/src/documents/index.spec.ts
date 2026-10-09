@@ -86,7 +86,7 @@ describe('REQ-BE-7.1.1', () => {
     };
   }
 
-  it('T-SURF-5 컨트롤러는 11개 라우트를 명세의 경로·메서드·상태 코드로 노출한다', () => {
+  it('T-SURF-5 컨트롤러는 12개 라우트를 명세의 경로·메서드·상태 코드로 노출한다', () => {
     const expected: Record<string, [string, RequestMethod, number | undefined]> = {
       upload: ['documents', RequestMethod.POST, 201],
       list: ['documents', RequestMethod.GET, undefined],
@@ -98,9 +98,10 @@ describe('REQ-BE-7.1.1', () => {
       edit: ['documents/:doc_id', RequestMethod.PATCH, undefined],
       uploadContents: ['documents/:doc_id/contents', RequestMethod.POST, 202],
       reindex: ['documents/:doc_id/reindex', RequestMethod.POST, 202],
+      requeue: ['documents/:doc_id/queue', RequestMethod.POST, 202],
       remove: ['documents/:doc_id', RequestMethod.DELETE, 204],
     };
-    expect(Object.keys(expected)).toHaveLength(11);
+    expect(Object.keys(expected)).toHaveLength(12);
     for (const [name, [path, method, code]] of Object.entries(expected)) {
       expect([name, route(name)]).toEqual([name, { path, method, code }]);
     }

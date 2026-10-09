@@ -4,12 +4,12 @@ import { PinoLogger } from 'nestjs-pino';
 import { AssetsService } from '../../assets';
 import type { ProcessingState, SearchState } from '../../common';
 import { INDEX_JOB_STATE_CHANGED, IndexingService } from '../../indexing';
-import type { IndexJobStateChangedEvent } from '../../indexing';
+import type { IndexJobStateChangedEvent, IndexRequestOutcome } from '../../indexing';
 import { LogsService } from '../../logs';
 import { DocumentTasks } from './document-tasks';
 import {
   canApplyEvent,
-  LOCKED_STATES,
+  IN_PROGRESS_STATES,
   newerSearchableVersion,
   targetStateOf,
 } from '../helpers/document-state';
@@ -17,7 +17,6 @@ import { DocumentsCrudService } from './documents-crud.service';
 import type { DocumentUpdate, VersionCondition, VersionUpdate } from './documents-crud.service';
 import {
   RAG_REJECTED_FAILURES,
-  RAG_UNREACHABLE_FAILURE,
   REPLACED_FAILURE,
   UNKNOWN_FAILURE,
 } from '../interfaces/documents.types';
@@ -76,10 +75,8 @@ export class DocumentLifecycle {
    * ★ 기동 처리가 쓰기 전의 선점을 이전 버전으로 되돌리지 않게 한다. 같은 키를 두 요청이 잡을 수 있어 건수로 센다
    */
   private readonly claiming = new Map<string, number>();
-  /** 기동 처리의 색인 확인(requestIndexIfIdle)이 잡고 있는 키다. */
-  private readonly idleChecking = new Set<string>();
-  /** 기동 처리의 색인 확인 중에 들어와 미뤄 둔 처리 시작 요청이다. 키는 active와 같다. */
-  private readonly pendingStart = new Map<string, { startAt: 'hints' | 'index'; force: boolean }>();
+  /** 이 프로세스에서 선점을 진행 중인 문서별 건수다. 키는 docId다. */
+  private readonly claimingDocs = new Map<string, number>();
 
   constructor(
     @Inject(DocumentsCrudService) private readonly repo: DocumentsCrudService,
@@ -129,7 +126,6 @@ export class DocumentLifecycle {
     version: string,
     from: readonly ProcessingState[],
     to: ProcessingState,
-    failure?: VersionFailure,
   ): Promise<boolean> {
     const doc = await this.repo.findDocument(docId);
     if (
@@ -141,9 +137,8 @@ export class DocumentLifecycle {
     ) {
       return false;
     }
-    // ★ 상태보다 먼저 사유를 쓰고 쓰기 전 값을 보관한다 — 갱신이 어긋나면 되돌린다
-    const before = failure ? await this.repo.findVersion(docId, version) : null;
-    if (failure) await this.repo.updateVersion(docId, version, { failure: { ...failure } });
+    // ★ queued 밖으로 바꾸는 갱신은 같은 갱신에서 대기열도 비운다 (REQ-BE-1.10.7). 대기열에 없으면 쓸 것이 없다
+    const leavesQueue = to !== 'queued' && (doc.queuedVersion ?? null) !== null;
     const ok = await this.repo.updateDocument(
       {
         docId,
@@ -152,21 +147,10 @@ export class DocumentLifecycle {
         latestVersion: version,
         processingState: doc.processingState,
       },
-      { processingState: to },
+      leavesQueue ? { processingState: to, queuedVersion: null } : { processingState: to },
     );
-    if (!ok) {
-      if (failure) {
-        // ★ 내가 쓴 사유가 그대로일 때만 되돌린다 — 먼저 성공한 쪽의 값을 지우지 않는다
-        await this.repo.updateVersion(
-          docId,
-          version,
-          { failure: before?.failure ?? null },
-          writtenCondition({ failure }),
-        );
-      }
-      return false;
-    }
-    await this.recordStateChange(doc, to, failure?.code);
+    if (!ok) return false;
+    await this.recordStateChange(doc, to);
     return true;
   }
 
@@ -228,6 +212,7 @@ export class DocumentLifecycle {
   beginClaim(docId: string, version: string): void {
     const key = activeKey(docId, version);
     this.claiming.set(key, (this.claiming.get(key) ?? 0) + 1);
+    this.claimingDocs.set(docId, (this.claimingDocs.get(docId) ?? 0) + 1);
   }
 
   /** 선점 표시 하나를 푼다. */
@@ -236,6 +221,9 @@ export class DocumentLifecycle {
     const count = (this.claiming.get(key) ?? 0) - 1;
     if (count > 0) this.claiming.set(key, count);
     else this.claiming.delete(key);
+    const docCount = (this.claimingDocs.get(docId) ?? 0) - 1;
+    if (docCount > 0) this.claimingDocs.set(docId, docCount);
+    else this.claimingDocs.delete(docId);
   }
 
   /** 이 프로세스에서 진행 중인 선점인가를 돌려준다. */
@@ -243,189 +231,222 @@ export class DocumentLifecycle {
     return this.claiming.has(activeKey(docId, version));
   }
 
+  /** 이 프로세스에서 그 문서의 선점을 진행 중인가를 돌려준다. */
+  isClaimingDoc(docId: string): boolean {
+    return this.claimingDocs.has(docId);
+  }
+
+  /** 그 버전의 실패 사유가 기억한 값과 같을 때만 비운다. */
+  async clearFailureIfSame(docId: string, version: string, failure: VersionFailure): Promise<void> {
+    await this.repo.updateVersion(docId, version, { failure: null }, writtenCondition({ failure }));
+  }
+
   /**
    * 버전 처리를 백그라운드로 시작한다. 같은 버전이 이미 처리 중이면 아무것도 하지 않는다.
    * ★ 중복으로 건너뛴 경우는 로그를 남기지 않는다 — 처리 중인 쪽이 결과를 남긴다
    */
-  startProcessing(
-    docId: string,
-    version: string,
-    opts: { startAt: 'hints' | 'index'; force: boolean },
-  ): void {
+  startProcessing(docId: string, version: string): void {
     // ★ 종료 중이면 tasks.run이 작업을 받지 않아 키가 풀리지 않는다 — 키를 잡지 않고 끝낸다
     if (this.tasks.stopping) return;
     const key = activeKey(docId, version);
-    if (this.active.has(key)) {
-      // ★ 기동 처리의 색인 확인이 키를 잡고 있으면 버리지 않고 미뤄 둔다 — 버리면 captioning에 갇힌다
-      if (this.idleChecking.has(key)) this.pendingStart.set(key, opts);
-      return;
-    }
+    if (this.active.has(key)) return;
     // ★ 호출 즉시(동기로) 잡는다 — setImmediate로 작업이 시작되기 전의 틈도 막는다
     this.active.add(key);
-    this.tasks.run(opts.startAt === 'hints' ? 'process' : 'index', docId, async () => {
+    this.tasks.run('process', docId, async () => {
       try {
-        await this.processVersion(docId, version, opts);
+        await this.processVersion(docId, version);
       } finally {
         this.active.delete(key);
       }
     });
   }
 
-  /** 기동 처리용이다. 처리 중이 아니고 아직 작업 ID가 없는 색인 대기 버전이면 색인을 요청한다. 요청했으면 참이다. */
-  async requestIndexIfIdle(docId: string, version: string, force: boolean): Promise<boolean> {
-    const key = activeKey(docId, version);
-    if (this.active.has(key)) return false;
-    this.active.add(key);
-    this.idleChecking.add(key);
-    let requested = false;
-    try {
-      const doc = await this.repo.findDocument(docId);
-      const ver = await this.repo.findVersion(docId, version);
-      // ★ 분류 뒤 요청 처리가 먼저 끝냈으면(작업 ID가 생겼거나 상태가 바뀌었으면) 다시 보내지 않는다
-      if (
-        doc === null ||
-        ver === null ||
-        ver.jobId !== null ||
-        doc.latestVersion !== version ||
-        doc.processingState !== 'queued'
-      ) {
-        return false;
-      }
-      // ★ queued에서만 바꾼다 — 그사이 재색인이 captioning으로 바꿨으면 임시 설명을 다시 만들어야 한다
-      // ★ 요청이 돌아온 직후 표시한다 — 결과 반영(작업 ID 저장)이 던져도 미뤄 둔 색인부터의 시작이 같은 작업을 다시 요청하지 않는다
-      await this.requestIndexFor(docId, version, force, ['queued'], () => {
-        requested = true;
-      });
-      return requested;
-    } finally {
-      this.active.delete(key);
-      this.idleChecking.delete(key);
-      const pending = this.pendingStart.get(key);
-      this.pendingStart.delete(key);
-      // ★ 미뤄 둔 시작을 잇는다. 색인을 이미 요청했으면 색인부터의 시작은 중복이라 버린다
-      if (pending && (pending.startAt === 'hints' || !requested)) {
-        this.startProcessing(docId, version, pending);
-      }
-    }
-  }
-
-  /** 버전 하나를 표·이미지 처리부터 또는 색인 요청부터 처리한다. */
-  async processVersion(
-    docId: string,
-    version: string,
-    opts: { startAt: 'hints' | 'index'; force: boolean },
-  ): Promise<void> {
-    if (opts.startAt === 'hints') {
-      // ★ REQ-BE-1.9.2: 처리 상태는 captioning이 된 뒤에 표·이미지를 처리한다
-      if (!(await this.transition(docId, version, ['uploaded', 'captioning'], 'captioning'))) {
-        await this.logStopped(docId, version);
-        return;
-      }
-      const doc = await this.repo.findDocument(docId);
-      if (doc === null) return;
-      const result = await this.assets.generateHints(docId, version, {
-        name: doc.name,
-        editionLabel: doc.edition?.label ?? null,
-        shouldContinue: async () => (await this.stopReason(docId, version)) === null,
-      });
-      if (result.stopped) {
-        await this.logStopped(docId, version);
-        return;
-      }
-    }
-    await this.requestIndexFor(docId, version, opts.force);
-  }
-
-  /** 색인 대기로 바꾸고 색인을 요청해 결과를 반영한다. 색인을 요청했으면 참이고, 요청이 돌아온 직후 onRequested를 부른다. */
-  async requestIndexFor(
-    docId: string,
-    version: string,
-    force: boolean,
-    from: readonly ProcessingState[] = ['captioning', 'queued'],
-    onRequested?: () => void,
-  ): Promise<boolean> {
-    if (this.tasks.stopping) {
+  /** 버전 하나를 표·이미지 처리부터 색인 대기열에 넣기까지 처리한다. */
+  async processVersion(docId: string, version: string): Promise<void> {
+    // ★ REQ-BE-1.9.2: 처리 상태는 captioning이 된 뒤에 표·이미지를 처리한다
+    if (!(await this.transition(docId, version, ['uploaded', 'captioning'], 'captioning'))) {
       await this.logStopped(docId, version);
-      return false;
-    }
-    // ★ 색인 요청보다 먼저 queued를 쓴다 — 기동 처리가 작업 ID 없는 색인 대기를 찾는다
-    if (!(await this.transition(docId, version, from, 'queued'))) {
-      await this.logStopped(docId, version);
-      return false;
+      return;
     }
     const doc = await this.repo.findDocument(docId);
+    if (doc === null) return;
+    const result = await this.assets.generateHints(docId, version, {
+      name: doc.name,
+      editionLabel: doc.edition?.label ?? null,
+      shouldContinue: async () => (await this.stopReason(docId, version)) === null,
+    });
+    if (result.stopped) {
+      await this.logStopped(docId, version);
+      return;
+    }
+    await this.markReady(docId, version);
+  }
+
+  /** 표·이미지 처리를 마친 버전을 색인 대기로 바꾸고 같은 갱신에서 대기열에 넣는다. */
+  private async markReady(docId: string, version: string): Promise<void> {
+    const doc = await this.repo.findDocument(docId);
+    // ★ RAG Server를 부르지 않는다. 색인 요청은 예약 색인이 한다 (REQ-BE-1.9.3, REQ-BE-1.10.2)
+    if (
+      doc === null ||
+      doc.deleted ||
+      doc.searchState === 'replaced' ||
+      doc.latestVersion !== version ||
+      doc.processingState !== 'captioning'
+    ) {
+      await this.logStopped(docId, version);
+      return;
+    }
+    // ★ 처리 상태와 대기열을 두 갱신으로 나누지 않는다
+    const ok = await this.repo.updateDocument(
+      {
+        docId,
+        deleted: false,
+        searchState: doc.searchState,
+        latestVersion: version,
+        processingState: 'captioning',
+      },
+      { processingState: 'queued', queuedVersion: version },
+    );
+    if (!ok) {
+      await this.logStopped(docId, version);
+      return;
+    }
+    await this.recordStateChange(doc, 'queued');
+  }
+
+  /** 대기열의 버전마다 색인을 요청하고 결과를 반영한다. */
+  async runScheduledIndex(): Promise<{ requested: number; unreachable: number }> {
+    const targets = await this.repo.findQueued();
+    let requested = 0;
+    let unreachable = 0;
+    for (const doc of targets) {
+      // ★ 종료 중이면 남은 문서는 대기열에 남는다
+      if (this.tasks.stopping) break;
+      try {
+        const outcome = await this.requestQueued(doc.docId);
+        if (outcome !== 'skipped') requested += 1;
+        if (outcome === 'unreachable') unreachable += 1;
+      } catch (error) {
+        // ★ 한 문서의 실패가 다른 문서를 막지 않는다. 오류 메시지는 남기지 않는다
+        this.logger.warn(
+          {
+            task: 'scheduled_index',
+            docId: doc.docId,
+            errorName: error instanceof Error ? error.name : 'UnknownError',
+          },
+          'documents.task_failed',
+        );
+      }
+    }
+    return { requested, unreachable };
+  }
+
+  /** 대기열의 문서 하나를 색인 요청하고 결과를 반영한다. */
+  private async requestQueued(docId: string): Promise<'skipped' | 'requested' | 'unreachable'> {
+    // 선점 중인 문서는 이번 일정에서 건너뛰고 대기열에 둔다
+    if (this.isClaimingDoc(docId)) return 'skipped';
+    // ★ 요청 직전에 문서를 다시 읽는다
+    const cur = await this.repo.findDocument(docId);
+    if (
+      cur === null ||
+      cur.deleted ||
+      cur.searchState === 'replaced' ||
+      cur.queuedVersion === null ||
+      cur.queuedVersion === undefined ||
+      cur.queuedVersion !== cur.latestVersion ||
+      cur.processingState !== 'queued'
+    ) {
+      return 'skipped';
+    }
+    const version = cur.queuedVersion;
     const ver = await this.repo.findVersion(docId, version);
+    // 선점 레코드를 쓰기 전이다 — 기동 처리가 되돌린다
+    if (ver === null) return 'skipped';
     // ★ 오류 메시지에 문서 내용을 넣지 않는다
-    if (doc === null || ver === null || ver.indexingMarkdown === null) {
-      throw new Error('version record missing');
-    }
-    // ★ 같은 버전을 다시 요청한다 — 새 작업 ID를 쓰기 전까지 작업 ID 없는 색인 대기로 둔다.
-    //   저장이 실패해도 기동 처리가 다시 요청하고 새 작업 이벤트가 반영된다 (REQ-BE-1.9.6, REQ-BE-1.9.10)
-    if (ver.jobId !== null) {
-      await this.repo.updateVersion(docId, version, { jobId: null }, { jobId: ver.jobId });
-    }
+    if (ver.indexingMarkdown === null) throw new Error('version record missing');
+    // ★ 이 값이 결과를 쓰는 조건이다. 빠진 필드는 null 조건이 맞춘다
+    const seq = ver.requestSeq ?? null;
     const hints = await this.assets.hintsFor(docId, version);
+    // ★ 위 await 동안 선점이 시작됐을 수 있다. 요청 직전에 한 번 더 본다
+    if (this.isClaimingDoc(docId)) return 'skipped';
     const outcome = await this.indexing.requestIndex({
       docId,
       version,
       indexingMarkdown: ver.indexingMarkdown,
       hints,
-      name: doc.name,
-      edition: doc.edition
-        ? { label: doc.edition.label, editionDate: doc.edition.editionDate }
+      name: cur.name,
+      edition: cur.edition
+        ? { label: cur.edition.label, editionDate: cur.edition.editionDate }
         : null,
-      force,
+      force: ver.origin === 'reindex',
     });
-    // ★ 결과 반영(작업 ID 저장 등)보다 먼저 알린다
-    onRequested?.();
 
-    if (outcome.kind === 'accepted') {
-      await this.repo.updateVersion(docId, version, { jobId: outcome.jobId });
-    } else if (outcome.kind === 'reused') {
-      // ★ 같은 내용의 이전 버전 결과를 복사한다 (D9)
-      const searchable = doc.searchableVersion
-        ? await this.repo.findVersion(docId, doc.searchableVersion)
-        : null;
-      const result = searchable?.result ? { ...searchable.result } : null;
-      // ★ 처리 상태가 아직 queued일 때만 반영한다 (REQ-BE-1.9.4). 어긋나면 되돌린다
-      const cur = await this.repo.findDocument(docId);
-      if (
-        cur !== null &&
-        !cur.deleted &&
-        cur.searchState !== 'replaced' &&
-        cur.latestVersion === version &&
-        cur.processingState === 'queued'
-      ) {
-        const written = { jobId: outcome.jobId, result, failure: null };
-        await this.repo.updateVersion(docId, version, written);
-        if (!(await this.transition(docId, version, ['queued'], 'completed'))) {
-          // ★ 내가 쓴 값이 그대로일 때만 되돌린다. 작업 ID는 요청 전에 비운 값(null)으로 돌린다
-          await this.repo.updateVersion(
-            docId,
-            version,
-            { jobId: null, result: ver.result, failure: ver.failure },
-            writtenCondition(written),
-          );
-        }
-      }
-    } else if (outcome.kind === 'rejected') {
-      // ★ 거부는 다시 보내도 같으므로 재요청하지 않는다 (REQ-BE-1.9.4).
-      //   거부는 청크를 만들지 않으므로 아래의 삭제·교체 재확인(D22)도 필요 없다
-      const failure = { ...RAG_REJECTED_FAILURES[outcome.code] };
-      await this.transition(docId, version, ['queued'], 'failed', failure);
-      return true;
-    } else {
-      await this.transition(docId, version, ['queued'], 'failed', RAG_UNREACHABLE_FAILURE);
-      return true;
+    if (outcome.kind !== 'unreachable') {
+      await this.applyRequestOutcome(cur, version, seq, outcome);
     }
 
-    // ★ 색인 요청 도중 삭제·교체됐으면 청크 삭제를 다시 요청한다 (D22)
+    // ★ 요청 도중 삭제·교체됐으면 청크 삭제를 다시 표시하고 부른다 (REQ-BE-1.8.4)
     const after = await this.repo.findDocument(docId);
     if (after === null || after.deleted || after.searchState === 'replaced') {
       await this.repo.updateDocument({ docId }, { 'pendingRag.deleteChunks': true });
       this.scheduleChunkDeletion(docId);
     }
-    return true;
+    return outcome.kind === 'unreachable' ? 'unreachable' : 'requested';
+  }
+
+  /** 색인 요청 결과를 반영한다. ★ 버전 기록 먼저, 처리 상태 반영 나중이다. 순서를 바꾸지 않는다 */
+  private async applyRequestOutcome(
+    cur: DocumentRecord,
+    version: string,
+    seq: number | null,
+    outcome: Exclude<IndexRequestOutcome, { kind: 'unreachable' }>,
+  ): Promise<void> {
+    const docId = cur.docId;
+    let versionSet: VersionUpdate;
+    let docSet: DocumentUpdate;
+    let toState: ProcessingState | null = null;
+    if (outcome.kind === 'accepted') {
+      versionSet = { jobId: outcome.jobId };
+      docSet = { queuedVersion: null };
+    } else if (outcome.kind === 'reused') {
+      // ★ 같은 내용의 이전 버전 결과를 복사한다 (D9)
+      const searchable = cur.searchableVersion
+        ? await this.repo.findVersion(docId, cur.searchableVersion)
+        : null;
+      versionSet = {
+        jobId: outcome.jobId,
+        result: searchable?.result ? { ...searchable.result } : null,
+        failure: null,
+      };
+      docSet = { processingState: 'completed', queuedVersion: null };
+      toState = 'completed';
+    } else {
+      // ★ 거부는 다시 보내도 같으므로 재요청하지 않는다 (REQ-BE-1.9.4)
+      versionSet = { failure: { ...RAG_REJECTED_FAILURES[outcome.code] } };
+      docSet = { processingState: 'failed', queuedVersion: null };
+      toState = 'failed';
+    }
+    // ★ 그사이 다시 요청 대상으로 돌렸으면(requestSeq 변경) 결과를 버린다 (REQ-BE-1.10.5)
+    if (!(await this.repo.updateVersion(docId, version, versionSet, { requestSeq: seq }))) return;
+    // 조건이 어긋나면(새 버전·삭제·교체·이벤트로 상태 변경) 그대로 둔다. 버전 기록은 되돌리지 않는다
+    const ok = await this.repo.updateDocument(
+      {
+        docId,
+        deleted: false,
+        searchState: { $ne: 'replaced' },
+        latestVersion: version,
+        processingState: 'queued',
+        queuedVersion: version,
+      },
+      docSet,
+    );
+    if (ok && toState !== null) {
+      await this.recordStateChange(
+        cur,
+        toState,
+        outcome.kind === 'rejected' ? RAG_REJECTED_FAILURES[outcome.code].code : undefined,
+      );
+    }
   }
 
   /** IF-BE-1 색인 작업 상태 이벤트를 반영한다. */
@@ -455,14 +476,17 @@ export class DocumentLifecycle {
     // ★ 같은 버전에 작업이 둘 생기면(기동 확인과 재색인이 겹친 경우) 기록된 작업의 이벤트만 반영한다.
     //   작업 ID를 쓰기 전에 도착한 이벤트는 반영한다 (REQ-BE-1.9.6)
     if (ver !== null && ver.jobId !== null && ver.jobId !== event.jobId) return true;
-    const failureCode = doc.processingState === 'failed' ? (ver?.failure?.code ?? null) : null;
-    const changeState = canApplyEvent(doc.processingState, failureCode, target);
+    const changeState = canApplyEvent(doc.processingState, target);
     const searchable = newerSearchableVersion(doc.searchableVersion, event.searchableVersion);
     if (!changeState && searchable === null) return true;
 
     const stateChanged = changeState && target !== doc.processingState;
     const set: DocumentUpdate = {};
-    if (stateChanged) set.processingState = target;
+    if (stateChanged) {
+      set.processingState = target;
+      // ★ queued 밖으로 바꾸는 갱신은 같은 갱신에서 대기열도 비운다 (REQ-BE-1.10.7)
+      if (target !== 'queued') set.queuedVersion = null;
+    }
     if (searchable !== null) {
       set.searchableVersion = searchable;
       set.searchState = 'searchable';
@@ -470,7 +494,7 @@ export class DocumentLifecycle {
 
     // ★ 버전 레코드를 먼저 쓰고 쓰기 전 값(ver)을 보관한다. 상태 갱신 뒤 멈춰도 result·failure가
     //   비지 않는다. 갱신이 어긋나 포기하면 보관한 값으로 되돌린다.
-    //   처리 상태가 그대로여도 failed 이벤트면 실패 사유를 갱신한다 (REQ-BE-1.9.5, RAG_UNREACHABLE 대체)
+    //   실패 문서는 어떤 이벤트로도 처리 상태·결과·실패 사유가 바뀌지 않는다 (REQ-BE-1.9.5)
     let versionSet: VersionUpdate | null = null;
     if (changeState && target === 'completed') {
       versionSet = { result: event.result ? { ...event.result } : null, failure: null };
@@ -568,7 +592,7 @@ export class DocumentLifecycle {
       ) {
         return;
       }
-      const processing = LOCKED_STATES.has(cur.processingState);
+      const processing = IN_PROGRESS_STATES.has(cur.processingState);
       if (processing) {
         await this.repo.updateVersion(cur.docId, cur.latestVersion, {
           failure: { ...REPLACED_FAILURE },
@@ -587,6 +611,8 @@ export class DocumentLifecycle {
           searchState: 'replaced',
           'pendingRag.deleteChunks': true,
           'pendingRag.metadata': false,
+          // ★ 교체되면 대기열에서도 같은 갱신으로 뺀다 (REQ-BE-1.2.8, REQ-BE-1.10.7)
+          queuedVersion: null,
           ...(processing ? { processingState: 'failed' } : {}),
         },
       );

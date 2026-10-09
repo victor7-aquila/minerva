@@ -21,9 +21,9 @@ import {
   RagUnavailableError,
   UnauthorizedError,
   UnsupportedFileError,
+  toIsoUtc,
 } from '../../common';
 import type { DomainError } from '../../common';
-import { toIsoUtc } from '../../../libs/utils';
 import { DomainErrorFilter } from './domain-error.filter';
 import { ERROR_STATUS, INTERNAL_ERROR, NOT_FOUND } from '../interfaces/error-status';
 import { RequestValidationError } from '../helpers/validation';

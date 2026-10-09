@@ -205,7 +205,12 @@ describe('REQ-BE-1.3.3', () => {
 });
 
 describe('REQ-BE-1.3.8', () => {
-  const extra = { siblings: [], stage: 'embedding' as const, failureMessage: 'FM' };
+  const extra = {
+    siblings: [],
+    stage: 'embedding' as const,
+    failureMessage: 'FM',
+    nextIndexAt: null,
+  };
 
   it('T-VIEW-4 failure_message는 실패일 때만, stage는 색인 중일 때만 값이 있다', () => {
     expect(toSummary(docRecord({ processingState: 'failed' }), extra).failure_message).toBe('FM');
@@ -218,7 +223,7 @@ describe('REQ-BE-1.3.8', () => {
 });
 
 describe('REQ-BE-1.4.2', () => {
-  const base = { siblings: [], stage: 'embedding' as const, assets: [] };
+  const base = { siblings: [], stage: 'embedding' as const, assets: [], nextIndexAt: null };
 
   it('T-VIEW-5 상세는 상태에 맞는 결과·사유·단계를 담는다', () => {
     const completed = toDetail(
@@ -265,7 +270,9 @@ describe('REQ-BE-1.6.4', () => {
     'doc_id',
     'edition',
     'failure_message',
+    'in_index_queue',
     'name',
+    'next_index_at',
     'processing_state',
     'search_state',
     'sibling_editions',
@@ -295,8 +302,13 @@ describe('REQ-BE-1.6.4', () => {
   };
 
   it('T-VIEW-6 응답 모양의 키 집합이 API.md와 같고 version 키가 없다', () => {
-    const extra = { siblings: [], stage: null, assets: [asset] };
-    const summary = toSummary(docRecord(), { siblings: [], stage: null, failureMessage: null });
+    const extra = { siblings: [], stage: null, assets: [asset], nextIndexAt: null };
+    const summary = toSummary(docRecord(), {
+      siblings: [],
+      stage: null,
+      failureMessage: null,
+      nextIndexAt: null,
+    });
     const detail = toDetail(docRecord(), versionRecord(), extra);
     const assetView = toAssetView(asset);
     const chunkView = toChunkView(chunk, 'M');
@@ -352,7 +364,84 @@ describe('REQ-BE-1.4.4', () => {
 describe('REQ-BE-8.4.1', () => {
   it('T-VIEW-8 시각은 밀리초 없는 UTC 문자열이다', () => {
     const doc = docRecord({ uploadedAt: new Date('2026-10-04T05:05:31.123Z') });
-    const summary = toSummary(doc, { siblings: [], stage: null, failureMessage: null });
+    const summary = toSummary(doc, {
+      siblings: [],
+      stage: null,
+      failureMessage: null,
+      nextIndexAt: null,
+    });
     expect(summary.uploaded_at).toBe('2026-10-04T05:05:31Z');
+  });
+});
+
+describe('REQ-BE-1.3.9', () => {
+  const NEXT = new Date('2026-10-09T15:00:00Z');
+  const extra = { siblings: [], stage: null, failureMessage: null, nextIndexAt: NEXT };
+  const OTHER_STATES = ['uploaded', 'captioning', 'indexing', 'completed', 'failed'] as const;
+
+  it('T-VIEW-Q1 queued면 in_index_queue는 queuedVersion 유무이고 next_index_at은 다음 예약 시각이다', () => {
+    const inQueue = toSummary(docRecord({ processingState: 'queued', queuedVersion: '1' }), extra);
+    expect(inQueue.in_index_queue).toBe(true);
+    expect(inQueue.next_index_at).toBe('2026-10-09T15:00:00Z');
+    // ★ RAG Server가 접수한 queued는 대기열 밖이다
+    const accepted = toSummary(
+      docRecord({ processingState: 'queued', queuedVersion: null }),
+      extra,
+    );
+    expect(accepted.in_index_queue).toBe(false);
+    expect(accepted.next_index_at).toBe('2026-10-09T15:00:00Z');
+  });
+
+  it('T-VIEW-Q1 queued가 아닌 다섯 상태는 두 필드가 모두 null이다', () => {
+    for (const processingState of OTHER_STATES) {
+      const summary = toSummary(docRecord({ processingState }), extra);
+      expect(summary.in_index_queue).toBeNull();
+      expect(summary.next_index_at).toBeNull();
+    }
+  });
+
+  it('T-VIEW-Q1 nextIndexAt이 null이면 next_index_at은 null이고 in_index_queue는 그대로다', () => {
+    const summary = toSummary(docRecord({ processingState: 'queued', queuedVersion: '1' }), {
+      ...extra,
+      nextIndexAt: null,
+    });
+    expect(summary.next_index_at).toBeNull();
+    expect(summary.in_index_queue).toBe(true);
+  });
+
+  it('T-VIEW-Q1 키 순서는 failure_message 다음 in_index_queue, next_index_at, uploaded_at이다', () => {
+    const keys = Object.keys(toSummary(docRecord(), extra));
+    const at = keys.indexOf('failure_message');
+    expect(keys.slice(at, at + 4)).toEqual([
+      'failure_message',
+      'in_index_queue',
+      'next_index_at',
+      'uploaded_at',
+    ]);
+  });
+});
+
+describe('REQ-BE-1.4.6', () => {
+  const NEXT = new Date('2026-10-09T15:00:00Z');
+  const base = { siblings: [], stage: null, assets: [], nextIndexAt: NEXT };
+
+  it('T-VIEW-Q2 toDetail도 같은 두 필드를 준다', () => {
+    const queued = toDetail(
+      docRecord({ processingState: 'queued', queuedVersion: '1' }),
+      versionRecord({ result: null }),
+      base,
+    );
+    expect(queued.in_index_queue).toBe(true);
+    expect(queued.next_index_at).toBe('2026-10-09T15:00:00Z');
+    const accepted = toDetail(
+      docRecord({ processingState: 'queued', queuedVersion: null }),
+      versionRecord({ result: null }),
+      base,
+    );
+    expect(accepted.in_index_queue).toBe(false);
+    expect(accepted.next_index_at).toBe('2026-10-09T15:00:00Z');
+    const completed = toDetail(docRecord({ processingState: 'completed' }), versionRecord(), base);
+    expect(completed.in_index_queue).toBeNull();
+    expect(completed.next_index_at).toBeNull();
   });
 });
