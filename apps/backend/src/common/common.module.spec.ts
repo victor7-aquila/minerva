@@ -83,6 +83,34 @@ describe('REQ-BE-8.1.1', () => {
     expect(consumer.config.get('PORT', { infer: true })).toBe(4321);
   });
 
+  it('T-MOD-8 INDEX_SCHEDULE_CRON을 안 주면 기본값 0 0 * * *이 ConfigService로 읽힌다', async () => {
+    const ref = await boot({ ...REQUIRED_ENV });
+    const config = ref.get<ConfigService<AppConfig, true>>(ConfigService);
+
+    expect(config.get('INDEX_SCHEDULE_CRON', { infer: true })).toBe('0 0 * * *');
+  });
+
+  it('T-MOD-8b INDEX_SCHEDULE_CRON 환경 변수가 ConfigService로 읽힌다', async () => {
+    const ref = await boot({ ...REQUIRED_ENV, INDEX_SCHEDULE_CRON: '30 6 * * *' });
+    const config = ref.get<ConfigService<AppConfig, true>>(ConfigService);
+
+    expect(config.get('INDEX_SCHEDULE_CRON', { infer: true })).toBe('30 6 * * *');
+  });
+
+  it('T-MOD-9 INDEX_SCHEDULE_CRON 형식이 틀리면 compile()이 실패하고 이유에 키 이름만 있다', async () => {
+    const error: unknown = await boot({
+      ...REQUIRED_ENV,
+      INDEX_SCHEDULE_CRON: '0 0 0 * * *-SENTINEL',
+    }).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain('INDEX_SCHEDULE_CRON');
+    expect(message).not.toContain('SENTINEL');
+  });
+
   it('T-MOD-2 필수 키가 빠지면 기동에 실패하고 이유에 값이 없다', async () => {
     const env: Record<string, string> = { ...REQUIRED_ENV };
     delete env.RAG_EVENTS_TOKEN;

@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import request from 'supertest';
-import { bootAppHarness } from './support/app-harness';
+import { bootAppHarness, runScheduledIndex } from './support/app-harness';
 import type { AppHarness } from './support/app-harness';
 import { docRecord, versionRecord } from './support/documents-fixtures';
 import { startFakeRagServer } from './support/fake-rag-server';
@@ -38,7 +38,9 @@ const SUMMARY_KEYS = [
   'doc_id',
   'edition',
   'failure_message',
+  'in_index_queue',
   'name',
+  'next_index_at',
   'processing_state',
   'search_state',
   'sibling_editions',
@@ -138,6 +140,17 @@ beforeEach(() => {
   fake.setHandler(router);
   chunksBody = { version: null, items: [] };
   deleteDelayMs = undefined;
+});
+
+afterEach(async () => {
+  // ★ 테스트가 남긴 대기열·색인 대기 문서를 deleted: true로 정리한다. 상태는 두고 queuedVersion만 비우면 "대기열 밖 queued"가 쌓여 불변 조건이 깨진다
+  // 삭제된 문서는 목록·예약 색인에서 빠지므로 다음 테스트의 건수·요청에 섞이지 않는다
+  await harness.db
+    .collection('documents')
+    .updateMany(
+      { $or: [{ queuedVersion: { $ne: null } }, { processingState: 'queued' }] },
+      { $set: { deleted: true, queuedVersion: null } },
+    );
 });
 
 afterAll(async () => {
@@ -243,10 +256,31 @@ async function waitIndexRequest(docId: string): Promise<void> {
   );
 }
 
-/** 업로드 → 색인 요청 대기 → 성공 알림 → 완료·검색 가능 확인까지 하고 doc_id를 돌려준다. */
+/** 그 문서가 색인 대기열에 들어갈 때까지 기다린다(queued + in_index_queue). */
+async function waitInQueue(docId: string): Promise<void> {
+  await waitFor(async () => {
+    const body = (await getDoc(docId)).body as {
+      processing_state: string;
+      in_index_queue: unknown;
+    };
+    return body.processing_state === 'queued' && body.in_index_queue === true;
+  });
+}
+
+/**
+ * 대기열에 들어간 문서를 예약 색인으로 요청하게 하고 가짜 RAG에 요청이 올 때까지 기다린다.
+ * ★ 업로드·편집·재색인은 대기열에 넣기까지만 한다 — 색인 요청은 예약 색인(runScheduledIndex)만 한다
+ */
+async function requestIndexNow(docId: string): Promise<void> {
+  await waitInQueue(docId);
+  await runScheduledIndex(harness);
+  await waitIndexRequest(docId);
+}
+
+/** 업로드 → 대기열 → 예약 색인 → 성공 알림 → 완료·검색 가능 확인까지 하고 doc_id를 돌려준다. */
 async function makeCompleted(name: string, edition?: Meta['edition']): Promise<string> {
   const docId = await uploadOne(name, '# 제목\n\n본문', edition);
-  await waitIndexRequest(docId);
+  await requestIndexNow(docId);
   await notify(docId, '1', 'succeeded', '1', 1);
   await waitFor(async () => {
     const body = (await getDoc(docId)).body as { processing_state: string; search_state: string };
@@ -306,6 +340,14 @@ function at(iso: string): Date {
   return new Date(iso);
 }
 
+/** 실패한 문서 시드용 실패 사유다. */
+const FAILURE_SEED = {
+  code: 'PARSE_FAILED',
+  message: '시드 실패 사유',
+  headingPath: null,
+  placeholderId: null,
+};
+
 /** 표 칸에 짝 있는 이미지(img/z.png)가 든 GFM 표 문서다. ID는 t1, i1이다. */
 const NEST_TABLE_MD = '| 키 | 값 |\n| --- | --- |\n| ![i](img/z.png) | b |';
 
@@ -328,7 +370,7 @@ async function uploadNestedTable(name: string): Promise<string> {
  */
 async function makeNestedCompleted(name: string, withChunk = false): Promise<string> {
   const docId = await uploadNestedTable(name);
-  await waitIndexRequest(docId);
+  await requestIndexNow(docId);
   if (withChunk) {
     chunksBody = {
       version: '1',
@@ -859,10 +901,39 @@ describe('REQ-BE-1.4.4', () => {
   });
 });
 
+describe('REQ-BE-1.4.6', () => {
+  it('T-E2E-Q-GET-1 대기열 문서는 in_index_queue와 다음 예약 시각을 주고 완료 문서는 둘 다 null이다', async () => {
+    const docId = await uploadOne(uniq('qget1'));
+    await waitInQueue(docId);
+    const before = Date.now();
+    const queued = (await getDoc(docId)).body as {
+      in_index_queue: boolean | null;
+      next_index_at: string | null;
+    };
+    expect(queued.in_index_queue).toBe(true);
+    // 기본 일정(0 0 * * *, KST)이면 다음 예약 시각은 KST 00:00 = UTC 15:00이다
+    expect(queued.next_index_at).toMatch(/T15:00:00(\.000)?Z$/);
+    expect(Date.parse(queued.next_index_at as string)).toBeGreaterThan(before);
+
+    await runScheduledIndex(harness);
+    await waitIndexRequest(docId);
+    await notify(docId, '1', 'succeeded', '1', 1);
+    await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
+    const done = (await getDoc(docId)).body as Record<string, unknown>;
+    expect(done.in_index_queue).toBeNull();
+    expect(done.next_index_at).toBeNull();
+  });
+});
+
 describe('REQ-BE-1.5.5', () => {
-  it('T-E2E-LOCK-1 처리 중인 문서는 편집·재색인·내용 다시 올리기가 409다', async () => {
+  it('T-E2E-LOCK-1 처리 중인 문서와 대기열 밖 queued 문서는 편집·재색인·내용 다시 올리기가 409이고, 대기열 문서는 재색인만 409다', async () => {
+    // ★ 대기열 밖 queued(queuedVersion null)는 RAG Server가 접수한 문서라 잠긴다
     for (const state of ['uploaded', 'captioning', 'queued', 'indexing'] as const) {
-      const doc = await seedDocument({ name: uniq('lock'), processingState: state });
+      const doc = await seedDocument({
+        name: uniq('lock'),
+        processingState: state,
+        queuedVersion: null,
+      });
       const patch = await request(baseUrl)
         .patch(`/v1/documents/${doc.docId}`)
         .send({ name: '새이름' });
@@ -874,9 +945,54 @@ describe('REQ-BE-1.5.5', () => {
         .attach('files', Buffer.from('# x'), 'a.md');
       expectError(contents, 409, 'DOCUMENT_LOCKED');
     }
+
+    // 대기열 문서(queuedVersion = latestVersion): 재색인만 거부하고 편집·내용 다시 올리기는 받는다
+    const queued = await seedDocument({
+      name: uniq('lock-queue'),
+      processingState: 'queued',
+      queuedVersion: '1',
+      latestVersion: '1',
+    });
+    expectError(
+      await request(baseUrl).post(`/v1/documents/${queued.docId}/reindex`),
+      409,
+      'DOCUMENT_LOCKED',
+    );
+    const patched = await request(baseUrl)
+      .patch(`/v1/documents/${queued.docId}`)
+      .send({ name: uniq('lock-queue-new') });
+    expect(patched.status).toBe(200);
+    // ★ 이름만 바꾸면 대기열은 그대로다
+    expect(patched.body.in_index_queue).toBe(true);
+    const reuploaded = await request(baseUrl)
+      .post(`/v1/documents/${queued.docId}/contents`)
+      .attach('files', Buffer.from('# x'), 'a.md');
+    expect(reuploaded.status).toBe(202);
   });
 
-  it('T-E2E-LOCK-2 완료 문서에 다른 이름의 편집을 동시에 보내도 결과는 일관된다', async () => {
+  it('T-E2E-LEGACY-1 queuedVersion 필드가 없는 옛 queued 문서는 실제 MongoDB에서도 대기열 밖이라 잠기고 예약 색인이 요청하지 않는다', async () => {
+    // ★ P-4: 빠진 필드는 null로 다룬다. 가짜 Db가 아니라 실제 MongoDB의 조건 의미로 확인한다
+    const doc = await seedDocument({ name: uniq('legacy'), processingState: 'queued' });
+    await harness.db
+      .collection('documents')
+      .updateOne({ docId: doc.docId }, { $unset: { queuedVersion: '' } });
+    const raw = await harness.db.collection('documents').findOne({ docId: doc.docId });
+    expect(raw).not.toBeNull();
+    expect('queuedVersion' in (raw ?? {})).toBe(false);
+
+    const detail = await getDoc(doc.docId);
+    expect(detail.body.processing_state).toBe('queued');
+    expect(detail.body.in_index_queue).toBe(false);
+    expectError(
+      await request(baseUrl).patch(`/v1/documents/${doc.docId}`).send({ name: '새이름' }),
+      409,
+      'DOCUMENT_LOCKED',
+    );
+    await runScheduledIndex(harness);
+    expect(indexRequestsOf(doc.docId)).toHaveLength(0);
+  });
+
+  it('T-E2E-LOCK-2완료 문서에 다른 이름의 편집을 동시에 보내도 결과는 일관된다', async () => {
     const docId = await makeCompleted(uniq('lock2'));
     const names = ['이름1', '이름2'];
     const results = await Promise.all(
@@ -957,7 +1073,7 @@ describe('REQ-BE-1.6.4', () => {
     );
     expect(res.status).toBe(201);
     const docId = (res.body as { documents: Array<{ doc_id: string }> }).documents[0].doc_id;
-    await waitIndexRequest(docId);
+    await requestIndexNow(docId);
     await notify(docId, '1', 'succeeded', '1', 1);
     await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
     chunksBody = {
@@ -1001,6 +1117,15 @@ describe('REQ-BE-1.6.4', () => {
       .post(`/v1/documents/${docId}/contents`)
       .attach('files', Buffer.from('# 새'), 'n.md');
     expect(allKeys(contents.body)).not.toContain('version');
+    // POST /queue는 본문이 없지만 응답 어디에도 version 키가 없다
+    const failed = await seedDocument(
+      { name: uniq('shape-queue'), processingState: 'failed' },
+      { result: null, failure: FAILURE_SEED },
+    );
+    const requeued = await request(baseUrl).post(`/v1/documents/${failed.docId}/queue`);
+    expect(requeued.status).toBe(202);
+    expect(allKeys(requeued.body)).not.toContain('version');
+    expect(allKeys((await getDoc(failed.docId)).body)).not.toContain('version');
   });
 });
 
@@ -1023,6 +1148,22 @@ describe('REQ-BE-1.8.1', () => {
       return row?.purged === true;
     }, 10_000);
   });
+
+  it('T-E2E-DEL-1b 대기열 문서를 지우면 204이고 queuedVersion이 null이며 예약 색인이 그 문서를 요청하지 않는다', async () => {
+    const docId = await uploadOne(uniq('del1b'));
+    await waitInQueue(docId);
+    expect((await harness.db.collection('documents').findOne({ docId }))?.queuedVersion).toBe('1');
+    expect((await request(baseUrl).delete(`/v1/documents/${docId}`)).status).toBe(204);
+    // ★ 삭제 갱신이 같은 갱신에서 대기열을 비운다
+    expect((await harness.db.collection('documents').findOne({ docId }))?.queuedVersion).toBeNull();
+    await runScheduledIndex(harness);
+    expect(indexRequestsOf(docId)).toHaveLength(0);
+    // 삭제 뒤 RAG Server 청크 삭제까지 끝나길 기다린다(종료 때 남은 요청이 없게)
+    await waitFor(async () => {
+      const row = await harness.db.collection('documents').findOne({ docId });
+      return row?.purged === true;
+    }, 10_000);
+  });
 });
 
 describe('REQ-BE-1.8.5', () => {
@@ -1037,7 +1178,7 @@ describe('REQ-BE-1.8.5', () => {
     );
     expect(res.status).toBe(201);
     const docId = (res.body as { documents: Array<{ doc_id: string }> }).documents[0].doc_id;
-    await waitIndexRequest(docId);
+    await requestIndexNow(docId);
     await notify(docId, '1', 'succeeded', '1', 1);
     await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
     // ★ 지우기 전에는 폴더가 있어야 "없다"가 의미를 갖는다
@@ -1066,7 +1207,10 @@ describe('REQ-BE-2.5.4', () => {
 describe('REQ-BE-1.9.7', () => {
   it('T-E2E-FLOW-1 표가 있는 문서가 업로드부터 완료·청크 복원까지 흐른다', async () => {
     const docId = await uploadOne(uniq('flow1'), `# 문서\n\n앞\n\n${TABLE_MD}\n\n뒤`);
-    await waitIndexRequest(docId);
+    // ★ 업로드 뒤 표 요약까지 만들면 대기열에 들어가고, 색인 요청은 예약 색인이 보낸다
+    await waitInQueue(docId);
+    expect(indexRequestsOf(docId)).toHaveLength(0);
+    await requestIndexNow(docId);
     const request1 = fake.requests.find(
       (r) =>
         r.url === '/v1/index-jobs' &&
@@ -1137,10 +1281,14 @@ function indexRequestsOf(docId: string): Array<{
 }
 
 describe('REQ-BE-1.7.1', () => {
-  it('T-E2E-RIX-1 재색인은 202이고 새 버전을 강제로 색인 요청해 완료되면 검색 가능을 유지한다', async () => {
+  it('T-E2E-RIX-1 재색인은 202로 대기열에 넣기까지만 하고, 예약 색인이 새 버전을 강제로 요청해 완료되면 검색 가능을 유지한다', async () => {
     const docId = await makeCompleted(uniq('rix1'));
     const res = await request(baseUrl).post(`/v1/documents/${docId}/reindex`);
     expect(res.status).toBe(202);
+    await waitInQueue(docId);
+    // ★ 예약 색인 전에는 새 버전의 색인 요청이 없다
+    expect(indexRequestsOf(docId).some((req) => req.version === '2')).toBe(false);
+    await runScheduledIndex(harness);
     await waitFor(() => indexRequestsOf(docId).some((req) => req.version === '2'));
     expect(indexRequestsOf(docId).find((req) => req.version === '2')?.force).toBe(true);
     await notify(docId, '2', 'succeeded', '2', 2);
@@ -1152,14 +1300,14 @@ describe('REQ-BE-1.7.1', () => {
 });
 
 describe('REQ-BE-1.5.4', () => {
-  it('T-E2E-EDIT-1 요약·캡션 편집은 새 버전을 색인 요청에 담고 색인 대기가 된다', async () => {
+  it('T-E2E-EDIT-1 요약·캡션 편집은 대기열에 넣기까지만 하고 예약 색인 요청에 새 문장이 담긴다', async () => {
     const docId = await uploadOne(
       uniq('edit1'),
       `# 문서
 
 ${TABLE_MD}`,
     );
-    await waitIndexRequest(docId);
+    await requestIndexNow(docId);
     await notify(docId, '1', 'succeeded', '1', 1);
     await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
     const detail = (await getDoc(docId)).body as { assets: Array<{ placeholder_id: string }> };
@@ -1169,12 +1317,102 @@ ${TABLE_MD}`,
       .send({ assets: [{ placeholder_id: placeholder, text: '직접 고친 요약' }] });
     expect(res.status).toBe(200);
     expect(res.body.processing_state).toBe('queued');
+    expect(res.body.in_index_queue).toBe(true);
+    // ★ 편집 응답 시점에는 색인 요청이 없다
+    expect(indexRequestsOf(docId).some((req) => req.version === '2')).toBe(false);
+    await runScheduledIndex(harness);
     await waitFor(() => indexRequestsOf(docId).some((req) => req.version === '2'));
     const sent = indexRequestsOf(docId).find((req) => req.version === '2');
     expect(sent?.force).toBe(false);
     expect(sent?.assets).toContainEqual({ placeholder_id: placeholder, text: '직접 고친 요약' });
     await notify(docId, '2', 'succeeded', '2', 2);
     await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
+  });
+});
+
+describe('REQ-BE-1.10.5', () => {
+  it('T-E2E-RQ-1 실패 문서에 POST /queue는 202(본문 없음)이고 대기열에 들어가 예약 색인에서 같은 버전을 요청한다', async () => {
+    const doc = await seedDocument(
+      { name: uniq('rq1'), processingState: 'failed' },
+      { jobId: 'job-old', result: null, failure: FAILURE_SEED },
+    );
+    const before = (await getDoc(doc.docId)).body as Record<string, unknown>;
+    expect(before.processing_state).toBe('failed');
+    expect(before.failure).not.toBeNull();
+
+    const res = await request(baseUrl).post(`/v1/documents/${doc.docId}/queue`);
+    expect(res.status).toBe(202);
+    expect(res.text).toBe('');
+
+    const after = (await getDoc(doc.docId)).body as Record<string, unknown>;
+    expect(after.processing_state).toBe('queued');
+    expect(after.in_index_queue).toBe(true);
+    expect(after.failure).toBeNull();
+    // ★ 새 버전을 만들지 않는다 — 같은 마지막 버전을 다시 요청 대상으로 돌릴 뿐이다
+    const row = await harness.db.collection('documents').findOne({ docId: doc.docId });
+    expect(row?.latestVersion).toBe('1');
+    expect(row?.queuedVersion).toBe('1');
+
+    await runScheduledIndex(harness);
+    await waitIndexRequest(doc.docId);
+    expect(indexRequestsOf(doc.docId).map((req) => req.version)).toEqual(['1']);
+  });
+
+  it('T-E2E-RQ-2 교체된 문서는 409, 없는 문서는 404, 형식이 틀린 ID는 400이다', async () => {
+    const replaced = await seedDocument(
+      {
+        name: uniq('rq2'),
+        searchState: 'replaced',
+        searchableVersion: null,
+        processingState: 'failed',
+      },
+      { result: null, failure: FAILURE_SEED },
+    );
+    expectError(
+      await request(baseUrl).post(`/v1/documents/${replaced.docId}/queue`),
+      409,
+      'DOCUMENT_LOCKED',
+    );
+    const row = await harness.db.collection('documents').findOne({ docId: replaced.docId });
+    expect(row?.processingState).toBe('failed');
+    expect(row?.queuedVersion ?? null).toBeNull();
+    expectError(
+      await request(baseUrl).post(`/v1/documents/${randomUUID()}/queue`),
+      404,
+      'DOCUMENT_NOT_FOUND',
+    );
+    expect((await request(baseUrl).post('/v1/documents/e2e-doc/queue')).status).toBe(400);
+  });
+});
+
+describe('REQ-BE-1.10.6', () => {
+  it('T-E2E-RQ-3 completed·queued·indexing 문서의 POST /queue는 409이고 상태와 대기열이 그대로다', async () => {
+    const cases: Array<{
+      state: 'completed' | 'queued' | 'indexing';
+      queuedVersion: string | null;
+    }> = [
+      { state: 'completed', queuedVersion: null },
+      { state: 'queued', queuedVersion: '1' },
+      { state: 'queued', queuedVersion: null },
+      { state: 'indexing', queuedVersion: null },
+    ];
+    for (const { state, queuedVersion } of cases) {
+      const doc = await seedDocument({
+        name: uniq('rq3'),
+        processingState: state,
+        queuedVersion,
+      });
+      const before = (await getDoc(doc.docId)).body as Record<string, unknown>;
+      expectError(
+        await request(baseUrl).post(`/v1/documents/${doc.docId}/queue`),
+        409,
+        'DOCUMENT_LOCKED',
+      );
+      const after = (await getDoc(doc.docId)).body as Record<string, unknown>;
+      expect(after.processing_state).toBe(state);
+      expect(after.in_index_queue).toBe(before.in_index_queue);
+      expect(after.in_index_queue).toBe(state === 'queued' ? queuedVersion !== null : null);
+    }
   });
 });
 
@@ -1232,7 +1470,7 @@ describe('REQ-BE-8.2.1', () => {
       { label: SENT.label, edition_date: '2026-01-01' },
       SENT.file,
     );
-    await waitIndexRequest(docId);
+    await requestIndexNow(docId);
     await notify(docId, '1', 'succeeded', '1', 1);
     await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
     const edit = await request(baseUrl).patch(`/v1/documents/${docId}`).send({ name: SENT.edited });

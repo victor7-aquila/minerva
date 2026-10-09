@@ -2,11 +2,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AppConfig } from '../../src/common';
 
-/** CommonModule이 읽는 17개 키를 모두 채운 환경 변수 객체를 만든다. 덮어쓸 값을 받는다. */
+/** CommonModule이 읽는 18개 키를 모두 채운 환경 변수 객체를 만든다. 덮어쓸 값을 받는다. */
 export function buildFullTestEnv(
   overrides: Partial<Record<keyof AppConfig, string>>,
 ): Record<string, string> {
-  // ★ 17개 키를 모두 직접 준다. 그래야 apps/backend/.env 유무가 결과에 섞이지 않는다
+  // ★ 18개 키를 모두 직접 준다. 그래야 apps/backend/.env 유무가 결과에 섞이지 않는다
   return {
     PORT: '3000',
     MONGODB_URI: 'mongodb://localhost:27017/minerva_test_unset',
@@ -18,6 +18,7 @@ export function buildFullTestEnv(
     RAG_CAPTION_TIMEOUT_MS: '120000',
     RAG_WAIT_TIMEOUT_MS: '600000',
     CHUNKING_MODE: 'semantic',
+    INDEX_SCHEDULE_CRON: '0 0 * * *',
     RECONCILE_INTERVAL_MS: '60000',
     RAG_RETRY_INTERVAL_MS: '60000',
     LOG_RETENTION_DAYS: '90',

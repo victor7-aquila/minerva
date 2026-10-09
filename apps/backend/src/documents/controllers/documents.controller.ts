@@ -108,6 +108,13 @@ export class DocumentsController {
     return this.documents.reindex(params.doc_id);
   }
 
+  /** 실패 문서를 색인 대기로 바꾼다. */
+  @Post('documents/:doc_id/queue')
+  @HttpCode(202)
+  requeue(@Param() params: DocIdParamDto): Promise<void> {
+    return this.documents.requeue(params.doc_id);
+  }
+
   /** 문서를 지운다. */
   @Delete('documents/:doc_id')
   @HttpCode(204)

@@ -43,6 +43,7 @@ export type VersionUpdate = Partial<Omit<DocumentVersionRecord, 'docId' | 'versi
 export type VersionCondition = Partial<
   Record<
     | 'jobId'
+    | 'requestSeq'
     | 'result'
     | 'failure'
     | 'result.chunkCount'
@@ -84,6 +85,7 @@ export class DocumentsCrudService {
       editionEnteredAt: record.editionEnteredAt,
       searchState: record.searchState,
       processingState: record.processingState,
+      queuedVersion: record.queuedVersion,
       latestVersion: record.latestVersion,
       searchableVersion: record.searchableVersion,
       deleted: record.deleted,
@@ -104,6 +106,49 @@ export class DocumentsCrudService {
     // ★ 앞선 실패가 남긴 같은 번호의 찌꺼기를 지운다 (D4)
     await this.versions.deleteMany({ docId: record.docId, version: record.version });
     await this.versions.insertOne(copyVersion(record));
+  }
+
+  /** 대기열에 있는 문서를 읽는다. 삭제됨·교체됨은 뺀다. */
+  findQueued(): Promise<DocumentRecord[]> {
+    // ★ 빠진 필드는 $ne: null 에 걸리지 않는다 (마이그레이션 없음, 빠진 필드는 null)
+    return this.documents
+      .find(
+        { queuedVersion: { $ne: null }, deleted: false, searchState: { $ne: 'replaced' } },
+        PROJECTION,
+      )
+      .toArray();
+  }
+
+  /** 상태 맞추기 대상(대기열 밖 queued·indexing)을 읽는다. 삭제됨·교체됨은 뺀다. */
+  findReconcileTargets(): Promise<DocumentRecord[]> {
+    return this.documents
+      .find(
+        {
+          deleted: false,
+          searchState: { $ne: 'replaced' },
+          processingState: { $in: ['queued', 'indexing'] },
+          queuedVersion: null,
+        },
+        PROJECTION,
+      )
+      .toArray();
+  }
+
+  /** 버전의 작업 ID를 비우고 requestSeq를 1 늘린다. 맞았으면 참이다. */
+  async requeueVersion(docId: string, version: string): Promise<boolean> {
+    const result = await this.versions.updateOne(
+      { docId, version },
+      { $set: { jobId: null }, $inc: { requestSeq: 1 } },
+    );
+    return result.matchedCount === 1;
+  }
+
+  /** 문서의 버전 번호를 모두 읽는다. */
+  async findVersionNumbers(docId: string): Promise<string[]> {
+    const rows = await this.versions
+      .find({ docId }, { projection: { _id: 0, version: 1 } })
+      .toArray();
+    return rows.map((row) => row.version);
   }
 
   /** 문서 하나를 읽는다. */
@@ -324,6 +369,7 @@ function copyVersion(record: DocumentVersionRecord): DocumentVersionRecord {
     originalMarkdown: record.originalMarkdown,
     indexingMarkdown: record.indexingMarkdown,
     jobId: record.jobId,
+    requestSeq: record.requestSeq,
     result: record.result === null ? null : { ...record.result },
     failure:
       record.failure === null

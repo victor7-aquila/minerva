@@ -7,6 +7,8 @@ import { Test } from '@nestjs/testing';
 import type { Db } from 'mongodb';
 import { LoggerModule } from 'nestjs-pino';
 import { AppModule } from '../../src/api';
+// ★ DocumentsScheduler는 배럴에 없는 내부 파일이다. 테스트 전용 예외로 직접 import한다(runScheduledIndex 용)
+import { DocumentsScheduler } from '../../src/documents/services/documents.scheduler';
 import { CommonModule, createLoggerParams } from '../../src/common';
 import type { AppConfig } from '../../src/common';
 // ★ 배럴에 없는 내부 파일이다. 테스트 전용 예외로 직접 import한다
@@ -81,4 +83,9 @@ export async function bootAppHarness(options: {
     await app.close();
     throw error;
   }
+}
+
+/** 예약 색인을 한 번 돌린다(일정을 기다리지 않는다). 앞 실행이 끝나지 않았으면 바로 끝난다. */
+export async function runScheduledIndex(harness: AppHarness): Promise<void> {
+  await harness.app.get(DocumentsScheduler).runScheduledIndex();
 }

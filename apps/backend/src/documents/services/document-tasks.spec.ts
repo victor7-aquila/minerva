@@ -32,7 +32,7 @@ describe('REQ-BE-1.1.9', () => {
     tasks.run('process', 'doc-1', async () => {
       calls.push('outer');
       // 작업 안에서 또 run한다
-      tasks.run('index', 'doc-1', async () => {
+      tasks.run('scheduled_index', 'doc-1', async () => {
         calls.push('inner');
       });
     });
@@ -88,7 +88,7 @@ describe('REQ-BE-1.9.9', () => {
     expect(finished).toBe(true);
 
     let called = false;
-    tasks.run('index', 'doc-2', async () => {
+    tasks.run('scheduled_index', 'doc-2', async () => {
       called = true;
     });
     await tasks.drain();

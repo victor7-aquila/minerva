@@ -4,7 +4,13 @@ import { PinoLogger } from 'nestjs-pino';
 
 /** 백그라운드 작업 이름이다. 로그의 task 값이다. */
 export type DocumentTaskName =
-  'process' | 'index' | 'delete_chunks' | 'metadata' | 'resume' | 'reconcile' | 'rag_retry';
+  | 'process'
+  | 'scheduled_index'
+  | 'delete_chunks'
+  | 'metadata'
+  | 'resume'
+  | 'reconcile'
+  | 'rag_retry';
 
 /** 문서 백그라운드 작업을 돌린다. */
 @Injectable()
