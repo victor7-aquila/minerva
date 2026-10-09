@@ -1,0 +1,11 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/main.ts",
+    "test/**/*.e2e-spec.ts",
+    "test/support/global-setup.ts",
+    "test/support/global-teardown.ts"
+  ],
+  "project": ["src/**/*.ts", "test/**/*.ts"],
+  "ignoreDependencies": ["@types/express", "@types/multer"]
+}
