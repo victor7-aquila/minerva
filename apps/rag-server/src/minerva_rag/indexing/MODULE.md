@@ -35,6 +35,10 @@ chunking이 만든 청크를 검색할 수 있게 저장하고, 버전·판·삭
 
 ```text
 src/minerva_rag/indexing/
+├── indexer.py        # REQ-RAG-3.2·3.3·3.4·3.6 Indexer, IndexInput, EmbeddedChunks, 기동 복구
+├── index_text.py     # REQ-RAG-3.1 색인 텍스트
+├── decision.py       # REQ-RAG-3.5 체크섬, decide_index, IndexDecision
+├── editions.py       # REQ-RAG-3.6.3 최신판 계산과 이름별 직렬화
 └── MODULE.md
 
 tests/unit/indexing/
@@ -104,6 +108,8 @@ classDiagram
 
 ### 모델별 필드
 
+`IndexInput`·`EmbeddedChunks`·`IndexDecision`은 모두 `@dataclass(frozen=True)`이다. 필드는 아래 표의 차례(`EmbeddedChunks`는 `doc_id`, `version`, `name`, `records`, `dense`, `sparse`)이고 기본값이 없다. 「선택」인 `edition`은 `None`을 넣을 수 있다는 뜻이며 생략할 수 없다.
+
 **`IndexInput`** — 정의: indexing, 값 생산: service (색인 요청에서)
 
 | 필드 | 타입 | 필수 | 불변 조건 |
@@ -160,6 +166,8 @@ def decide_index(
 
 resource의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `ModelUnavailableError`)는 그대로 낸다.
 
+`decide_index`의 전제: `current_job_id`와 `current_checksum`은 함께 있거나 함께 `None`이다(service의 `CurrentIndex`). 하나만 있으면 `ValueError`를 낸다.
+
 ### 색인 텍스트 — `REQ-RAG-3.1`
 
 **`REQ-RAG-3.1.1`** 자리표시를 요약·캡션으로 바꾼 색인 텍스트
@@ -193,18 +201,19 @@ resource의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `Mod
 
 **`REQ-RAG-3.3.2`** 끝나기 전까지 이전 버전이 검색됨
 
-- 처리 계약: 이전 레코드는 새 레코드를 활성화한 뒤에만 지운다
-- 충족 기준: `write`가 `activate_records` 전에 실패하면 이전 레코드가 active로 남는다
+- 처리 계약: 이전 레코드는 새 레코드를 활성화한 뒤에만 지운다. `upsert`나 `activate_records`가 실패하면 새 레코드를 지우려 시도하고 원래 예외를 낸다(「핵심 흐름」 2)
+- 충족 기준: `write`가 `activate_records` 전에 실패하면 이전 레코드가 active로 남는다. `activate_records`가 실패해도 이전 레코드가 active로 남고 새 레코드 지우기가 시도된다
 
 **`REQ-RAG-3.3.3`** 끝나면 이전 버전 삭제
 
-- 충족 기준: `write`가 끝나면 그 문서에 남은 레코드가 새 레코드뿐이고, `write`의 반환값이 새 레코드 수다
+- 처리 계약: `records`가 비면(빈 문서의 새 버전 — chunking `REQ-RAG-2.1.1`) 저장·활성화할 것 없이 그 문서의 레코드를 모두 지우고 관련 이름의 최신판 표시를 맞춘 뒤 0을 돌려준다. 이 작업은 저장한 레코드가 없으므로 다시 시작할 때 `recover`가 거짓이다
+- 충족 기준: `write`가 끝나면 그 문서에 남은 레코드가 새 레코드뿐이고, `write`의 반환값이 새 레코드 수다. 빈 `records`로 `write`하면 그 문서에 레코드가 남지 않고 0을 돌려준다
 
 ### 문서 삭제 — `REQ-RAG-3.4`
 
 **`REQ-RAG-3.4.1`** 모든 버전 삭제
 
-- 처리 계약: 그 문서의 이름을 active 레코드에서 읽어 둔 뒤 모든 버전 레코드를 지우고, 그 이름의 최신판 표시를 다시 맞춘다
+- 처리 계약: 그 문서의 이름을 active 레코드에서 읽어 둔 뒤 모든 버전 레코드를 지우고, 그 이름의 최신판 표시를 다시 맞춘다. 레코드의 유무와 옛 이름은 그 문서의 active 레코드로 판단한다. active 레코드가 없는 문서의 `delete_document`·`update_metadata`는 resource에 쓰지 않고 끝난다. 저장 실패 정리마저 실패해 남은 active가 아닌 레코드는 검색되지 않으며 같은 문서의 다음 버전 교체가 지운다
 - 충족 기준: 두 버전 레코드(active와 남은 inactive)가 있는 문서를 지우면 그 문서의 레코드가 하나도 남지 않는다
 
 **`REQ-RAG-3.4.2`** 삭제 뒤 검색에 나오지 않음
@@ -224,8 +233,8 @@ resource의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `Mod
 
 **`REQ-RAG-3.5.2`** 체크섬 재료
 
-- 처리 계약: `checksum`은 `markdown`, `assets`(키 순서와 무관), `chunking_mode`, `RAG_CHUNK_MAX_TOKENS`, `embedding_model_name`으로 만든다. 같은 재료면 같은 값, 하나라도 다르면 다른 값이다
-- 충족 기준: 같은 재료는 같은 값이고, `assets`의 순서만 바꾸면 같은 값이며, 다섯 재료 중 하나만 바꿔도 값이 달라진다
+- 처리 계약: `checksum`은 `markdown`, `assets`(키 순서와 무관), `chunking_mode`, `RAG_CHUNK_MAX_TOKENS`, `embedding_model_name`으로 만든다. 같은 재료면 같은 값, 하나라도 다르면 다른 값이다. 같은 재료면 프로세스·실행과 관계없이 같은 값이다(service가 작업 목록에 저장해 다시 시작한 뒤에도 비교한다)
+- 충족 기준: 같은 재료는 같은 값이고, `assets`의 순서만 바꾸면 같은 값이며, 다섯 재료 중 하나만 바꿔도 값이 달라진다. 다른 프로세스에서 같은 재료로 만든 값과 같다
 
 **`REQ-RAG-3.5.3`** 같은 체크섬의 열린 작업에 합류
 
@@ -272,13 +281,13 @@ resource의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `Mod
 
 **`REQ-RAG-3.6.7`** 청크가 없는 문서의 이름·판 정보 변경
 
-- 충족 기준: 레코드가 없는 문서의 `update_metadata`가 오류 없이 끝난다
+- 충족 기준: 레코드가 없는 문서의 `update_metadata`가 오류 없이 끝나고 resource에 쓰기가 일어나지 않는다
 
 ### 기동 복구
 
 이 그룹은 service의 색인 작업 관리가 `REQ-RAG-10.8.5.3`을 지키게 하는 확인 함수(service `MODULE.md`의 `RecoverFn`)다. service가 기동할 때 작업 관리에 넘긴다.
 
-- 처리 계약: `recover(doc_id, job_id)`는 `job_records`로 그 작업의 레코드를 읽는다. active 레코드가 있으면 「핵심 흐름」의 4·5를 마저 하고(그 작업의 레코드 말고는 지우고 최신판 표시를 맞춘다) 참을 돌려준다. active 레코드가 없으면 남은 레코드를 지우고 거짓을 돌려준다. 여러 번 불러도 결과가 같다
+- 처리 계약: `recover(doc_id, job_id)`는 `job_records`로 그 작업의 레코드를 읽는다. 그 작업의 레코드 중 하나라도 active면 활성화 뒤로 보고, 그 작업의 레코드를 모두 `activate_records`로 활성화한 뒤 「핵심 흐름」의 4·5를 마저 하고(그 작업의 레코드 말고는 지우고 최신판 표시를 맞춘다) 참을 돌려준다. active 레코드가 없으면 남은 레코드를 지우고 거짓을 돌려준다. 여러 번 불러도 결과가 같다
 - 충족 기준: 활성화 뒤 이전 레코드를 지우기 전 상태에서 부르면 참이고 이전 레코드가 지워지며, 저장만 하고 활성화하지 않은 상태에서 부르면 거짓이고 그 레코드가 지워진다. 레코드가 없으면 거짓이다
 
 ## 핵심 흐름
@@ -288,17 +297,18 @@ flowchart TB
     E["embed: 색인 텍스트와 벡터"] --> U["upsert (active=False)"]
     U -->|실패| C["새 레코드 지우기 시도"]
     U -->|성공| A["activate_records (새 레코드)"]
-    A --> D["delete_records_except (새 레코드만 남김)"]
+    A -->|실패| C
+    A -->|성공| D["delete_records_except (새 레코드만 남김)"]
     D --> L["최신판 표시 맞추기"]
 ```
 
 1. **벡터 만들기** — `embed`가 청크마다 색인 텍스트를 만들고 벡터를 만든다. (`REQ-RAG-3.1`, `REQ-RAG-3.2`) service는 이 단계 전에 `EMBEDDING`을 알린다.
-2. **저장** — `write`가 새 레코드를 `active=False`로 저장한다. 실패하면 새 레코드를 지우려 시도하고 원래 예외를 낸다. 지우기마저 실패해도 그 레코드는 active가 아니라 검색되지 않고, 다시 시작할 때 `recover`가, 그 전이면 다음 버전 교체나 문서 삭제가 지운다. (`REQ-RAG-3.3.1`, `REQ-RAG-10.3.4`)
+2. **저장** — `write`가 새 레코드를 `active=False`로 저장하고 활성화한다. `upsert`나 `activate_records`가 실패하면 새 레코드를 `delete_records`로 지우려 시도하고 원래 예외를 낸다. 지우기 시도는 이전 레코드를 바꾸지 않는다. 지우기마저 실패해도 그 레코드는 active가 아니라 검색되지 않고, 다시 시작할 때 `recover`가, 그 전이면 다음 버전 교체나 문서 삭제가 지운다. (`REQ-RAG-3.3.1`, `REQ-RAG-10.3.4`)
 3. **활성화** — 새 레코드를 active로 바꾼다. (`REQ-RAG-3.3`)
 4. **이전 레코드 삭제** — 그 문서에서 새 레코드 말고는 모두 지운다. (`REQ-RAG-3.3.3`)
 5. **최신판 표시** — 이전 레코드의 이름과 새 이름의 최신판 표시를 맞춘다. (`REQ-RAG-3.6.3`)
 
-3을 4보다 먼저 해야 문서가 검색되지 않는 순간이 없다. 그 대가로 3과 4 사이에는 이전·새 레코드가 함께 active다(resource `MODULE.md` 「실패 모드」). 3 뒤에 프로세스가 멈추면 다시 시작할 때 `recover`가 4·5를 마저 한다.
+3을 4보다 먼저 해야 문서가 검색되지 않는 순간이 없다. 그 대가로 3과 4 사이에는 이전·새 레코드가 함께 active다(resource `MODULE.md` 「실패 모드」). 3 뒤에 프로세스가 멈추면 다시 시작할 때 `recover`가 4·5를 마저 한다. 3 뒤에 4·5가 Qdrant 오류로 실패하면 예외를 그대로 내 작업이 실패로 기록되고, 그 문서는 다음 색인 요청이 버전 교체를 마칠 때까지 이전·새 레코드가 함께 active로 남는다(「실패 모드」).
 
 ## 실행 계약
 
@@ -319,11 +329,13 @@ flowchart TB
 
 ### 런타임·보안
 
-- **동시성** — 같은 이름의 최신판 재계산은 한 번에 하나씩 한다. 작업 동시 처리 수(`RAG_JOB_CONCURRENCY`)가 1보다 커도 표시가 어긋나지 않게 한다 (`REQ-RAG-3.6.3`)
+- **동시성** — 같은 이름의 최신판 재계산은 한 번에 하나씩 한다. 작업 동시 처리 수(`RAG_JOB_CONCURRENCY`)가 1보다 커도 표시가 어긋나지 않게 한다. 직렬화 범위는 `Indexer` 인스턴스 하나다. service는 `Indexer`를 하나만 조립해 모든 작업과 요청이 함께 쓴다 (`REQ-RAG-3.6.3`)
 
 ### 실패 모드
 
 - **최신판 표시 재계산 실패** (`REQ-RAG-3.6.3`) — 증상: 활성화는 됐는데 Qdrant 오류로 재계산이 끝나지 않으면 `is_latest_edition`이 옛 값으로 남아 "최신판만" 검색이 틀어진다. 탐지: `StoreUnavailableError`가 `write`에서 난다. 방어: 예외를 그대로 내 작업이 실패로 기록되게 하고, 같은 이름의 다음 쓰기에서 재계산이 다시 맞춘다
+- **활성화 뒤 이전 레코드 삭제 실패** (`REQ-RAG-3.3.3`, `REQ-RAG-10.3.4`) — 증상: 새 레코드를 활성화한 뒤 Qdrant 오류로 이전 레코드를 지우지 못하면 이전·새 버전이 함께 active로 남아 같은 문서의 청크가 두 버전에서 검색된다. 작업은 실패로 기록되므로 service의 "현재 검색되는 버전"은 이전 버전 그대로다. 탐지: `StoreUnavailableError`가 `write`에서 나고 작업이 실패로 기록된다. 방어: 예외를 그대로 낸다(사용자 결정). 관리자가 다시 색인하면 그 버전 교체가 남은 레코드를 지운다(`IF-RAG-1` `active`의 예외)
+- **삭제·이름 변경이 재계산 전에 실패한 뒤 다시 요청** (`REQ-RAG-3.6.3`) — 증상: `delete_document`나 `update_metadata`가 레코드를 바꾼 뒤 최신판 재계산 전에 실패하면, 같은 요청을 다시 보내도 옛 이름을 active 레코드에서 읽을 수 없어(삭제됐거나 이미 새 이름) 옛 이름의 `is_latest_edition`이 옛 값으로 남는다. 탐지: 첫 요청이 `StoreUnavailableError`로 실패한다. 방어: 그 이름의 다음 쓰기(색인·삭제·이름 변경)가 다시 맞춘다
 
 ## 테스트와 추적성
 
@@ -334,14 +346,14 @@ flowchart TB
 | `REQ-RAG-3.2.1` | unit | 청크마다 dense 벡터, 색인 텍스트로 생성 | resource (mock) | `tests/unit/indexing/` |
 | `REQ-RAG-3.2.2` | unit | 청크마다 키워드 벡터, 색인 텍스트로 생성 | resource (mock) | `tests/unit/indexing/` |
 | `REQ-RAG-3.3.1` | unit | 저장 → 활성화 순서 | resource (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.3.2` | unit | 활성화 전 실패 시 이전 레코드 active 유지, 새 레코드 정리 시도 | resource (가짜, 실패 주입) | `tests/unit/indexing/` |
-| `REQ-RAG-3.3.3` | unit | 끝난 뒤 새 레코드만 남음, 반환값 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.3.2` | unit | `upsert`·`activate_records` 실패 시 이전 레코드 active 유지, 새 레코드 정리 시도 | resource (가짜, 실패 주입) | `tests/unit/indexing/` |
+| `REQ-RAG-3.3.3` | unit | 끝난 뒤 새 레코드만 남음, 반환값, 빈 `records` | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.3.3` | integration | 실제 Qdrant에서 버전 교체 뒤 active 레코드가 새 버전뿐 | | `tests/integration/indexing/` |
 | `REQ-RAG-3.4.1` | unit | 모든 버전 삭제와 최신판 재계산 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.4.2` | unit | 삭제 뒤 active 레코드 없음, 다른 판이 최신판 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.4.3` | unit | 레코드 없는 문서 삭제가 쓰기 없이 끝남 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.1` | unit | 현재 체크섬과 같으면 `reuse` | | `tests/unit/indexing/` |
-| `REQ-RAG-3.5.2` | unit | 체크섬 재료별 변화, `assets` 순서 무관 | resource (mock, 모델 이름) | `tests/unit/indexing/` |
+| `REQ-RAG-3.5.2` | unit | 체크섬 재료별 변화, `assets` 순서 무관, 프로세스와 무관한 값 | resource (mock, 모델 이름) | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.3` | unit | 열린 작업이 있으면 `join` (`force`여도) | | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.4` | unit | `reuse`에 현재 작업 ID | | `tests/unit/indexing/` |
 | `REQ-RAG-3.5.5` | unit | `force`면 같은 체크섬도 `submit` | | `tests/unit/indexing/` |
@@ -351,5 +363,5 @@ flowchart TB
 | `REQ-RAG-3.6.4` | unit | 판 정보 없는 문서 색인과 최신판 아님 | resource (모델 mock, 저장소 가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.6.5` | unit | 이름·판 변경, 모델 호출 없음, 옛·새 이름 재계산 | resource (가짜) | `tests/unit/indexing/` |
 | `REQ-RAG-3.6.6` | unit | 같은 이름·판 다른 문서 레코드 유지 | resource (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-3.6.7` | unit | 레코드 없는 문서 이름 변경이 오류 없음 | resource (가짜) | `tests/unit/indexing/` |
-| `REQ-RAG-10.8.5.3` | unit | `recover`의 참·거짓과 남은 정리, 여러 번 불러도 같음 (기동 복구) | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-3.6.7` | unit | 레코드 없는 문서 이름 변경이 오류 없고 쓰기 없음 | resource (가짜) | `tests/unit/indexing/` |
+| `REQ-RAG-10.8.5.3` | unit | `recover`의 참·거짓과 남은 정리, 일부만 active인 작업, 여러 번 불러도 같음 (기동 복구) | resource (가짜) | `tests/unit/indexing/` |
