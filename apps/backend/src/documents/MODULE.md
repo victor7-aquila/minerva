@@ -464,7 +464,7 @@ classDiagram
 **`REQ-BE-1.9.5`** 작업 상태 → 처리 상태
 
 - 처리 계약: 마지막 버전의 이벤트만 반영하며, 바꿀 수 있는 출발 상태는 `indexing`←`queued`, `completed`·`failed`←`queued`·`indexing`이다. 그 밖의 경우(같은 버전의 `completed`·`failed` 뒤에 늦게 온 `queued`·`running`)는 처리 상태를 바꾸지 않는다. 처리 상태를 `queued` 밖으로 바꾸는 갱신은 같은 갱신에서 대기열에서 뺀다(`REQ-BE-1.10.7`). `queued` 이벤트는 대기열에 넣지 않는다(`REQ-BE-1.10.2`의 계기가 아니다). `searchableVersion`은 이벤트 값이 지금 값보다 클 때만 쓴다(이벤트로 지우지 않는다)
-- 충족 기준: 마지막 버전의 `queued`·`running`·`succeeded`·`failed` 이벤트가 각각 `queued`·`indexing`·`completed`·`failed`를 만들고, `failed`면 실패 사유가 버전에 남는다. 처리 상태가 `failed`인 문서는 어떤 작업 상태 이벤트로도 바뀌지 않고(`REQ-BE-1.10.5`의 1단계가 이에 기댄다), `queued` 이벤트 뒤에 `queuedVersion`이 `null`이다(대기열에 넣지 않는다)
+- 충족 기준: 마지막 버전의 `queued`·`running`·`succeeded`·`failed` 이벤트가 각각 `queued`·`indexing`·`completed`·`failed`를 만들고, `failed`면 실패 사유가 버전에 남는다. 처리 상태가 `failed`인 문서는 어떤 작업 상태 이벤트로도 바뀌지 않고(`REQ-BE-1.10.5`의 1단계가 이에 기댄다), `queued` 이벤트가 `queuedVersion`을 새로 채우지 않는다(대기열 밖 문서는 `null` 그대로, 대기열에 있던 문서는 값 그대로)
 
 **`REQ-BE-1.9.6`** 반영하지 않는 이벤트
 
@@ -628,7 +628,7 @@ stateDiagram-v2
 | 둘 다 없고 `jobId`가 없다 | `queued` | 직전 버전 | 선점 전에 대기열에 있었다. 대기열에 되돌려 다음 예약 색인이 요청한다(`REQ-BE-1.10.4`, `REQ-BE-1.10.8`) |
 | 둘 다 없고 `jobId`가 있다 | `queued` | `null` | RAG Server가 접수한 작업이 있다. 대기열 밖 `queued`라 상태 맞추기가 맞춘다(`REQ-BE-3.3.1`) |
 
-직전 버전에 남은 `failure`는 `REQ-BE-1.10.5`가 3단계 전에 멈춰 남은 것일 수도 있다. 이때도 문서는 `failed`로 되돌아가며, 관리자가 다시 색인 대기로 바꾼다(`REQ-BE-1.10.5`).
+직전 버전에 남은 `failure`는 `REQ-BE-1.10.5`가 3단계 전에 멈춰 남은 것일 수도 있다. 그 뒤 대기열에 있던 그 문서를 선점하다 멈춘 경우에도 문서는 `failed`로 되돌아가며, 관리자가 다시 색인 대기로 바꾼다(`REQ-BE-1.10.5`).
 
 ### 교체
 
