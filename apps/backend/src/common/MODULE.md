@@ -261,4 +261,4 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 | `REQ-BE-8.3.1` | unit | 모든 오류의 코드·한국어 메시지, 코드가 `API.md` 목록에 있음 | | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.3.2` | unit | 기본 메시지에 내부 표현 없음, 감싼 오류 문자열 비노출 | | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.4.1` | unit | UTC 문자열, KST 하루 범위, 잘못된 날짜의 `RangeError`와 `InvalidRequestError`, 메시지에 입력값 없음 | | `src/common/**/*.spec.ts` |
-| `REQ-BE-7.1.3` | unit | `PageQueryDto` 기본값·제약, `toPage()`의 응답 형식 | | `src/common/**/*.spec.ts` |
+| `REQ-BE-7.1.3` (떠받침) | unit | `PageQueryDto` 기본값·제약과 `toPage()`의 응답 형식만 본다. 목록 응답 전체의 충족 기준은 api의 e2e 행이 본다 | | `src/common/**/*.spec.ts` |

@@ -752,6 +752,7 @@ stateDiagram-v2
 | `REQ-BE-1.10.3` | unit | 응답 결과별 대기열에서 빼기, 연결 실패면 남고 다음 일정에 다시 요청, `requestSeq`가 바뀌어 버린 결과는 대기열을 건드리지 않음 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.4` | unit | 대기열 문서의 편집·다시 올리기가 이전 버전을 빼기, 새 버전 실패 시 대기열 복원, 「기동 때 선점 되돌리기」 표의 네 경우 | assets (가짜, 실패), `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.5` | unit | 실패 문서를 색인 대기로 바꾸기와 대기열, `jobId` 비우기·`requestSeq` 늘리기 → 상태 갱신 → 같은 값의 `failure`만 비우기 순서, 단계 사이에서 멈춘 경우, 늦게 온 지난 `accepted`가 `jobId`를 못 씀, 2·3단계 사이의 새 실패 사유가 남음 | `MONGO_DB` (가짜, 단계 사이 실패), indexing·logs (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.10.5` | e2e | `POST /v1/documents/{doc_id}/queue`가 실패 문서에 `202`이고 뒤이은 조회가 처리 상태 색인 대기·`in_index_queue` 참, 교체됨 문서는 `409 DOCUMENT_LOCKED` | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.10.6` | e2e | 실패가 아닌 문서 `409`, 상태 그대로 | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.10.7` | unit | 삭제·교체·작업 상태 이벤트로 대기열에서 빠짐 | `MONGO_DB` (가짜), 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.8` | e2e | 앱을 다시 띄워도 대기열이 남고 다음 일정에 요청 | RAG Server (가짜) | `test/` |
