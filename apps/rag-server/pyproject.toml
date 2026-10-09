@@ -5,9 +5,14 @@ description = "minerva RAG Server"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
+    "httpx>=0.28.1",
+    "ollama>=0.6.3",
     "pydantic>=2.14",
     "pydantic-settings>=2.15",
+    "qdrant-client>=1.19.1",
+    "sentence-transformers>=6.1.0",
     "structlog>=26.1",
+    "torch>=2.14.1",
 ]
 
 [dependency-groups]
@@ -22,6 +27,23 @@ dev = [
 [build-system]
 requires = ["uv_build>=0.9"]
 build-backend = "uv_build"
+
+# ── 패키지 소스 ────────────────────────────────────────────
+
+# ★ torch는 CPU 휠 인덱스에서만 받는다. PyPI torch는 Linux에서 nvidia-*·triton을 끌어오며
+#   그 라이선스는 승인 밖이다. sources는 직접 의존성에만 적용되므로 torch를 직접 선언한다
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[tool.uv]
+# ★ portalocker가 Windows에서 끌어오는 pywin32는 LGPL-2.1 등을 번들해 허용 라이선스 밖이라
+#   사용자 결정으로 뺀다. qdrant-client의 로컬 디스크 모드에서만 쓰이고 이 앱은 쓰지 않는다
+exclude-dependencies = ["pywin32"]
 
 # ── 정적 검사 ──────────────────────────────────────────────
 
@@ -44,6 +66,14 @@ venv = ".venv"
 typeCheckingMode = "standard"
 reportMissingParameterType = "error"
 reportUnnecessaryTypeIgnoreComment = "error"
+
+# ★ torch는 CPU 인덱스 고정용으로만 직접 선언한다. 코드에서 import하지 않는다
+[tool.deptry]
+# ★ 단위가 서로의 공개 표면을 절대 경로(minerva_rag.core)로 import하므로 자기 패키지로 알려 준다
+known_first_party = ["minerva_rag"]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["torch"]
 
 # ★ 의존 규칙의 정본은 ARCHITECT.md 「의존 규칙」이다. 규칙을 바꿀 때는 그 문서부터 바꾼다
 [tool.importlinter]
