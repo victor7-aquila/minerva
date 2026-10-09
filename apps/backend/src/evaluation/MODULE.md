@@ -61,8 +61,7 @@ test/evaluation.e2e-spec.ts
 | documents | DI | `getRef`, `getEvaluationTarget` | documents `MODULE.md` | `REQ-BE-5.1.2`, `REQ-BE-5.1.5`, `REQ-BE-5.2.7` |
 | rag | DI | `RagClient.evaluate`, `RagUnavailableError`, `RagRequestError` | rag `MODULE.md` | `REQ-BE-5.2` |
 | storage | DI | `MONGO_DB`(컬렉션 `golden_sets`, `evaluation_records`) | storage `MODULE.md` | `REQ-BE-5` |
-| common | DI | 오류 클래스 | common `MODULE.md` | `REQ-BE-5` |
-| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
+| common | DI·import | 오류 클래스, `PinoLogger` (nestjs-pino), `toIsoUtc`, 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | common `MODULE.md` | `REQ-BE-5`, `REQ-BE-8.2.1`, `REQ-BE-8.4.1`, `REQ-BE-7.1.3` |
 
 ### 공개 표면
 

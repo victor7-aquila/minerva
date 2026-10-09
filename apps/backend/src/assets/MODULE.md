@@ -23,7 +23,7 @@
 
 **비범위**
 
-- 처리 상태를 요약·캡션 생성 중·색인 대기로 바꾸는 일과 색인 요청 — documents, indexing (`REQ-BE-1.9`, `REQ-BE-3.1`)
+- 처리 상태를 요약·캡션 생성 중·색인 대기로 바꾸는 일, 색인 대기열과 예약 색인, 색인 요청 — documents, indexing (`REQ-BE-1.9`, `REQ-BE-1.10`, `REQ-BE-3.1`)
 - 문서·버전 레코드와 색인용 MD 보관 — documents (`ARCHITECT.md` 「데이터·상태 소유」)
 
 ## 구조
@@ -69,7 +69,7 @@ flowchart LR
     Assets --> Files[/"FileStore"/]
 ```
 
-common·라이브러리 의존은 생략했다.
+common 의존은 생략했다.
 
 ## 의존성과 공개 표면
 
@@ -80,8 +80,7 @@ common·라이브러리 의존은 생략했다.
 | rag | DI | `RagClient.summarizeTable`, `captionImage`, `RagUnavailableError`, `RagRequestError` | rag `MODULE.md` | `REQ-BE-2.3` |
 | logs | DI | `LogsService.record`(`captioning`) | logs `MODULE.md` | `REQ-BE-6.1.1` |
 | storage | DI | `MONGO_DB`(컬렉션 `assets`), `FILE_STORE` | storage `MODULE.md` | `REQ-BE-2`, `REQ-BE-9.1.2` |
-| common | import | `AssetNotFoundError`, `InvalidRequestError` | common `MODULE.md` | `REQ-BE-2.4.1` |
-| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
+| common | DI·import | `AssetNotFoundError`, `InvalidRequestError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-2.4.1`, `REQ-BE-8.2.1` |
 
 **금지 의존** — documents·indexing을 import하지 않는다. 문서 데이터는 documents가 인자로 넘긴다(`ARCHITECT.md` 「의존 규칙」).
 
@@ -235,9 +234,9 @@ export interface AssetViewData {
 
 - 충족 기준: 셋 중 하나가 실패해도 나머지 둘을 요청하고, `generateHints`가 예외 없이 `temporary: 1`로 끝난다
 
-**`REQ-BE-2.3.5`** 모두 마치면 색인으로
+**`REQ-BE-2.3.5`** 모두 마치면 색인 준비를 넘김
 
-- 처리 계약: `generateHints`가 `stopped: false`로 끝나면 모든 표·이미지의 `hintStatus`가 `done`이다. 색인 요청은 documents가 이어서 한다(`REQ-BE-1.9.3`)
+- 처리 계약: `generateHints`가 `stopped: false`로 끝나면 모든 표·이미지의 `hintStatus`가 `done`이다. 이 반환값이 그 버전이 색인할 준비가 됐다는 알림이며, documents가 받아 처리 상태를 색인 대기로 바꾸고 색인 대기열에 넣는다(`REQ-BE-1.9.3`, `REQ-BE-1.10.2`). assets는 색인을 요청하지 않는다
 - 충족 기준: `stopped: false` 뒤 `hintsFor`가 모든 자리표시 ID의 문장을 돌려준다
 
 **`REQ-BE-2.3.6`** 만드는 대로 저장, 이어받은 것은 다시 만들지 않음

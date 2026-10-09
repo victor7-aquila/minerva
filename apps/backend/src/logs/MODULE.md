@@ -1,6 +1,6 @@
 # logs 모듈 명세 (REQ-BE-6)
 
-문서에 일어난 일(업로드, 내용 다시 올리기, 요약·캡션 생성, 처리 상태 변경, 편집, 삭제, 교체)을 기록하고, Console이 조회하게 하며, 보관 기간이 지난 기록을 지운다. 애플리케이션 로그(logger 라이브러리)와 다른, 관리자가 보는 기록이다. 폴더는 `apps/backend/src/logs`다.
+문서에 일어난 일(업로드, 내용 다시 올리기, 요약·캡션 생성, 처리 상태 변경, 편집, 삭제, 교체)을 기록하고, Console이 조회하게 하며, 보관 기간이 지난 기록을 지운다. 애플리케이션 로그(common)와 다른, 관리자가 보는 기록이다. 폴더는 `apps/backend/src/logs`다.
 
 ## 요약
 
@@ -52,9 +52,7 @@ test/
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | storage | DI | `MONGO_DB` (컬렉션 `logs`) | storage `MODULE.md` | `REQ-BE-6` |
-| common | DI·import | `ConfigService`(`LOG_RETENTION_DAYS`), `parseKstDayRange`, `ProcessingState` | common `MODULE.md` | `REQ-BE-6.2.2`, `REQ-BE-6.3.1` |
-| libs/logger | DI | `PinoLogger` (nestjs-pino) | logger `MODULE.md` | `REQ-BE-8.2.1` |
-| libs/utils | import | `toIsoUtc`, 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | utils `MODULE.md` | `REQ-BE-6.2`, `REQ-BE-8.4.1`, `REQ-BE-7.1.3` |
+| common | DI·import | `ConfigService`(`LOG_RETENTION_DAYS`), `parseKstDayRange`, `ProcessingState`, `PinoLogger` (nestjs-pino), `toIsoUtc`, 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | common `MODULE.md` | `REQ-BE-6.2`, `REQ-BE-6.3.1`, `REQ-BE-8.2.1`, `REQ-BE-8.4.1`, `REQ-BE-7.1.3` |
 
 ### 공개 표면
 

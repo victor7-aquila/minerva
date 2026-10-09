@@ -30,16 +30,17 @@ Backend가 Console과 AI 에이전트·개발 도구에 제공하는 HTTP API다
 | 메서드 | 경로 | 요약 | REQ |
 | :--- | :--- | :--- | :--- |
 | `POST` | `/v1/documents` | 문서 업로드 | `REQ-BE-1.1` |
-| `GET` | `/v1/documents` | 문서 목록 | `REQ-BE-1.3.1`~`REQ-BE-1.3.6`, `REQ-BE-1.3.8` |
+| `GET` | `/v1/documents` | 문서 목록 | `REQ-BE-1.3.1`~`REQ-BE-1.3.6`, `REQ-BE-1.3.8`, `REQ-BE-1.3.9` |
 | `GET` | `/v1/document-names` | 문서 이름 목록 | `REQ-BE-1.3.7` |
 | `GET` | `/v1/documents/replacement-check` | 같은 판 문서 확인 | `REQ-BE-1.2.7` |
-| `GET` | `/v1/documents/{doc_id}` | 문서 조회 | `REQ-BE-1.4.1`, `REQ-BE-1.4.2`, `REQ-BE-1.4.4` |
+| `GET` | `/v1/documents/{doc_id}` | 문서 조회 | `REQ-BE-1.4.1`, `REQ-BE-1.4.2`, `REQ-BE-1.4.4`, `REQ-BE-1.4.6` |
 | `GET` | `/v1/documents/{doc_id}/original` | 원본 MD | `REQ-BE-1.4.3` |
 | `GET` | `/v1/documents/{doc_id}/chunks` | 검색에 쓰이는 청크 | `REQ-BE-1.4.5` |
 | `GET` | `/v1/documents/{doc_id}/versions/{version}/assets/{placeholder_id}` | 이미지 파일 | `REQ-BE-2.4.1` |
 | `PATCH` | `/v1/documents/{doc_id}` | 이름·판 정보·요약·캡션 편집 | `REQ-BE-1.5` |
 | `POST` | `/v1/documents/{doc_id}/contents` | 내용 다시 올리기 | `REQ-BE-1.6.1`, `REQ-BE-1.6.2`, `REQ-BE-1.9.1` |
 | `POST` | `/v1/documents/{doc_id}/reindex` | 재색인 | `REQ-BE-1.7` |
+| `POST` | `/v1/documents/{doc_id}/queue` | 실패 문서를 색인 대기로 바꾸기 | `REQ-BE-1.10.5`, `REQ-BE-1.10.6`, `REQ-BE-1.5.6` |
 | `DELETE` | `/v1/documents/{doc_id}` | 문서 삭제 | `REQ-BE-1.8` |
 | `POST` | `/v1/search` | 검색 (AI용) | `REQ-BE-4` |
 | `GET` | `/v1/golden-sets` | 골든셋 목록 | `REQ-BE-5.3.1`, `REQ-BE-5.3.2` |
@@ -79,7 +80,7 @@ MD 파일 여러 개와 이미지 파일들을 받아 MD 하나마다 문서를 
 **동작**
 
 - 같은 판의 기존 문서는 새 문서가 검색 가능이 될 때 교체됨이 된다 (`REQ-BE-1.2.3`, `REQ-BE-1.2.5`)
-- 응답 뒤에 표·이미지 처리와 색인이 이어서 진행된다 (`REQ-BE-1.1.9`)
+- 응답 뒤에 표·이미지 처리가 이어서 진행된다. 마치면 처리 상태가 색인 대기가 되고, 색인은 다음 예약 색인에서 요청한다 (`REQ-BE-1.1.9`, `REQ-BE-1.9.3`, `REQ-BE-1.10.1`)
 
 ### `GET /v1/documents`
 
@@ -135,7 +136,7 @@ MD 파일 여러 개와 이미지 파일들을 받아 MD 하나마다 문서를 
 
 ### `GET /v1/documents/{doc_id}`
 
-문서 하나의 정보와 표·이미지를 준다. (`REQ-BE-1.4.1`, `REQ-BE-1.4.2`, `REQ-BE-1.4.4`)
+문서 하나의 정보와 표·이미지를 준다. (`REQ-BE-1.4.1`, `REQ-BE-1.4.2`, `REQ-BE-1.4.4`, `REQ-BE-1.4.6`)
 
 **응답**
 
@@ -210,13 +211,14 @@ MD 파일 여러 개와 이미지 파일들을 받아 MD 하나마다 문서를 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
 | `404` | `DOCUMENT_NOT_FOUND` | 그 ID의 문서가 없거나 삭제됐다 |
-| `409` | `DOCUMENT_LOCKED` | 처리 중(업로드됨, 요약·캡션 생성 중, 색인 대기, 색인 중)이거나 교체됨이다 (`REQ-BE-1.5.5`, `REQ-BE-1.5.6`) |
+| `409` | `DOCUMENT_LOCKED` | 처리 상태가 업로드됨, 요약·캡션 생성 중, 색인 중이거나, 색인 대기인데 색인 대기열에 없다(`in_index_queue`가 `false`). 또는 교체됨이다. 같은 문서의 다른 변경이 먼저 반영된 경우도 같다 (`REQ-BE-1.5.5`, `REQ-BE-1.5.6`) |
 
 **동작**
 
-- 이름·판 정보만 바꾸면 다시 색인하지 않고 RAG Server에 이름·판 정보 변경을 요청한다. 요청하지 못하면 Backend가 주기적으로 다시 요청한다 (`REQ-BE-1.5.2`, `REQ-BE-3.4.1`, `REQ-BE-3.4.2`)
+- 이름·판 정보만 바꾸면 다시 색인하지 않고 RAG Server에 이름·판 정보 변경을 요청한다. 요청하지 못하면 Backend가 주기적으로 다시 요청한다. 색인 대기열에 있는 문서는 대기열에 그대로 남는다 (`REQ-BE-1.5.2`, `REQ-BE-3.4.1`, `REQ-BE-3.4.2`)
 - 바꾼 이름·판 표기로 같은 판이 된 다른 문서는, 이 문서가 검색 가능이면 바로, 아니면 이 문서가 검색 가능이 될 때 교체됨이 되고 RAG Server에서 청크가 지워진다 (`REQ-BE-1.5.3`, `REQ-BE-1.2.5`, `REQ-BE-1.2.8`)
-- 요약·캡션이 바뀌면 새 버전을 만들어 색인을 요청하고 처리 상태가 색인 대기가 된다. 다시 색인하는 동안 이전 버전이 계속 검색된다 (`REQ-BE-1.5.4`, `REQ-BE-1.6.3`, `REQ-BE-1.9.3`)
+- 요약·캡션이 바뀌면 새 버전을 만들고 처리 상태가 색인 대기가 되어 색인 대기열에 들어간다. 색인은 다음 예약 색인에서 요청하고, 그동안 이전 버전이 계속 검색된다. 색인 대기열에 있던 문서면 이전 버전은 대기열에서 빠지고 새 버전이 들어간다 (`REQ-BE-1.5.4`, `REQ-BE-1.6.3`, `REQ-BE-1.9.3`, `REQ-BE-1.10.2`, `REQ-BE-1.10.4`)
+- 새 버전을 만들지 못해 오류로 끝나면 처리 상태와 색인 대기열은 요청 전 그대로다 (`REQ-BE-1.10.4`)
 
 ### `POST /v1/documents/{doc_id}/contents`
 
@@ -239,23 +241,42 @@ MD 하나와 이미지들로 그 문서의 새 버전을 만든다. (`REQ-BE-1.6
 | `400` | `UNSUPPORTED_FILE` | 받지 않는 형식의 파일이 있다. UTF-8로 읽을 수 없는 MD도 같다 |
 | `400` | `INVALID_REQUEST` | MD가 정확히 하나가 아니다 (`REQ-BE-1.6.1`) |
 | `404` | `DOCUMENT_NOT_FOUND` | 그 ID의 문서가 없거나 삭제됐다 |
-| `409` | `DOCUMENT_LOCKED` | 처리 중이거나 교체됨이다 |
+| `409` | `DOCUMENT_LOCKED` | `PATCH /v1/documents/{doc_id}`의 `DOCUMENT_LOCKED`와 같은 조건이다 (`REQ-BE-1.5.5`, `REQ-BE-1.5.6`) |
 | `413` | `PAYLOAD_TOO_LARGE` | 업로드 한도를 넘는다 (`REQ-BE-1.6.1`, `REQ-BE-1.1.10`) |
+
+**동작**
+
+- 색인 대기열에 있던 문서면 그 버전은 대기열에서 빠진다. 새 버전은 표·이미지 처리를 마친 뒤 색인 대기가 되어 대기열에 들어간다. 새 버전을 만들지 못해 오류로 끝나면 처리 상태와 색인 대기열은 요청 전 그대로다 (`REQ-BE-1.10.4`, `REQ-BE-1.9.3`, `REQ-BE-1.10.2`)
 
 ### `POST /v1/documents/{doc_id}/reindex`
 
-내용이 같은 새 버전을 만들어 다시 색인한다. (`REQ-BE-1.7`, `REQ-BE-1.6.3`)
+내용이 같은 새 버전을 만들어 다음 예약 색인에서 다시 색인한다. (`REQ-BE-1.7`, `REQ-BE-1.6.3`)
 
 **응답**
 
-- `202` — 본문 없음. 임시 설명인 표·이미지가 있으면 처리 상태가 요약·캡션 생성 중이 되어 그 요약·캡션을 다시 만든 뒤 색인 대기가 되고, 없으면 바로 색인 대기가 된다 (`REQ-BE-1.7.1`, `REQ-BE-1.9.2`, `REQ-BE-1.9.3`)
+- `202` — 본문 없음. 임시 설명인 표·이미지가 있으면 처리 상태가 요약·캡션 생성 중이 되어 그 요약·캡션을 다시 만든 뒤 색인 대기가 되고, 없으면 바로 색인 대기가 된다. 색인 대기가 되면 색인 대기열에 들어가고, 다음 예약 색인에서 강제 재색인으로 요청한다 (`REQ-BE-1.7.1`, `REQ-BE-1.9.2`, `REQ-BE-1.9.3`, `REQ-BE-1.10.1`, `REQ-BE-1.10.2`)
 
 **오류**
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
 | `404` | `DOCUMENT_NOT_FOUND` | 그 ID의 문서가 없거나 삭제됐다 |
-| `409` | `DOCUMENT_LOCKED` | 처리 중이거나 교체됨이다 |
+| `409` | `DOCUMENT_LOCKED` | 처리 상태가 업로드됨, 요약·캡션 생성 중, 색인 대기(색인 대기열에 있어도 같다), 색인 중이거나 교체됨이다. 같은 문서의 다른 변경이 먼저 반영된 경우도 같다 (`REQ-BE-1.5.5`, `REQ-BE-1.5.6`) |
+
+### `POST /v1/documents/{doc_id}/queue`
+
+처리 상태가 실패인 문서를 색인 대기로 바꿔 다음 예약 색인에서 다시 색인하게 한다. 마지막 버전을 그대로 다시 색인하며 새 버전을 만들지 않는다. (`REQ-BE-1.10.5`)
+
+**응답**
+
+- `202` — 본문 없음. 응답할 때 처리 상태는 색인 대기이고 색인 대기열에 들어 있다 (`REQ-BE-1.10.2`). 재색인(`POST /v1/documents/{doc_id}/reindex`)으로 만든 버전이면 다음 예약 색인에서 강제 재색인으로 요청한다 (`REQ-BE-1.10.1`)
+
+**오류**
+
+| 상태 | 오류 코드 | 조건 |
+| :--- | :--- | :--- |
+| `404` | `DOCUMENT_NOT_FOUND` | 그 ID의 문서가 없거나 삭제됐다 |
+| `409` | `DOCUMENT_LOCKED` | 처리 상태가 실패가 아니거나(`REQ-BE-1.10.6`) 교체됨이다(`REQ-BE-1.5.6`) |
 
 ### `DELETE /v1/documents/{doc_id}`
 
@@ -478,6 +499,8 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 | `processing_state` | `string` | 필수 | `uploaded`(업로드됨), `captioning`(요약·캡션 생성 중), `queued`(색인 대기), `indexing`(색인 중), `completed`(완료), `failed`(실패) |
 | `stage` | `string` | 선택 | `processing_state`가 `indexing`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null`. RAG Server에서 단계를 받지 못했으면 `indexing`이어도 `null` (`REQ-BE-1.3.6`) |
 | `failure_message` | `string` | 선택 | `processing_state`가 `failed`이면 실패 사유 설명, 아니면 `null` (`REQ-BE-1.3.8`) |
+| `in_index_queue` | `boolean` | 선택 | `processing_state`가 `queued`면 색인 대기열에 있는가, 아니면 `null`. `true`면 다음 예약 색인을 기다리는 중이고, `false`면 RAG Server가 접수한 색인 작업이 시작을 기다리는 중이다 (`REQ-BE-1.3.9`, `REQ-BE-1.4.6`) |
+| `next_index_at` | `string` | 선택 | `processing_state`가 `queued`면 다음 예약 색인 시각(응답하는 때보다 뒤의 가장 이른 예약 시각), 아니면 `null` (`REQ-BE-1.3.9`, `REQ-BE-1.4.6`) |
 | `uploaded_at` | `string` | 필수 | |
 | `updated_at` | `string` | 필수 | 마지막으로 내용을 다시 올리거나 편집한 시각 |
 
@@ -503,7 +526,7 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 
 | 필드 | 타입 | 필수 | 설명·제약 |
 | :--- | :--- | :--- | :--- |
-| `code` | `string` | 필수 | 실패 사유 코드. Backend가 정하는 코드는 `RAG_UNREACHABLE`(RAG Server에 색인을 요청하지 못함, `REQ-BE-1.9.4`)와 `REPLACED`(처리 중에 교체됨, `REQ-BE-1.2.8`)다. RAG Server가 색인 요청을 거부하면 그 오류 코드 `PAYLOAD_TOO_LARGE`(색인용 MD가 크기 한도를 넘음)·`INVALID_REQUEST`(형식 오류)다 (`REQ-BE-1.9.4`). 그 밖은 RAG Server 작업의 실패 사유 코드다 (`REQ-BE-1.9.5`) |
+| `code` | `string` | 필수 | 실패 사유 코드. Backend가 정하는 코드는 `REPLACED`(처리 중에 교체됨, `REQ-BE-1.2.8`)와 `RAG_UNREACHABLE`(RAG Server의 작업 실패를 알았으나 그 실패 사유를 RAG Server에서 받지 못함, `REQ-BE-3.2.3`, `REQ-BE-1.9.5`)다. RAG Server에 색인을 요청하지 못하면 실패로 바꾸지 않는다 (`REQ-BE-1.9.4`, `REQ-BE-1.10.3`). RAG Server가 색인 요청을 거부하면 그 오류 코드 `PAYLOAD_TOO_LARGE`(색인용 MD가 크기 한도를 넘음)·`INVALID_REQUEST`(형식 오류)다 (`REQ-BE-1.9.4`). 그 밖은 RAG Server 작업의 실패 사유 코드다 (`REQ-BE-1.9.5`) |
 | `message` | `string` | 필수 | 한국어 설명 |
 | `heading_path` | `string[]` | 선택 | 문제가 난 절. 모르면 `null` |
 | `placeholder_id` | `string` | 선택 | 문제가 난 표·이미지. 모르면 `null` |
@@ -648,7 +671,7 @@ RAG Server `POST /v1/evaluations` 응답의 `EvaluationMetrics`와 같은 모양
 | `ASSET_NOT_FOUND` | `404` | 그 이미지가 없다 |
 | `GOLDEN_SET_NOT_FOUND` | `404` | 골든셋이 없다 |
 | `NOT_FOUND` | `404` | 요청한 경로가 없다 |
-| `DOCUMENT_LOCKED` | `409` | 처리 중이거나 교체된 문서라 바꿀 수 없다 |
+| `DOCUMENT_LOCKED` | `409` | 문서의 처리 상태나 교체됨 때문에 그 변경을 받을 수 없다 |
 | `DOCUMENT_NOT_SEARCHABLE` | `409` | 검색 가능이 아닌 문서를 정답 문서로 고를 수 없다 |
 | `EVALUATION_IN_PROGRESS` | `409` | 평가 중인 골든셋이 있어 전체 다시 평가를 할 수 없다 |
 | `PAYLOAD_TOO_LARGE` | `413` | 업로드 한도를 넘는다 |
