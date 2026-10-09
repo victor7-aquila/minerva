@@ -26,7 +26,7 @@ minerva는 AI가 개발 문서를 검색해 활용하도록 하는 RAG 서버의
 
 | 문서 | 내용 | 에이전트 권한 |
 | :--- | :--- | :--- |
-| `README.md` | 프로젝트 소개, 구성, 기술 스택, 로드맵 | 변경안을 보여 주고 사용자가 승인한 뒤에 고친다 |
+| `README.md` | 프로젝트 소개, 구성, 기술 스택, 로드맵 | 사용자가 승인한 작업·방향 안에서 고친다 |
 | `apps/rag-server/REQUIREMENTS.md` | RAG Server 요구사항 (`REQ-RAG`) | 사용자가 승인한 변경만 반영한다 |
 | `apps/rag-server/ARCHITECT.md` | RAG Server 구조: 기술 스택, 단위 구성, 의존 규칙, 데이터 소유 | 사용자가 승인한 변경만 반영한다 |
 | `INTERFACES.md` | 앱 사이 계약 (`IF-<n>`) | 사용자가 승인한 변경만 반영한다 |
