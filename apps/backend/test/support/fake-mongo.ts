@@ -194,6 +194,7 @@ function matchField(actual: unknown, expected: unknown): boolean {
   return Object.entries(expected).every(([op, operand]) => {
     if (op === '$in') return (operand as unknown[]).some((item) => valuesEqual(actual, item));
     if (op === '$nin') return !(operand as unknown[]).some((item) => valuesEqual(actual, item));
+    if (op === '$eq') return valuesEqual(actual, operand);
     if (op === '$ne') return !valuesEqual(actual, operand);
     if (op === '$regex') return matchRegex(actual, operand, expected.$options);
     // ★ $options는 $regex와 함께 위에서 소비한다. 혼자 쓰이면 오류다

@@ -880,7 +880,7 @@ describe('REQ-BE-1.3.8', () => {
       return call.op === 'find' && Array.isArray(filter?.$or);
     });
     expect(lookups).toHaveLength(1);
-    expect(lookups[0].filter).toEqual({ $or: [{ docId: DOC_A, version: '3' }] });
+    expect(lookups[0].filter).toEqual({ $or: [{ docId: { $eq: DOC_A }, version: { $eq: '3' } }] });
     expect(lookups[0].options).toMatchObject({
       projection: { _id: 0, docId: 1, version: 1, failure: 1 },
     });
@@ -2787,7 +2787,7 @@ describe('REQ-BE-1.10.5', () => {
       'document_versions',
     ]);
     // 1단계: 같은 갱신 하나로 작업 ID 비우기와 requestSeq 늘리기
-    expect(calls[0].filter).toMatchObject({ docId: DOC_A, version: '1' });
+    expect(calls[0].filter).toMatchObject({ docId: { $eq: DOC_A }, version: { $eq: '1' } });
     expect(calls[0].update).toEqual({ $set: { jobId: null }, $inc: { requestSeq: 1 } });
     // 2단계: failed이고 마지막 버전이 읽은 값일 때만, 상태와 대기열을 한 갱신으로
     expect(calls[1].filter).toMatchObject({
@@ -2797,7 +2797,7 @@ describe('REQ-BE-1.10.5', () => {
     });
     expect(calls[1].update.$set).toMatchObject({ processingState: 'queued', queuedVersion: '1' });
     // 3단계: 기억한 실패 사유와 같을 때만 비운다 — 조건의 표기 방식은 정하지 않고 행동은 T-RQ-RACE-1이 본다
-    expect(calls[2].filter).toMatchObject({ docId: DOC_A, version: '1' });
+    expect(calls[2].filter).toMatchObject({ docId: { $eq: DOC_A }, version: { $eq: '1' } });
     expect(calls[2].update).toEqual({ $set: { failure: null } });
   });
 

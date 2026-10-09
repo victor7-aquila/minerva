@@ -104,7 +104,11 @@ export class DocumentsCrudService {
   /** 같은 번호의 버전을 지우고 새로 넣는다. */
   async replaceVersion(record: DocumentVersionRecord): Promise<void> {
     // ★ 앞선 실패가 남긴 같은 번호의 찌꺼기를 지운다 (D4)
-    await this.versions.deleteMany({ docId: record.docId, version: record.version });
+    // ★ CodeQL(NoSQL 주입) 대응: docId·version은 $eq로 감싸 리터럴 비교로 고정한다(이 파일의 같은 질의 모두 동일)
+    await this.versions.deleteMany({
+      docId: { $eq: record.docId },
+      version: { $eq: record.version },
+    });
     await this.versions.insertOne(copyVersion(record));
   }
 
@@ -137,7 +141,7 @@ export class DocumentsCrudService {
   /** 버전의 작업 ID를 비우고 requestSeq를 1 늘린다. 맞았으면 참이다. */
   async requeueVersion(docId: string, version: string): Promise<boolean> {
     const result = await this.versions.updateOne(
-      { docId, version },
+      { docId: { $eq: docId }, version: { $eq: version } },
       { $set: { jobId: null }, $inc: { requestSeq: 1 } },
     );
     return result.matchedCount === 1;
@@ -146,19 +150,19 @@ export class DocumentsCrudService {
   /** 문서의 버전 번호를 모두 읽는다. */
   async findVersionNumbers(docId: string): Promise<string[]> {
     const rows = await this.versions
-      .find({ docId }, { projection: { _id: 0, version: 1 } })
+      .find({ docId: { $eq: docId } }, { projection: { _id: 0, version: 1 } })
       .toArray();
     return rows.map((row) => row.version);
   }
 
   /** 문서 하나를 읽는다. */
   findDocument(docId: string): Promise<DocumentRecord | null> {
-    return this.documents.findOne({ docId }, PROJECTION);
+    return this.documents.findOne({ docId: { $eq: docId } }, PROJECTION);
   }
 
   /** 버전 하나를 읽는다. */
   findVersion(docId: string, version: string): Promise<DocumentVersionRecord | null> {
-    return this.versions.findOne({ docId, version }, PROJECTION);
+    return this.versions.findOne({ docId: { $eq: docId }, version: { $eq: version } }, PROJECTION);
   }
 
   /** 목록 조건에 맞는 문서 수를 센다. state가 있으면 그 값으로 좁힌다. */
@@ -254,7 +258,12 @@ export class DocumentsCrudService {
     if (targets.length === 0) return [];
     return this.versions
       .find(
-        { $or: targets.map((target) => ({ docId: target.docId, version: target.version })) },
+        {
+          $or: targets.map((target) => ({
+            docId: { $eq: target.docId },
+            version: { $eq: target.version },
+          })),
+        },
         { projection: { _id: 0, docId: 1, version: 1, failure: 1 } },
       )
       .toArray() as Promise<Array<Pick<DocumentVersionRecord, 'docId' | 'version' | 'failure'>>>;
@@ -340,22 +349,24 @@ export class DocumentsCrudService {
     set: VersionUpdate,
     expect?: VersionCondition,
   ): Promise<boolean> {
-    // ★ expect의 점 경로 키는 드라이버 타입에 없어 한 번만 단언한다
-    const result = await this.versions.updateOne(
-      { docId, version, ...expect } as never,
-      { $set: set } as never,
-    );
+    // ★ 조건 키는 VersionCondition(docId·version 제외)에서만 받고, docId·version은 마지막에 $eq로 고정한다
+    const condition: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(expect ?? {})) condition[key] = value;
+    condition.docId = { $eq: docId };
+    condition.version = { $eq: version };
+    // ★ 점 경로 키는 드라이버 타입에 없어 한 번만 단언한다
+    const result = await this.versions.updateOne(condition as never, { $set: set } as never);
     return result.matchedCount === 1;
   }
 
   /** 문서의 버전을 모두 지운다. */
   async deleteVersions(docId: string): Promise<void> {
-    await this.versions.deleteMany({ docId });
+    await this.versions.deleteMany({ docId: { $eq: docId } });
   }
 
   /** 문서 레코드를 지운다. ★ 만드는 도중 실패한 업로드를 되돌릴 때만 쓴다(삭제한 문서는 REQ-BE-1.8.6대로 지우지 않는다) */
   async deleteDocumentRecord(docId: string): Promise<void> {
-    await this.documents.deleteMany({ docId });
+    await this.documents.deleteMany({ docId: { $eq: docId } });
   }
 }
 
