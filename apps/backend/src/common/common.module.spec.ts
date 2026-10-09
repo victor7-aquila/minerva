@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import { Inject, Injectable, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Test, TestingModule } from '@nestjs/testing';
+import { PinoLogger } from 'nestjs-pino';
 import { CommonModule } from './common.module';
 import type { AppConfig } from './interfaces/app-config';
 
@@ -26,10 +27,13 @@ afterEach(async () => {
   await moduleRef?.close();
 });
 
-/** CommonModule을 import하지 않고 ConfigService를 주입받는 소비자다. */
+/** CommonModule을 import하지 않고 ConfigService·PinoLogger를 주입받는 소비자다. */
 @Injectable()
 class ConsumerService {
-  constructor(@Inject(ConfigService) readonly config: ConfigService<AppConfig, true>) {}
+  constructor(
+    @Inject(ConfigService) readonly config: ConfigService<AppConfig, true>,
+    @Inject(PinoLogger) readonly logger: PinoLogger,
+  ) {}
 }
 
 // ★ CommonModule을 import하지 않는다. 전역(@Global + exports)이어야만 주입된다
@@ -103,5 +107,19 @@ describe('REQ-BE-8.1.1', () => {
     const message = (error as Error).message;
     expect(message).toContain('PORT');
     expect(message).not.toContain('SENTINEL');
+  });
+});
+
+describe('REQ-BE-8.2.1', () => {
+  it('T-MOD-4 CommonModule이 전역 로거(PinoLogger)를 제공한다', async () => {
+    const ref = await boot({ ...REQUIRED_ENV });
+    expect(await ref.resolve(PinoLogger)).toBeInstanceOf(PinoLogger);
+  });
+
+  it('T-MOD-6 CommonModule을 import하지 않은 소비자 모듈도 PinoLogger를 주입받는다(전역)', async () => {
+    const ref = await boot({ ...REQUIRED_ENV }, true);
+    const consumer = ref.get(ConsumerService, { strict: false });
+
+    expect(consumer.logger).toBeInstanceOf(PinoLogger);
   });
 });

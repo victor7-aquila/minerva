@@ -1,5 +1,5 @@
 import { Controller, Get, Inject, Query } from '@nestjs/common';
-import type { Page } from '../../../libs/utils';
+import type { Page } from '../../common';
 import { ListLogsQueryDto } from '../interfaces/list-logs-query.dto';
 import { LogsService } from '../services/logs.service';
 import type { LogEntry } from '../interfaces/logs.types';

@@ -1,5 +1,5 @@
 import type { AssetViewData } from '../../assets';
-import { toIsoUtc } from '../../../libs/utils';
+import { toIsoUtc } from '../../common';
 import type { ProcessingState, SearchState } from '../../common';
 import type { RagDocumentChunk } from '../../rag';
 import type {

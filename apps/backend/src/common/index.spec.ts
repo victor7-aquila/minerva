@@ -10,13 +10,21 @@ import {
   GoldenSetNotFoundError,
   InvalidRequestError,
   PayloadTooLargeError,
+  PageQueryDto,
   RagUnavailableError,
+  REDACTED_LOG_PATHS,
   UnauthorizedError,
   UnsupportedFileError,
+  kstDayRange,
+  createLoggerParams,
+  createPinoHttpOptions,
   parseKstDayRange,
+  scrubForbiddenKeys,
+  toIsoUtc,
+  toPage,
 } from './index';
 import * as barrel from './index';
-import type { AppConfig, ErrorCode, ProcessingState, SearchState } from './index';
+import type { AppConfig, ErrorCode, Page, ProcessingState, SearchState } from './index';
 
 describe('REQ-BE-8.1.1', () => {
   // ★ contract·unused 도구가 없어 공개 표면 전체(오류·날짜 변환 포함)를 여기서 한 번에 보완 검증한다
@@ -36,10 +44,30 @@ describe('REQ-BE-8.1.1', () => {
       'AnswerSpanNotFoundError',
       'EvaluationInProgressError',
       'RagUnavailableError',
+      'toIsoUtc',
+      'kstDayRange',
       'parseKstDayRange',
+      'toPage',
+      'PageQueryDto',
+      'REDACTED_LOG_PATHS',
+      'createLoggerParams',
+      'createPinoHttpOptions',
+      'scrubForbiddenKeys',
     ];
-    // ★ 내부 이름(ConfigValidationError, scrubForbiddenKeys, createLoggerParams, kstDayRange, toPage 등)이 새면 실패한다
+    // ★ 내부 이름(FORBIDDEN_LOG_KEYS, REMOVED, DEFAULT_PAGE, ConfigValidationError, validateConfig, BACKEND_ROOT)이 새면 실패한다
     expect(Object.keys(barrel).sort()).toEqual([...expected].sort());
+    for (const internal of [
+      'FORBIDDEN_LOG_KEYS',
+      'REMOVED',
+      'DEFAULT_PAGE',
+      'ConfigValidationError',
+      'validateConfig',
+      'BACKEND_ROOT',
+    ]) {
+      expect(Object.keys(barrel)).not.toContain(internal);
+    }
+    // ★ libs의 AppLoggerModule은 CommonModule로 합쳐져 없다
+    expect(Object.keys(barrel)).not.toContain('AppLoggerModule');
   });
 
   it('CommonModule이 클래스다', () => {
@@ -106,9 +134,37 @@ describe('REQ-BE-8.3.1', () => {
 });
 
 describe('REQ-BE-8.4.1', () => {
-  it('parseKstDayRange가 함수이고 start가 Date다', () => {
+  it('toIsoUtc·kstDayRange·parseKstDayRange가 함수이고 start가 Date다', () => {
+    expect(typeof toIsoUtc).toBe('function');
+    expect(typeof kstDayRange).toBe('function');
     expect(typeof parseKstDayRange).toBe('function');
+    expect(kstDayRange('2026-10-04').start).toBeInstanceOf(Date);
     expect(parseKstDayRange('2026-10-04').start).toBeInstanceOf(Date);
+  });
+});
+
+describe('REQ-BE-8.2.1', () => {
+  it('createLoggerParams·createPinoHttpOptions·scrubForbiddenKeys가 함수다', () => {
+    expect(typeof createLoggerParams).toBe('function');
+    expect(typeof createPinoHttpOptions).toBe('function');
+    expect(typeof scrubForbiddenKeys).toBe('function');
+  });
+
+  it('REDACTED_LOG_PATHS가 배열이고 req.body를 담는다', () => {
+    expect(Array.isArray(REDACTED_LOG_PATHS)).toBe(true);
+    expect(REDACTED_LOG_PATHS).toContain('req.body');
+  });
+});
+
+describe('REQ-BE-7.1.3', () => {
+  it('PageQueryDto가 클래스이고 toPage가 기본값을 채운다', () => {
+    expect(typeof PageQueryDto).toBe('function');
+    expect(toPage([], 0, {})).toEqual({ items: [], total: 0, page: 1, page_size: 20 });
+  });
+
+  it('Page<T> 형태를 갖는다', () => {
+    const page: Page<string> = { items: [], total: 0, page: 1, page_size: 20 };
+    expect(page.page_size).toBe(20);
   });
 });
 

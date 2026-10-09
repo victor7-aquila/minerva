@@ -1,5 +1,5 @@
 import { IsBoolean, IsIn, IsOptional, IsString, Matches } from 'class-validator';
-import { PageQueryDto } from '../../../libs/utils';
+import { PageQueryDto } from '../../common';
 import { GOLDEN_SET_SORT_COLUMNS, OUTCOME_FILTERS } from './evaluation.types';
 import type { GoldenSetSortColumn, OutcomeFilter } from './evaluation.types';
 

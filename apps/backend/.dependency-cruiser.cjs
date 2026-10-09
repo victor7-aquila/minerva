@@ -1,6 +1,6 @@
 // 모듈 의존 방향 검사. 규칙의 근거는 apps/backend/ARCHITECT.md 「의존 규칙」이다.
 // ★ ARCHITECT.md의 의존 다이어그램이 바뀌면 ALLOWED도 함께 고친다
-// 모듈 규칙은 src 안의 모듈 사이에만 적용된다. libs(logger·utils) 규칙은 아래 libs-* 항목이다
+// 모듈 규칙은 src 안의 모듈 사이에만 적용된다
 
 /** 모듈별로 import해도 되는 다른 모듈 (자기 자신은 항상 허용) */
 const ALLOWED = {
@@ -44,37 +44,6 @@ const moduleRules = MODULES.map((from) => {
 module.exports = {
   forbidden: [
     ...moduleRules,
-    {
-      name: 'libs-no-src',
-      comment: 'libs(라이브러리)는 src를 import하지 않는다 (ARCHITECT.md 「의존 규칙」)',
-      severity: 'error',
-      from: { path: '^libs/' },
-      to: { path: '^src/' },
-    },
-    {
-      name: 'libs-logger-no-utils',
-      comment:
-        '라이브러리끼리 import하지 않는다 — logger는 utils를 import하지 않는다 (ARCHITECT.md 「의존 규칙」)',
-      severity: 'error',
-      from: { path: '^libs/logger/' },
-      to: { path: '^libs/utils/' },
-    },
-    {
-      name: 'libs-utils-no-logger',
-      comment:
-        '라이브러리끼리 import하지 않는다 — utils는 logger를 import하지 않는다 (ARCHITECT.md 「의존 규칙」)',
-      severity: 'error',
-      from: { path: '^libs/utils/' },
-      to: { path: '^libs/logger/' },
-    },
-    {
-      name: 'src-uses-libs-barrel',
-      comment:
-        'src는 libs/<이름>/index.ts로만 라이브러리를 import한다 (ARCHITECT.md 「의존 규칙」)',
-      severity: 'error',
-      from: { path: '^src/' },
-      to: { path: '^libs/[^/]+/', pathNot: '^libs/[^/]+/index\.ts$' },
-    },
     {
       name: 'no-circular',
       comment: '단위 사이 의존에 순환이 없어야 한다',

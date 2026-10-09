@@ -3,7 +3,6 @@ import { APP_FILTER, APP_INTERCEPTOR, APP_PIPE } from '@nestjs/core';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { MulterModule } from '@nestjs/platform-express';
 import { ScheduleModule } from '@nestjs/schedule';
-import { AppLoggerModule } from '../../libs/logger';
 import { AssetsModule } from '../assets';
 import { CommonModule } from '../common';
 import { DocumentsModule } from '../documents';
@@ -30,12 +29,11 @@ describe('REQ-BE-7.1.1', () => {
     expect(barrel.DomainErrorFilter).toBe(DomainErrorFilter);
   });
 
-  it('T-SURF-2 AppModule이 CommonModule을 첫 항목으로 AppLoggerModule과 모든 기능 모듈·EventEmitterModule·ScheduleModule·MulterModule을 가져온다', () => {
+  it('T-SURF-2 AppModule이 CommonModule을 첫 항목으로 모든 기능 모듈·EventEmitterModule·ScheduleModule·MulterModule을 가져온다', () => {
     const imports = (Reflect.getMetadata('imports', AppModule) ?? []) as unknown[];
     // ★ 이후 단계가 이 기대 목록에 자기 모듈을 더한다
     const expected = [
       CommonModule,
-      AppLoggerModule,
       StorageModule,
       RagModule,
       LogsModule,

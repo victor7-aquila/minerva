@@ -182,7 +182,7 @@ beforeAll(async () => {
   fake = await startFakeRagServer();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minerva-api-e2e-'));
   dbName = createTestDbName();
-  // ★ overrideModule(CommonModule·AppLoggerModule)로 .env·process.env를 막고 로그를 캡처한다
+  // ★ overrideModule(CommonModule)로(설정과 로거를 함께) .env·process.env를 막고 로그를 캡처한다
   harness = await bootAppHarness({
     env: {
       MONGODB_URI: testMongoUri(dbName),

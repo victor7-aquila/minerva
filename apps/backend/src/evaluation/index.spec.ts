@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { RequestMethod } from '@nestjs/common';
 import { HTTP_CODE_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
-import type { Page } from '../../libs/utils';
+import type { Page } from '../common';
 import { DocumentsModule, DocumentsService } from '../documents';
 import type { DocumentRefData, EvaluationTarget } from '../documents';
 import { RagClient, RagModule } from '../rag';

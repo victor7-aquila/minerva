@@ -1,9 +1,11 @@
 import * as path from 'node:path';
 import { Global, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { LoggerModule } from 'nestjs-pino';
+import { createLoggerParams } from './helpers/logger-options';
 import { BACKEND_ROOT, validateConfig } from './helpers/validate-config';
 
-/** 공통 모듈이다. 설정을 전역으로 제공한다. */
+/** 공통 모듈이다. 설정과 로거를 전역으로 제공한다. */
 @Global()
 @Module({
   imports: [
@@ -15,7 +17,9 @@ import { BACKEND_ROOT, validateConfig } from './helpers/validate-config';
       //   load 팩토리는 DI 초기화 때 실행된다
       load: [() => validateConfig(process.env)],
     }),
+    // ★ 금지 키를 지우는 nestjs-pino 로거다. 설정 다음에 등록한다
+    LoggerModule.forRoot(createLoggerParams()),
   ],
-  exports: [ConfigModule],
+  exports: [ConfigModule, LoggerModule],
 })
 export class CommonModule {}

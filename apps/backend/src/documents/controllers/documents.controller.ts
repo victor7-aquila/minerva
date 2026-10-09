@@ -11,7 +11,7 @@ import {
   Query,
   UploadedFiles,
 } from '@nestjs/common';
-import type { Page } from '../../../libs/utils';
+import type { Page } from '../../common';
 import {
   DocIdParamDto,
   DocumentNamesQueryDto,

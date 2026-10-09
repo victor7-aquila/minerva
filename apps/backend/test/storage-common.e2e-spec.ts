@@ -3,7 +3,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Test, TestingModule } from '@nestjs/testing';
 import { Db } from 'mongodb';
-import { AppLoggerModule } from '../libs/logger';
 import { CommonModule } from '../src/common';
 import { FILE_STORE, MONGO_DB, StorageModule } from '../src/storage';
 import type { FileStore } from '../src/storage';
@@ -45,12 +44,12 @@ afterAll(async () => {
   await Promise.all(createdDbs.map((name) => dropTestDb(name)));
 });
 
-/** 환경을 통째로 바꾸고 CommonModule + AppLoggerModule + StorageModule을 올린다. */
+/** 환경을 통째로 바꾸고 CommonModule + StorageModule을 올린다. */
 async function boot(env: Record<string, string>): Promise<TestingModule> {
   // ★ 병합하지 않고 통째로 바꾼다. 개발자 PC의 .env·환경 값이 섞이지 않게 한다
   process.env = { ...env };
   moduleRef = await Test.createTestingModule({
-    imports: [CommonModule, AppLoggerModule, StorageModule],
+    imports: [CommonModule, StorageModule],
   }).compile();
   return moduleRef;
 }

@@ -12,14 +12,13 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "node --max-old-space-size=1024 node_modules/typescript/bin/tsc --noEmit",
-    "deps": "depcruise --validate .dependency-cruiser.cjs src libs",
+    "deps": "depcruise --validate .dependency-cruiser.cjs src",
     "notices": "node ../../scripts/third-party-notices.mjs"
   },
   "jest": {
     "rootDir": ".",
     "roots": [
-      "<rootDir>/src",
-      "<rootDir>/libs"
+      "<rootDir>/src"
     ],
     "testRegex": ".*\\.spec\\.ts$",
     "moduleFileExtensions": [

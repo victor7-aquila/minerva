@@ -13,8 +13,8 @@ import {
   RagUnavailableError,
 } from '../../common';
 import type { AppConfig, DomainError, ProcessingState } from '../../common';
-import { toPage } from '../../../libs/utils';
-import type { Page } from '../../../libs/utils';
+import { toPage } from '../../common';
+import type { Page } from '../../common';
 import { IndexingService } from '../../indexing';
 import { LogsService } from '../../logs';
 import { RagClient, RagRequestError } from '../../rag';

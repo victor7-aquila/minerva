@@ -1,6 +1,6 @@
 import { Transform } from 'class-transformer';
 import { ArrayNotEmpty, IsArray, IsIn, IsOptional, IsString, Matches } from 'class-validator';
-import { PageQueryDto } from '../../../libs/utils';
+import { PageQueryDto } from '../../common';
 import { LOG_KINDS } from './logs.types';
 import type { LogKind, LogOutcome, LogSortColumn } from './logs.types';
 
