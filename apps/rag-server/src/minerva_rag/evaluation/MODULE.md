@@ -30,7 +30,10 @@ Backend가 보낸 골든셋 한 건으로 검색 요청과 같은 처리로 결�
 
 ```text
 src/minerva_rag/evaluation/
-└── MODULE.md
+├── MODULE.md
+├── models.py               # 공개 데이터 타입 (REQ-RAG-6.1.1, REQ-RAG-6.2)
+├── metrics.py              # 공백 제거, 결과 본문, 적중·순위·포함 비율 계산 (REQ-RAG-6.1.3, REQ-RAG-6.2.2~REQ-RAG-6.2.6)
+└── evaluator.py            # 평가 한 번 (REQ-RAG-6). Evaluator
 
 tests/unit/evaluation/
 ```
@@ -42,7 +45,7 @@ tests/unit/evaluation/
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | search | import | `Searcher.search`, `Searcher.document_chunks`, `SearchQuery`, `SearchHit` | search `MODULE.md` | `REQ-RAG-6.2.1`, `REQ-RAG-6.3.2` |
-| core | import | `Settings`, `get_logger`, `DocumentNotSearchableError` | core `MODULE.md` | `REQ-RAG-6.3.2` |
+| core | import | `Settings`, `get_logger`, `DocumentNotSearchableError`, `InvalidRequestError` | core `MODULE.md` | `REQ-RAG-6.1.1`, `REQ-RAG-6.3.2` |
 
 **금지 의존** — resource를 직접 부르지 않는다. 검색 한 번의 처리 순서는 search 안에서 지킨다(`ARCHITECT.md` 「의존 규칙」).
 
@@ -69,6 +72,8 @@ HTTP 형식(`EvaluationResult`, `EvaluationMetrics`)은 `API.md`가 소유하며
 | `edition_only` | `bool` | 필수 | 기본 `False` |
 | `top_n` | `int \| None` | 선택 | 1 이상. `None`이면 `RAG_SEARCH_DEFAULT_TOP_N` |
 
+`top_n`이 1 미만이면 만들 때 `ValueError`를 낸다(api가 먼저 거른다). `answer_span`의 "공백을 지운 뒤 비어 있지 않다"는 `evaluate`가 검사한다(`REQ-RAG-6.1.1`).
+
 **`EvaluationMetrics`** — 정의: evaluation, 값 생산: evaluation (`REQ-RAG-6.2`)
 
 | 필드 | 타입 | 필수 | 불변 조건 |
@@ -94,7 +99,8 @@ class Evaluator:
 
 **`REQ-RAG-6.1.1`** 평가 입력
 
-- 충족 기준: 질의, 정답 문서 ID, 정답 원문 구간, 판 지정 여부, N을 담은 `EvaluationCase`로 `evaluate`가 결과를 돌려주고, `n`이 요청한 N(없으면 기본 개수)이다
+- 실패: 공백 문자(「측정 — REQ-RAG-6.2」)를 지운 `answer_span`이 비어 있으면 `document_chunks`·`search`를 부르기 전에 `InvalidRequestError`(`INVALID_REQUEST`)를 낸다
+- 충족 기준: 질의, 정답 문서 ID, 정답 원문 구간, 판 지정 여부, N을 담은 `EvaluationCase`로 `evaluate`가 결과를 돌려주고, `n`이 요청한 N(없으면 기본 개수)이다. 공백 문자만 든 `answer_span`이면 `InvalidRequestError`가 나고 search가 불리지 않는다
 
 **`REQ-RAG-6.1.2`** 저장하지 않음
 
@@ -107,11 +113,11 @@ class Evaluator:
 
 ### 측정 — `REQ-RAG-6.2`
 
-정답 구간과 결과 본문은 모든 공백 문자를 지운 뒤 비교한다. ★ 공백 문자는 JavaScript 정규식 `\s`와 같은 글자 집합이다 — 띄어쓰기·탭·줄바꿈(`\t\n\v\f\r`)과 U+00A0, U+1680, U+2000~U+200A, U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF. Python `str.isspace`·`re`의 `\s`와 다르므로(U+001C~U+001F·U+0085를 더 넣고 U+FEFF를 뺀다) 그대로 쓰지 않는다. U+200B는 공백이 아니다. 결과 본문은 확장 전이면 `chunks`의 `text`를, 확장 후면 `before`·`chunks`·`after`의 `text`를 이 순서로 이은 것이다(`REQ-RAG-6.2.6`).
+정답 구간과 결과 본문은 모든 공백 문자를 지운 뒤 비교한다. ★ 공백 문자는 JavaScript 정규식 `\s`와 같은 글자 집합이다 — 띄어쓰기·탭·줄바꿈(`\t\n\v\f\r`)과 U+00A0, U+1680, U+2000~U+200A, U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF. Python `str.isspace`·`re`의 `\s`와 다르므로(U+001C~U+001F·U+0085를 더 넣고 U+FEFF를 뺀다) 그대로 쓰지 않는다. U+200B는 공백이 아니다. 결과 본문은 확장 전이면 `chunks`의 `text`를, 확장 후면 `before`·`chunks`·`after`의 `text`를 이 순서로 이은 것이다(`REQ-RAG-6.2.6`). 글자 수(10자 기준, 덮인 글자 수, 정답 구간 글자 수)는 모두 공백 문자를 지운 뒤 유니코드 코드 포인트 단위로 센다. 그래서 공백 문자는 포함 비율의 분모에도 들지 않는다.
 
 **`REQ-RAG-6.2.1`** 검색과 같은 처리로 결과 N개
 
-- 처리 계약: `SearchQuery(query, top_n, edition_scope=ALL, expand_neighbors=True)`로 `search`를 한 번 부른다. 판 범위는 거르지 않는다
+- 처리 계약: `SearchQuery(query, top_n=n, edition_scope=ALL, expand_neighbors=True)`로 `search`를 한 번 부르고 나머지 필드는 기본값으로 둔다. `n`은 `EvaluationCase.top_n`이고, `None`이면 `RAG_SEARCH_DEFAULT_TOP_N`으로 채운 값이다(`EvaluationResult.n`과 같다). 판 범위는 거르지 않는다
 - 충족 기준: `evaluate` 한 번에 `search`가 정확히 한 번, 위 인자로 불린다
 
 **`REQ-RAG-6.2.2`** 포함 비율
@@ -158,6 +164,7 @@ class Evaluator:
 
 | 예외 | 발생 조건 | 코드·상태 | 처리 책임 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
+| `InvalidRequestError` | 공백 문자를 지운 정답 구간이 비어 있다 | `INVALID_REQUEST` | 발생: evaluation. 변환: api | `REQ-RAG-6.1.1` |
 | `DocumentNotSearchableError` | 정답 문서에 검색되는 버전이 없다 | `DOCUMENT_NOT_SEARCHABLE` | 발생: evaluation. 변환: api | `REQ-RAG-6.3.2` |
 
 search가 내는 resource 예외는 그대로 전파한다.
