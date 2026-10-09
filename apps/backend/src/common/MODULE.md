@@ -38,9 +38,9 @@ src/common/
 ├── common.module.ts
 ├── helpers/
 │   ├── logger-options.ts
-│   ├── page.ts
 │   ├── parse-kst-day-range.ts
 │   ├── time.ts
+│   ├── to-page.ts
 │   └── validate-config.ts
 ├── interfaces/
 │   ├── app-config.ts
