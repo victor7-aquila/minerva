@@ -11,6 +11,7 @@ Backend의 HTTP 요청을 받아 service로 넘기는 진입점이다. `API.md`�
 - 형식이 잘못된 요청은 FastAPI 기본값(422)이 아니라 `400 INVALID_REQUEST`다 (`REQ-RAG-9.1.2`)
 - 상태 확인은 준비 전에도, 다른 요청은 준비 뒤에만 처리된다 (`REQ-RAG-10.1.2`)
 - 상태 확인을 뺀 모든 요청은 토큰과 크기 한도를 본문을 읽기 전에 검사한다. 검사에 실패하면 service를 부르지 않는다 (`REQ-RAG-9.3.1`, `REQ-RAG-9.1.3`)
+- 검사 순서는 토큰(`401`) → 본문 크기의 `Content-Length` 사전 검사(`413`) → 요청 검증(`400`) → `markdown`·`image` 크기(`413`) → service 호출이다. 준비 상태(`503`)는 service가 판단하므로, 준비 전 요청이라도 앞의 검사에 걸리면 그 오류를 받는다 (`REQ-RAG-9.3.1`, `REQ-RAG-9.1.2`, `REQ-RAG-9.1.3`, `REQ-RAG-10.1.2`)
 
 **기능 그룹**
 
@@ -74,6 +75,7 @@ def create_app(services: Services | None = None) -> FastAPI:
 ```
 
 - 요청·응답 본문의 필드·타입·`null` 규칙은 `API.md`가 소유한다. 라우터는 요청을 service의 입력 타입으로, service의 결과를 `API.md`의 응답 형식으로 옮기기만 한다
+- 요청의 선택 필드에 `null`이 오면 빠뜨린 것과 같게 기본값을 쓴다. 필수이면서 `null`을 허용하는 필드(`PUT /v1/documents/{doc_id}/metadata`의 `edition`)는 키가 있어야 한다
 - 엔드포인트와 service 메서드의 대응: 표 요약·이미지 캡션 → `CaptionService`, 색인 요청·작업 조회·문서 색인 상태 → `IndexService`, 문서 삭제 → `DeleteService`, 이름·판 정보 변경 → `MetadataService`, 문서 청크 조회·검색 → `SearchService`, 평가 → `EvaluationService`, 상태 확인 → `LifecycleService.health`
 - 색인 요청의 응답 상태는 `outcome`이 `queued`·`joined`면 `202`, `reused`면 `200`이다(`API.md`)
 
@@ -84,7 +86,7 @@ def create_app(services: Services | None = None) -> FastAPI:
 
 **`REQ-RAG-9.1.2`** 형식이 잘못된 요청 거부
 
-- 처리 계약: 요청 검증 오류(필수 필드 없음, 타입 불일치, `top_n` 1 미만, `POST /v1/documents/index-states`의 `doc_ids` 1~100개 밖, `edition_scope`가 `specific`인데 `edition` 없음 등 `API.md`의 제약 위반)와 service의 `InvalidRequestError`를 `400 INVALID_REQUEST`로 바꾼다. 검증에 실패하면 service를 부르지 않는다
+- 처리 계약: 요청 검증 오류(필수 필드 없음, 타입 불일치, `top_n` 1 미만, `POST /v1/documents/index-states`의 `doc_ids` 1~100개 밖, `edition_scope`가 `specific`인데 `edition` 없음, `POST /v1/index-jobs`의 `assets`에 같은 `placeholder_id`가 두 번 이상 있음 등 `API.md`의 제약 위반)와 service의 `InvalidRequestError`를 `400 INVALID_REQUEST`로 바꾼다. 검증에 실패하면 service를 부르지 않는다. `API.md`에 없는 경로·메서드로 온 요청과 본문을 해석할 수 없는 요청(잘못된 JSON, 잘못된 multipart)도 `400 INVALID_REQUEST`다. FastAPI 기본 응답(`{"detail": ...}`, `404`, `405`)을 내보내지 않는다
 - 충족 기준: 필수 필드가 빠진 요청이 `400`과 `{"error": {"code": "INVALID_REQUEST", ...}}`로 거부되고 service 호출이 없다
 
 **`REQ-RAG-9.1.3`** 크기 한도를 넘는 요청 거부
@@ -117,7 +119,7 @@ flowchart TB
 ```
 
 1. **시작** — FastAPI 수명주기 시작에서 `LifecycleService.startup`을 백그라운드로 실행하고 바로 요청을 받기 시작한다. 그래야 준비 중에도 상태 확인이 응답하고 다른 요청은 "준비 중"을 받는다. (`REQ-RAG-10.1.2`)
-2. **기동 실패** — `startup`이 예외를 내면 프로세스를 끝낸다. 설정한 모델을 불러오지 못하면 기동하지 않는다는 요구를 여기서 지킨다. (`REQ-RAG-12.1.1`)
+2. **기동 실패** — `startup`이 예외를 내면 프로세스를 끝낸다. 설정한 모델을 불러오지 못하면 기동하지 않는다는 요구를 여기서 지킨다. 로그를 내보낸 뒤 0이 아닌 종료 코드로 끝낸다. (`REQ-RAG-12.1.1`)
 3. **종료** — 수명주기 끝에서 `LifecycleService.shutdown`을 기다린다. (`REQ-RAG-10.1.3`)
 
 ## 실행 계약
@@ -160,3 +162,6 @@ flowchart TB
 | `REQ-RAG-9.1.3` | unit | 한도 초과 `413`, 한도와 같은 크기 처리, service 미호출 | service (가짜) | `tests/unit/api/` |
 | `REQ-RAG-9.2.1` | unit | 연결 상태 표기, 준비 전에도 `200`, 토큰 없이 `200` | service (가짜) | `tests/unit/api/` |
 | `REQ-RAG-9.3.1` | unit | 토큰 없음·틀림 `401`, 맞으면 처리, 준비 전에도 토큰 검사가 먼저 | service (가짜) | `tests/unit/api/` |
+| `REQ-RAG-10.1.2` | unit | 기동을 백그라운드로 돌려 준비 중에도 상태 확인이 `200` | service (가짜, 기동 대기) | `tests/unit/api/` |
+| `REQ-RAG-10.1.3` | unit | 앱 종료 때 `LifecycleService.shutdown`을 기다림 | service (가짜) | `tests/unit/api/` |
+| `REQ-RAG-12.1.1` | unit | 기동 실패 시 `api.startup_failed` 로그와 프로세스 종료 | service (가짜, 기동 실패), 프로세스 종료 함수 | `tests/unit/api/` |
