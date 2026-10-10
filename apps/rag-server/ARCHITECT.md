@@ -186,7 +186,7 @@ sequenceDiagram
 
 - **RAG Server 프로세스** — FastAPI 앱 하나가 HTTP API와 색인 작업 처리기를 함께 실행한다. 동시에 처리하는 작업 수는 설정값이다 (`REQ-RAG-10.8.3.1`)
 - **기동 순서** — 용어집 읽기, 모델 준비, Qdrant 연결(모델의 임베딩 차원으로), 작업 처리기 시작을 차례로 마친 뒤 요청을 받는다 (`REQ-RAG-10.1.1`, `REQ-RAG-4.8`)
-- **Qdrant, Ollama** — RAG Server보다 먼저 떠 있어야 한다. 로컬 개발에서는 저장소 루트의 `docker-compose.yml`로 띄우고, 데이터는 named volume `qdrant-data`(Qdrant)와 `ollama-models`(Ollama 모델)에 둔다
+- **Qdrant, Ollama** — RAG Server보다 먼저 떠 있어야 한다. 로컬 개발에서 Qdrant는 저장소 루트의 `docker-compose.yml`로 띄우고 데이터는 named volume `qdrant-data`에 둔다. Ollama는 같은 compose의 `ollama` 프로필(기본 기동에서 빠진다, 모델은 named volume `ollama-models`)로 띄우거나 호스트에 설치한 Ollama를 쓴다. 둘은 같은 포트를 쓰므로 하나만 띄운다. Windows는 GPU를 바로 쓰는 호스트 설치를 권장한다. 실행 명령은 `AGENTS.md`가 소유한다
 - **로컬 파일** — RAG Server 프로세스가 직접 쓰는 작업 목록 SQLite(`data/rag-server/jobs.sqlite3`)와 임베딩·리랭커 모델 파일(`data/rag-server/models`)은 저장소 루트의 `data/` 아래에 둔다. 위치는 설정으로 바꿀 수 있고, 모델 파일을 이 위치에 미리 받아 두면 기동할 때 내려받지 않는다
 - **Backend 알림 주소** — 설정으로 받는다
 
