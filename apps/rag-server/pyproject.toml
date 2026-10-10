@@ -57,6 +57,10 @@ extend-exclude = ["*.md"]
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "N"]
 
+# ★ `import minerva_rag.x as y` 형태를 캐시 상태에 따라 서드파티로 보는 일이 있어 자기 패키지를 명시한다
+[tool.ruff.lint.isort]
+known-first-party = ["minerva_rag"]
+
 # ★ mypy는 pathspec(MPL-2.0)을 끌어와 허용 라이선스 밖이라 basedpyright를 쓴다
 [tool.basedpyright]
 pythonVersion = "3.12"

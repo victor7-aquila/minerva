@@ -5,11 +5,11 @@ import os
 from collections.abc import Iterator
 from uuid import uuid4
 
-import minerva_rag.resource.chunk_store as chunk_store_module
 import ollama
 import pytest
 from qdrant_client import AsyncQdrantClient
 
+import minerva_rag.resource.chunk_store as chunk_store_module
 from minerva_rag.core import Settings, get_settings
 
 
