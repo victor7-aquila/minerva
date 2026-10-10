@@ -28,6 +28,10 @@ dev = [
     "pytest>=9.1",
     "ruff>=0.16",
 ]
+# ★ torch 휠 선택용 그룹이다. 기본은 cpu(default-groups)이고, GPU 배포는 cpu를 빼고 gpu를 넣는다
+#   (uv sync --group gpu --no-group cpu). 패키지 소스는 아래 「패키지 소스」에서 그룹별로 고른다
+cpu = ["torch>=2.14.1"]
+gpu = ["torch>=2.14.1"]
 
 [build-system]
 requires = ["uv_build>=0.9"]
@@ -35,17 +39,31 @@ build-backend = "uv_build"
 
 # ── 패키지 소스 ────────────────────────────────────────────
 
-# ★ torch는 CPU 휠 인덱스에서만 받는다. PyPI torch는 Linux에서 nvidia-*·triton을 끌어오며
-#   그 라이선스는 승인 밖이다. sources는 직접 의존성에만 적용되므로 torch를 직접 선언한다
+# ★ 기본 설치의 torch는 CPU 휠 인덱스에서만 받는다. PyPI torch는 Linux에서 nvidia-*·triton을 끌어오며
+#   그 라이선스는 허용 목록 밖이다. sources는 직접 의존성에만 적용되므로 torch를 직접 선언한다
+# ★ CUDA 휠(cu130)은 GPU 배포용 선택 설치(gpu 그룹)로만 받는다. CUDA 런타임(NVIDIA 독점 라이선스)은
+#   그 경우에만 허용한 사용자 승인 예외다 (루트 AGENTS.md 「라이선스」). RTX 50 계열은 cu128 이상이 필요하다
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+# ★ 그룹 조건 소스는 같은 해석 분기의 torch 요구(본 의존성 포함)에 함께 적용된다.
+#   cpu·gpu 그룹을 모두 빼면 torch가 PyPI에서 오므로 --no-default-groups·--no-group cpu만 쓰지 않는다
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu130", group = "gpu" },
+]
 
 [tool.uv]
+default-groups = ["dev", "cpu"]
+conflicts = [[{ group = "cpu" }, { group = "gpu" }]]
 # ★ portalocker가 Windows에서 끌어오는 pywin32는 LGPL-2.1 등을 번들해 허용 라이선스 밖이라
 #   사용자 결정으로 뺀다. qdrant-client의 로컬 디스크 모드에서만 쓰이고 이 앱은 쓰지 않는다
 exclude-dependencies = ["pywin32"]

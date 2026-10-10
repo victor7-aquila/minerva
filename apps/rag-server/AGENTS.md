@@ -11,6 +11,13 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 - MongoDB와 파일 저장소에 접속하지 않는다. 처리할 데이터는 Backend가 요청에 담아 보낸 것만 쓴다 — 원본 문서·표·이미지·요약·캡션은 Backend가 저장한다
 - 외부에서 호스팅하는 모델 API(클라우드 LLM·임베딩·리랭커 API)를 호출하지 않는다. 모델은 로컬에서 Ollama(LLM·VLM)와 sentence-transformers(임베딩·리랭커)로 실행한다 — 사내 폐쇄망 배포를 가정한다
 
+## 명령어
+
+| 목적 | 명령 | 비고 |
+| :--- | :--- | :--- |
+| 설치 | `uv sync` | `apps/rag-server`에서 실행한다. torch는 CPU 휠이다. `--no-default-groups`나 `--no-group cpu`만 쓰면 torch가 PyPI(CUDA)에서 오므로 쓰지 않는다 |
+| GPU 배포용 설치 | `uv sync --group gpu --no-group cpu` | torch를 CUDA 휠(cu130)로 바꾼다. `--no-group cpu`를 빼면 그룹 충돌로 실패한다. 배포에서는 `--no-dev`를 더한다 |
+
 ## 코딩 규칙
 
 - 로그는 structlog 구조화 이벤트로만 남긴다. 모듈 맨 위에 `log = get_logger(__name__)`를 두고, 이벤트명은 `모듈.동작` 형식으로 쓴다 (예: `log.info("resource.upsert", doc_id=doc_id, chunks=len(chunks))`). `print()`나 f-string으로 조립한 메시지를 로그로 남기지 않는다
