@@ -28,6 +28,7 @@ _BUSY_TIMEOUT_SECONDS = 5.0
 _NOTIFY_TIMEOUT_SECONDS = 10.0
 _SCHEMA_VERSION = 1
 _RECORD_ATTEMPTS = 3  # 결과 기록을 바로 다시 시도하는 최대 횟수
+_NOTIFY_FLUSH_SECONDS = 3.0  # 종료 때 마지막 알림의 첫 전송을 기다리는 상한
 _INTERNAL_ERROR_MESSAGE = (
     "색인 중 예상하지 못한 오류가 발생했습니다. 서버 로그를 확인한 뒤 다시 색인해 주세요"
 )
@@ -626,6 +627,10 @@ class JobManager:
             await asyncio.gather(*unfinished, return_exceptions=True)
         # 경계에서 끝난 결과 기록과 단계 저장은 마저 마친다
         await asyncio.gather(*self._record_tasks, *self._background, return_exceptions=True)
+        # ★ 닫기 전에 방금 끝난 작업의 알림이 첫 전송을 시도할 짬을 준다. 상한이 있다
+        senders = set(self._senders.values())
+        if senders:
+            await asyncio.wait(senders, timeout=_NOTIFY_FLUSH_SECONDS)
         await self._close_notifier()
 
     async def _close_notifier(self) -> None:
@@ -928,6 +933,13 @@ class JobManager:
             )
             return False
         self._pending.pop(job.job_id, None)  # ★ 러너 참조는 여기서만 꺼낸다. 다시 실행하지 않는다
+        if self._stopping:
+            # ★ stop이 `_running`을 이미 떠 간 뒤에 커밋이 끝난 경합이다. 여기서 태스크를 만들면
+            #   stop의 대기·취소 대상 밖에서 닫힌 자원 위에 실행돼 FAILED로 잘못 기록될 수 있다.
+            #   그래서 실행하지 않고 RUNNING으로 남긴다 — 다음 start의 재시작 처리가 끝맺는다
+            #   (REQ-RAG-10.1.3, REQ-RAG-10.8.5)
+            self._after_commit(changes)
+            return True
         if changes:
             self._stages[job.job_id] = JobStage.CHUNKING
             self._running_docs[job.doc_id] = job.job_id
