@@ -5,15 +5,19 @@ description = "minerva RAG Server"
 requires-python = ">=3.12"
 license = "MIT"
 dependencies = [
+    "fastapi>=0.115",
     "httpx>=0.28.1",
     "ollama>=0.6.3",
     "pydantic>=2.14",
     "pydantic-settings>=2.15",
+    "python-multipart>=0.0.9",
     "pyyaml>=6.0.3",
     "qdrant-client>=1.19.1",
     "sentence-transformers>=6.1.0",
+    "starlette>=1.7",
     "structlog>=26.1",
     "torch>=2.14.1",
+    "uvicorn>=0.30",
 ]
 
 [dependency-groups]
@@ -74,7 +78,9 @@ reportUnnecessaryTypeIgnoreComment = "error"
 known_first_party = ["minerva_rag"]
 
 [tool.deptry.per_rule_ignores]
-DEP002 = ["torch"]
+# ★ uvicorn은 실행 명령(uvicorn minerva_rag.api:create_app --factory)에서만 쓰고 코드에서 import하지 않는다
+# ★ python-multipart는 FastAPI가 multipart를 해석할 때 내부에서 import한다
+DEP002 = ["torch", "uvicorn", "python-multipart"]
 
 # ★ 의존 규칙의 정본은 ARCHITECT.md 「의존 규칙」이다. 규칙을 바꿀 때는 그 문서부터 바꾼다
 [tool.importlinter]
