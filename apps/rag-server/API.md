@@ -8,7 +8,7 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 - **인증** — 상태 확인(`GET /v1/health`)을 뺀 모든 요청은 `X-Minerva-Token` 헤더에 설정한 API 토큰을 담는다. 없거나 다르면 `401 UNAUTHORIZED`다(`REQ-RAG-9.3.1`)
 - **크기 한도** — 색인 요청의 `markdown`과 이미지 캡션 요청의 `image`가 설정한 한도(기본 10MB, 20MB)를 넘으면 `413 PAYLOAD_TOO_LARGE`다(`REQ-RAG-9.1.3`)
 - **요청·응답 형식** — `application/json`, UTF-8. 이미지 캡션 요청만 `multipart/form-data`다. 필드 이름은 snake_case다
-- **오류 응답** — 모든 실패 응답은 아래 본문을 갖는다. `message`는 한국어이고, 스택 트레이스·쿼리·파일 경로를 담지 않는다(`REQ-RAG-11.3`)
+- **오류 응답** — 모든 실패 응답은 아래 본문을 갖는다. `message`는 한국어이고, 스택 트레이스·쿼리·파일 경로를 담지 않는다(`REQ-RAG-11.3`). `details`는 오류 코드마다 「오류 코드」 표가 정한 추가 정보 객체이고, 정하지 않은 오류 코드는 `null`이다
 - **null과 빠진 필드** — 응답의 선택 필드는 값이 없으면 빠뜨리지 않고 `null`로 내보낸다. 요청의 선택 필드는 빠뜨리면 기본값을 쓴다
 - **시간·ID 형식** — 날짜는 ISO 8601 날짜 문자열(예: `2025-01-31`)이다. `doc_id`와 `version`은 Backend가 정한 문자열을 그대로 쓴다. `job_id`와 `chunk_id`는 RAG Server가 정한 문자열이다
 - **공통 오류** — 형식이 잘못된 요청은 `400 INVALID_REQUEST`(`REQ-RAG-9.1.2`), 준비가 끝나기 전 요청은 상태 확인(`GET /v1/health`)을 빼고 `503 SERVER_NOT_READY`(`REQ-RAG-10.1.2`), 예상하지 못한 서버 오류는 `500 INTERNAL_ERROR`다
@@ -17,7 +17,8 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 {
   "error": {
     "code": "INVALID_REQUEST",
-    "message": "요청 형식이 잘못되었습니다"
+    "message": "요청 형식이 잘못되었습니다",
+    "details": null
   }
 }
 ```
@@ -62,6 +63,10 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 | `502` | `CAPTION_FAILED` | 요약을 만들지 못했다 (`REQ-RAG-10.2.2.3`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
 
+**동작**
+
+- 일괄 색인의 임베딩 단계 중에 받은 요청은 그 단계가 끝난 뒤 처리하고 응답한다 (`REQ-RAG-10.2.4.1`, 루트 `INTERFACES.md` `IF-3`)
+
 ### `POST /v1/captions/image`
 
 이미지를 설명하는 캡션을 만들어 돌려준다. 결과는 저장하지 않는다. (`REQ-RAG-10.2.3`, `REQ-RAG-10.2.1`)
@@ -82,6 +87,10 @@ RAG Server가 Backend에 제공하는 HTTP API다. Backend는 이 API로 표 요
 | :--- | :--- | :--- |
 | `502` | `CAPTION_FAILED` | 캡션을 만들지 못했다. 모델이 읽지 못하는 형식의 이미지도 같다 (`REQ-RAG-10.2.3.3`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
+
+**동작**
+
+- 일괄 색인의 임베딩 단계 중에 받은 요청은 그 단계가 끝난 뒤 처리하고 응답한다 (`REQ-RAG-10.2.4.1`, 루트 `INTERFACES.md` `IF-3`)
 
 ### `POST /v1/index-jobs`
 
@@ -274,6 +283,7 @@ Content-Type: application/json
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
+| `503` | `BATCH_INDEXING` | 일괄 색인 중이다. 검색하지 않는다 (`REQ-RAG-10.4.3`, 루트 `INTERFACES.md` `IF-3`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
 | `503` | `STORE_UNAVAILABLE` | Qdrant에 연결할 수 없다 (`REQ-RAG-12.2.1`) |
 | `500` | `VECTOR_DIMENSION_MISMATCH` | 저장된 벡터의 차원이 지금 임베딩 모델과 다르다 (`REQ-RAG-12.2.2`) |
@@ -337,8 +347,9 @@ Content-Type: application/json
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
-| `400` | `INVALID_REQUEST` | 공백 문자를 지운 `answer_span`이 비어 있다. 정답 문서 확인과 검색보다 먼저 검사한다 (`REQ-RAG-6.1.1`) |
+| `400` | `INVALID_REQUEST` | 공백 문자를 지운 `answer_span`이 비어 있다. 일괄 색인 확인, 정답 문서 확인, 검색보다 먼저 검사한다 (`REQ-RAG-6.1.1`) |
 | `409` | `DOCUMENT_NOT_SEARCHABLE` | 정답 문서가 검색되지 않는 상태다 (`REQ-RAG-6.3.2`) |
+| `503` | `BATCH_INDEXING` | 일괄 색인 중이다. 평가하지 않는다 (`REQ-RAG-10.7.2`, 루트 `INTERFACES.md` `IF-3`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
 | `503` | `STORE_UNAVAILABLE` | Qdrant에 연결할 수 없다 (`REQ-RAG-12.2.1`) |
 
@@ -394,7 +405,7 @@ Qdrant와 Ollama의 연결 상태를 돌려준다. (`REQ-RAG-9.2.1`)
 | `doc_id` | `string` | 필수 | |
 | `version` | `string` | 필수 | |
 | `state` | `string` | 필수 | `queued`(색인 대기), `running`(색인 중), `succeeded`(완료), `failed`(실패), `superseded`(대체됨) 중 하나 (`REQ-RAG-10.8.2.1`) |
-| `stage` | `string` | 조건부 | `state`가 `running`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null` (`REQ-RAG-10.8.2.3`) |
+| `stage` | `string` | 조건부 | `state`가 `running`이면 `chunking`(분할), `embedding_pending`(임베딩 대기), `embedding`(임베딩), `storing`(저장) 중 하나, 아니면 `null` (`REQ-RAG-10.8.2.3`) |
 | `failure` | `JobFailure` | 조건부 | `state`가 `failed`이면 필수, 아니면 `null` (`REQ-RAG-10.8.2.4`) |
 | `result` | `JobResult` | 조건부 | `state`가 `succeeded`이면 필수, 아니면 `null` (`REQ-RAG-10.8.2.6`) |
 
@@ -434,7 +445,7 @@ Qdrant와 Ollama의 연결 상태를 돌려준다. (`REQ-RAG-9.2.1`)
 | `searchable_version` | `string` | 선택 | 현재 검색되는 버전. 없으면 `null` (`REQ-RAG-10.8.6.1`) |
 | `latest_job_id` | `string` | 선택 | 그 문서의 최신 작업. 없으면 `null` |
 | `latest_job_state` | `string` | 선택 | 최신 작업의 상태. 값은 `IndexJob.state`와 같다. 없으면 `null` |
-| `latest_job_stage` | `string` | 선택 | 최신 작업이 `running`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null` (`REQ-RAG-10.8.6.2`) |
+| `latest_job_stage` | `string` | 선택 | 최신 작업이 `running`이면 `IndexJob.stage`와 같은 값 중 하나, 아니면 `null` (`REQ-RAG-10.8.6.2`) |
 
 ### `SearchResult`
 
@@ -515,6 +526,7 @@ Qdrant와 Ollama의 연결 상태를 돌려준다. (`REQ-RAG-9.2.1`)
 | `INTERNAL_ERROR` | `500` | 예상하지 못한 서버 오류 |
 | `VECTOR_DIMENSION_MISMATCH` | `500` | 저장된 벡터와 지금 임베딩 모델의 차원이 다르다 |
 | `CAPTION_FAILED` | `502` | 요약·캡션을 만들지 못했다 |
+| `BATCH_INDEXING` | `503` | 일괄 색인 중이라 검색·평가를 하지 않는다. `details`는 `{"remaining_jobs": 정수}` — 끝나지 않은(색인 대기·색인 중) 색인 작업의 수, 0 이상 |
 | `MODEL_UNAVAILABLE` | `503` | 모델 서버에 연결할 수 없다 |
 | `STORE_UNAVAILABLE` | `503` | Qdrant에 연결할 수 없다 |
 | `SERVER_NOT_READY` | `503` | 서버가 아직 준비 중이다 |

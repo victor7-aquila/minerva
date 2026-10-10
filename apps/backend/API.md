@@ -7,7 +7,7 @@ Backend가 Console과 AI 에이전트·개발 도구에 제공하는 HTTP API다
 - **기본 경로·버전** — 모든 경로는 `/v1`로 시작한다
 - **인증** — Console·AI 에이전트의 요청은 인증을 요구하지 않는다 (`REQ-BE-7.1.1`). RAG Server의 작업 상태 알림만 `X-Minerva-Token` 헤더의 알림 토큰을 검사한다 (`REQ-BE-3.2.5`)
 - **요청·응답 형식** — `application/json`, UTF-8. 파일을 올리는 요청은 `multipart/form-data`, 이미지 응답은 이미지 바이너리다. 필드 이름은 snake_case다
-- **오류 응답** — 모든 실패 응답은 아래 본문을 갖는다. `message`는 한국어이고, 스택 트레이스·쿼리·파일 경로를 담지 않는다 (`REQ-BE-8.3`)
+- **오류 응답** — 모든 실패 응답은 아래 본문을 갖는다. `message`는 한국어이고, 스택 트레이스·쿼리·파일 경로를 담지 않는다 (`REQ-BE-8.3`). `details`는 오류 코드마다 「오류 코드」 표가 정한 추가 정보 객체이고, 정하지 않은 오류 코드는 `null`이다
 - **null과 빠진 필드** — 응답의 선택 필드는 값이 없으면 빠뜨리지 않고 `null`로 내보낸다. 요청의 선택 필드는 빠뜨리면 기본값을 쓴다. `PATCH`에서는 빠진 필드는 바꾸지 않고, `null`은 값을 지운다
 - **시각·날짜** — 시각은 UTC의 ISO 8601 문자열(예: `2026-10-04T05:05:31Z`)이다 (`REQ-BE-8.4`). 날짜로 거르는 파라미터는 날짜 문자열(예: `2026-10-04`)이며 한국 표준시(KST) 하루로 해석한다 (`REQ-BE-1.3.4`, `REQ-BE-6.2.2`)
 - **ID** — `doc_id`, `golden_set_id`, `log_id`는 Backend가 정한 문자열이다. `doc_id`는 소문자 UUID다. 경로의 `{doc_id}`와 `exclude_doc_id`가 이 형식이 아니면 `400 INVALID_REQUEST`다
@@ -20,7 +20,8 @@ Backend가 Console과 AI 에이전트·개발 도구에 제공하는 HTTP API다
 {
   "error": {
     "code": "INVALID_REQUEST",
-    "message": "판 표기와 판 날짜는 함께 입력해야 합니다"
+    "message": "판 표기와 판 날짜는 함께 입력해야 합니다",
+    "details": null
   }
 }
 ```
@@ -254,7 +255,7 @@ MD 하나와 이미지들로 그 문서의 새 버전을 만든다. (`REQ-BE-1.6
 
 **응답**
 
-- `202` — 본문 없음. 임시 설명인 표·이미지가 있으면 처리 상태가 요약·캡션 생성 중이 되어 그 요약·캡션을 다시 만든 뒤 색인 대기가 되고, 없으면 바로 색인 대기가 된다. 색인 대기가 되면 색인 대기열에 들어가고, 다음 예약 색인에서 강제 재색인으로 요청한다 (`REQ-BE-1.7.1`, `REQ-BE-1.9.2`, `REQ-BE-1.9.3`, `REQ-BE-1.10.1`, `REQ-BE-1.10.2`)
+- `202` — 본문 없음. 처리 상태가 색인 대기가 되고 색인 대기열에 들어간다. 다음 예약 색인에서 임시 설명인 표·이미지(짝이 없는 이미지는 빼고)가 있으면 그 요약·캡션을 다시 만든 뒤(그동안 처리 상태는 요약·캡션 생성 중), 강제 재색인으로 요청한다 (`REQ-BE-1.7.1`, `REQ-BE-1.9.2`, `REQ-BE-1.9.3`, `REQ-BE-1.9.13`, `REQ-BE-1.10.1`, `REQ-BE-1.10.2`)
 
 **오류**
 
@@ -315,6 +316,12 @@ MD 하나와 이미지들로 그 문서의 새 버전을 만든다. (`REQ-BE-1.6
 **응답**
 
 - `200` — `{"results": SearchResult[]}`. 결과가 없으면 빈 배열
+
+**오류**
+
+| 상태 | 오류 코드 | 조건 |
+| :--- | :--- | :--- |
+| `503` | `BATCH_INDEXING` | RAG Server가 일괄 색인 중이라 검색하지 않았다. `details.remaining_jobs`는 RAG Server가 알려 준 남은 작업 수다 (`REQ-BE-10.1.5`, 루트 `INTERFACES.md` `IF-3`) |
 
 ### `GET /v1/golden-sets`
 
@@ -497,7 +504,7 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 | `sibling_editions` | `Edition[]` | 필수 | 이 문서 자신과, 같은 이름이고 검색 가능인 다른 문서들의 판. 판 날짜가 늦은 순. 이 문서에 판 정보가 없으면 빈 배열 (`REQ-BE-1.3.5`) |
 | `search_state` | `string` | 필수 | `searchable`(검색 가능), `not_searchable`(검색 안 됨), `replaced`(교체됨) |
 | `processing_state` | `string` | 필수 | `uploaded`(업로드됨), `captioning`(요약·캡션 생성 중), `queued`(색인 대기), `indexing`(색인 중), `completed`(완료), `failed`(실패) |
-| `stage` | `string` | 선택 | `processing_state`가 `indexing`이면 `chunking`, `embedding`, `storing` 중 하나, 아니면 `null`. RAG Server에서 단계를 받지 못했으면 `indexing`이어도 `null` (`REQ-BE-1.3.6`) |
+| `stage` | `string` | 선택 | `processing_state`가 `indexing`이면 `chunking`(분할), `embedding_pending`(임베딩 대기), `embedding`(임베딩), `storing`(저장) 중 하나, 아니면 `null`. RAG Server에서 단계를 받지 못했으면 `indexing`이어도 `null` (`REQ-BE-1.3.6`) |
 | `failure_message` | `string` | 선택 | `processing_state`가 `failed`이면 실패 사유 설명, 아니면 `null` (`REQ-BE-1.3.8`) |
 | `in_index_queue` | `boolean` | 선택 | `processing_state`가 `queued`면 색인 대기열에 있는가, 아니면 `null`. `true`면 다음 예약 색인을 기다리는 중이고, `false`면 RAG Server가 접수한 색인 작업이 시작을 기다리는 중이다 (`REQ-BE-1.3.9`, `REQ-BE-1.4.6`) |
 | `next_index_at` | `string` | 선택 | `processing_state`가 `queued`면 다음 예약 색인 시각(응답하는 때보다 뒤의 가장 이른 예약 시각), 아니면 `null` (`REQ-BE-1.3.9`, `REQ-BE-1.4.6`) |
@@ -539,8 +546,8 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 | `kind` | `string` | 필수 | `table` 또는 `image` |
 | `table_markdown` | `string` | 조건부 | `kind`가 `table`이면 원본 Markdown 표, 아니면 `null`. 인용문·목록 안 표는 둘째 줄부터의 블록 접두를 떼고, 표 안 짝 있는 이미지의 경로는 이미지 주소로 바꾼다 |
 | `image_url` | `string` | 조건부 | `kind`가 `image`이고 짝이 있으면 이미지 주소, 아니면 `null` |
-| `text` | `string` | 필수 | 요약·캡션 |
-| `is_fallback` | `boolean` | 필수 | 임시 설명인가 |
+| `text` | `string` | 선택 | 요약·캡션. 예약 색인에서 아직 만들지 않았으면 `null` (`REQ-BE-1.4.4`, `REQ-BE-2.3.7`) |
+| `is_fallback` | `boolean` | 필수 | 임시 설명인가. `text`가 `null`이면 `false` |
 
 ### `AssetTextUpdate`
 
@@ -605,7 +612,7 @@ RAG Server의 작업 상태 알림을 받는다. 본문과 `X-Minerva-Token` 헤
 | `n` | `integer` | 선택 | 이번 평가의 결과 개수. 평가가 끝나지 않았으면 `null` |
 | `base` | `EvaluationMetrics` | 선택 | 연관 청크 확장 전. 평가가 끝나지 않았으면 `null` |
 | `expanded` | `EvaluationMetrics` | 선택 | 연관 청크 확장 후. 평가가 끝나지 않았으면 `null` |
-| `error_message` | `string` | 선택 | `outcome`이 `error`면 사유(정답 문서가 검색되지 않음 포함, `REQ-BE-5.2.7`), 아니면 `null` |
+| `error_message` | `string` | 선택 | `outcome`이 `error`면 사유(정답 문서가 검색되지 않음 `REQ-BE-5.2.7`, 일괄 색인 중 `REQ-BE-5.2.9` 포함), 아니면 `null` |
 | `evaluated_at` | `string` | 선택 | 평가가 끝난 시각. 평가 중이면 `null` |
 
 Console의 정답 순위·포함 비율 칸은 `expanded`의 값을 쓴다.
@@ -677,3 +684,4 @@ RAG Server `POST /v1/evaluations` 응답의 `EvaluationMetrics`와 같은 모양
 | `PAYLOAD_TOO_LARGE` | `413` | 업로드 한도를 넘는다 |
 | `INTERNAL_ERROR` | `500` | 예상하지 못한 서버 오류 |
 | `RAG_UNAVAILABLE` | `503` | RAG Server가 응답하지 않거나 준비 중이다 |
+| `BATCH_INDEXING` | `503` | RAG Server가 일괄 색인 중이라 검색하지 않았다. `details`는 `{"remaining_jobs": 정수}` — RAG Server가 알려 준 끝나지 않은 색인 작업의 수, 0 이상 |
