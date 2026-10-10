@@ -135,9 +135,10 @@ def _read_snapshot(path: Path) -> _Snapshot:
     try:
         # ★ safe_load만 쓴다 — 임의 객체를 만들지 않는다
         data: object = yaml.safe_load(text)
-    except (yaml.YAMLError, ValueError, TypeError, OverflowError, RecursionError):
-        # ★ 잘못된 날짜 같은 생성자 오류(ValueError)와 깊은 중첩(RecursionError)도 형식 오류다.
-        #   파일 내용이 담긴 원인은 잇지 않는다
+    except Exception:
+        # ★ PyYAML은 YAMLError 밖의 예외(잘못된 날짜의 ValueError, !!timestamp의 AttributeError,
+        #   !!bool의 KeyError, 깊은 중첩의 RecursionError 등)도 낸다. safe_load 한 줄만 감싸므로
+        #   모두 형식 오류로 본다. 파일 내용이 담긴 원인은 잇지 않는다
         raise _InvalidGlossaryError("용어집 파일이 YAML 형식이 아닙니다", "invalid_yaml") from None
     if not isinstance(data, dict):
         raise _invalid("최상위")

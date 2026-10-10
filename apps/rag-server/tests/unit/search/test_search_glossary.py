@@ -267,6 +267,18 @@ def test_load_invalid_date_raises_glossary_error(settings: Settings, glossary_pa
     assert "2024-02-30" not in str(info.value)
 
 
+@pytest.mark.req("REQ-RAG-4.8.1")
+@pytest.mark.parametrize("bad_value", ["!!timestamp zz", "!!bool x"])
+def test_load_bad_yaml_tag_raises_glossary_error(
+    settings: Settings, glossary_path: Path, bad_value: str
+) -> None:
+    """[REQ-RAG-4.8.1] PyYAML이 YAMLError 밖의 예외를 내는 태그 값도 GlossaryError가 된다."""
+    write_glossary(glossary_path, f"terms:\n  - canonical: a\n    synonyms: [{bad_value}]\n")
+
+    with pytest.raises(GlossaryError):
+        Glossary(settings).load()
+
+
 @pytest.mark.req("REQ-RAG-4.8.3")
 def test_reload_invalid_date_keeps_previous(settings: Settings, glossary_path: Path) -> None:
     """[REQ-RAG-4.8.3] 잘못된 날짜 파일로 바뀌면 직전 묶음으로 확장하고 경고를 한 번 남긴다."""
