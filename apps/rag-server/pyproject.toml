@@ -137,10 +137,74 @@ source_modules = [
 ]
 forbidden_modules = ["qdrant_client", "ollama", "sentence_transformers"]
 
+# 근거: ARCHITECT.md 「의존 규칙」 "Backend로 보내는 HTTP 호출은 service의 작업 상태 알림만 한다"
+#   ★ resource는 Ollama 클라이언트 설정에 httpx를 쓰므로 출발지에서 뺀다
+[[tool.importlinter.contracts]]
+name = "Backend로 보내는 HTTP 호출(httpx)은 service의 작업 상태 알림(jobs)만 한다 (ARCHITECT.md 「의존 규칙」)"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = [
+    "minerva_rag.api",
+    "minerva_rag.chunking",
+    "minerva_rag.indexing",
+    "minerva_rag.search",
+    "minerva_rag.evaluation",
+    "minerva_rag.core",
+    "minerva_rag.service._guard",
+    "minerva_rag.service.captioner",
+    "minerva_rag.service.lifecycle_service",
+    "minerva_rag.service.caption_service",
+    "minerva_rag.service.index_service",
+    "minerva_rag.service.search_service",
+    "minerva_rag.service.delete_service",
+    "minerva_rag.service.metadata_service",
+    "minerva_rag.service.evaluation_service",
+]
+forbidden_modules = ["httpx"]
+
+# 근거: ARCHITECT.md 「의존 규칙」 "service가 resource에 직접 기대는 것은 조립, 기동·종료,
+#   상태 확인, 표 요약·이미지 캡션 생성뿐이다" (조립·기동·종료·상태 확인은 lifecycle_service, 생성은 captioner)
+[[tool.importlinter.contracts]]
+name = "service가 resource를 직접 쓰는 것은 조립·기동·종료·상태 확인(lifecycle_service)과 요약·캡션 생성(captioner)뿐이다 (ARCHITECT.md 「의존 규칙」)"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = [
+    "minerva_rag.service._guard",
+    "minerva_rag.service.jobs",
+    "minerva_rag.service.caption_service",
+    "minerva_rag.service.index_service",
+    "minerva_rag.service.search_service",
+    "minerva_rag.service.delete_service",
+    "minerva_rag.service.metadata_service",
+    "minerva_rag.service.evaluation_service",
+]
+forbidden_modules = ["minerva_rag.resource"]
+
+# 근거: ARCHITECT.md 「폴더 구조와 배치 규칙」(작업 관리는 서비스 파일들이 쓰는 헬퍼)과
+#   service MODULE.md 「작업 관리 헬퍼」 "작업 큐 — 금지: chunking·indexing과 서비스 파일을 import하지 않는다"
+[[tool.importlinter.contracts]]
+name = "작업 큐(jobs)는 기능 단위와 서비스 파일을 import하지 않는다 (service MODULE.md 「작업 관리 헬퍼」)"
+type = "forbidden"
+allow_indirect_imports = true
+source_modules = ["minerva_rag.service.jobs"]
+forbidden_modules = [
+    "minerva_rag.chunking",
+    "minerva_rag.indexing",
+    "minerva_rag.search",
+    "minerva_rag.evaluation",
+    "minerva_rag.resource",
+    "minerva_rag.service.captioner",
+    "minerva_rag.service.lifecycle_service",
+    "minerva_rag.service.caption_service",
+    "minerva_rag.service.index_service",
+    "minerva_rag.service.search_service",
+    "minerva_rag.service.delete_service",
+    "minerva_rag.service.metadata_service",
+    "minerva_rag.service.evaluation_service",
+]
+
 # ★ 아래 금지 의존은 모듈 import로 표현할 수 없어 계약으로 두지 않는다 — 리뷰와 테스트로 본다
 # - 청크 저장·삭제는 indexing만 resource로 하고, search는 조회만 한다
-# - service가 resource를 직접 쓰는 것은 조립·기동·종료·상태 확인·요약·캡션 생성뿐이다
-# - Backend로 보내는 HTTP 호출은 service의 작업 상태 알림뿐이다 (HTTP 클라이언트 라이브러리가 정해지면 계약을 더한다)
 
 # ── 테스트 ────────────────────────────────────────────────
 
