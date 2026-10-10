@@ -5,6 +5,7 @@ import re
 import pytest
 
 from minerva_rag.core import (
+    BatchIndexingError,
     CaptionFailedError,
     ChunkingFailedError,
     DocumentNotSearchableError,
@@ -42,9 +43,10 @@ EXPECTED_CODES: dict[type[MinervaError], str] = {
     ChunkingFailedError: "CHUNKING_FAILED",
     ServerNotReadyError: "SERVER_NOT_READY",
     ShuttingDownError: "SHUTTING_DOWN",
+    BatchIndexingError: "BATCH_INDEXING",
 }
 
-# API.md 「오류 코드」 12개
+# API.md 「오류 코드」 13개
 API_ERROR_CODES = {
     "INVALID_REQUEST",
     "UNAUTHORIZED",
@@ -58,6 +60,7 @@ API_ERROR_CODES = {
     "STORE_UNAVAILABLE",
     "SERVER_NOT_READY",
     "SHUTTING_DOWN",
+    "BATCH_INDEXING",
 }
 
 # API.md JobFailure 「작업 실패 사유 코드」 7개
@@ -75,6 +78,13 @@ SUBCLASSES = list(EXPECTED_CODES)
 FORBIDDEN_IN_MESSAGE = ["/", "\\", "Traceback"]
 
 
+def make(cls: type[MinervaError], message: str | None = None) -> MinervaError:
+    """클래스를 만든다. 남은 작업 수가 필수인 BatchIndexingError는 0을 넣는다."""
+    if cls is BatchIndexingError:
+        return BatchIndexingError(0, message)
+    return cls(message)
+
+
 def _wrap(cls: type[MinervaError]) -> tuple[MinervaError, ValueError]:
     """다른 예외를 잡아 cls로 감싼 오류와 원래 예외를 돌려준다."""
     original = ValueError("C:\\data\\secret.py SELECT * FROM chunks WHERE q='SECRET-WRAP-8'")
@@ -82,7 +92,7 @@ def _wrap(cls: type[MinervaError]) -> tuple[MinervaError, ValueError]:
         try:
             raise original
         except ValueError as e:
-            raise cls() from e
+            raise make(cls) from e
     except MinervaError as err:
         return err, original
     raise AssertionError("오류가 나지 않았다")
@@ -131,8 +141,8 @@ def test_default_message_korean(cls: type[MinervaError]) -> None:
 @pytest.mark.parametrize("cls", SUBCLASSES)
 def test_message_defaults(cls: type[MinervaError]) -> None:
     """[REQ-RAG-11.3.1] message를 넘기지 않으면 default_message를 쓴다."""
-    assert cls().message == cls.default_message
-    assert str(cls()) == cls.default_message
+    assert make(cls).message == cls.default_message
+    assert str(make(cls)) == cls.default_message
 
 
 @pytest.mark.req("REQ-RAG-11.3.1")
@@ -140,8 +150,8 @@ def test_message_defaults(cls: type[MinervaError]) -> None:
 def test_message_override(cls: type[MinervaError]) -> None:
     """[REQ-RAG-11.3.1] message를 넘기면 그 문자열이 message와 str에 쓰인다."""
     text = "임베딩 모델 bge를 불러오지 못했습니다"
-    assert cls(text).message == text
-    assert str(cls(text)) == text
+    assert make(cls, text).message == text
+    assert str(make(cls, text)) == text
 
 
 @pytest.mark.req("REQ-RAG-11.3.1")
@@ -171,7 +181,7 @@ def test_chunking_failed_location() -> None:
 def test_raise_and_catch_as_base(cls: type[MinervaError]) -> None:
     """[REQ-RAG-11.3.1] 모든 하위 클래스는 MinervaError로 잡히고 code를 읽을 수 있다."""
     with pytest.raises(MinervaError) as info:
-        raise cls()
+        raise make(cls)
     assert info.value.code == EXPECTED_CODES[cls]
 
 
@@ -212,3 +222,36 @@ def test_wrapped_with_location_hidden() -> None:
         assert "SELECT" not in err.message
         assert "secret.py" not in str(err)
         assert err.message == ChunkingFailedError.default_message
+
+
+@pytest.mark.req("REQ-RAG-11.3.1")
+def test_batch_indexing_details() -> None:
+    """[REQ-RAG-11.3.1] BatchIndexingError는 남은 작업 수를 details로 노출하고 기본 메시지가
+    한글이다."""
+    err = BatchIndexingError(3)
+    assert err.code == "BATCH_INDEXING"
+    assert err.remaining_jobs == 3
+    assert err.details == {"remaining_jobs": 3}
+    assert re.search(r"[가-힣]", err.message)
+    assert err.message == BatchIndexingError.default_message
+    assert BatchIndexingError(3, "직접").message == "직접"
+
+
+@pytest.mark.req("REQ-RAG-11.3.1")
+@pytest.mark.parametrize("cls", [c for c in SUBCLASSES if c is not BatchIndexingError])
+def test_other_errors_details_none(cls: type[MinervaError]) -> None:
+    """[REQ-RAG-11.3.1] 상세를 정하지 않은 오류의 details는 None이다."""
+    assert make(cls).details is None
+    assert make(cls, "메시지").details is None
+
+
+@pytest.mark.req("REQ-RAG-11.3.1")
+def test_base_error_details_none() -> None:
+    """[REQ-RAG-11.3.1] MinervaError 자체의 details도 None이다."""
+    assert MinervaError().details is None
+
+
+@pytest.mark.req("REQ-RAG-11.3.1")
+def test_batch_indexing_code_in_api() -> None:
+    """[REQ-RAG-11.3.1] BATCH_INDEXING은 API.md 오류 코드 목록에 있다."""
+    assert BatchIndexingError.code in API_ERROR_CODES

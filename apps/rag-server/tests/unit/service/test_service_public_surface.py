@@ -2,7 +2,7 @@
 
 import dataclasses
 import inspect
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, cast, get_args, get_origin, get_type_hints
 
 import pytest
@@ -36,10 +36,11 @@ from minerva_rag.service import (
     SearchService,
     Services,
 )
+from minerva_rag.service import jobs as jobs_module
 from minerva_rag.service.captioner import Captioner
 from minerva_rag.service.jobs import CurrentIndex, JobFailure, JobManager, JobQueue
 
-from .fakes import FakeHub
+from .fakes import FakeHub, go, make_manager, running_manager
 
 _EXPECTED_EXPORTS = {
     "build_services",
@@ -174,7 +175,13 @@ def test_job_enums() -> None:
         "failed",
         "superseded",
     }
-    assert {m.value for m in JobStage} == {"chunking", "embedding", "storing"}
+    assert {m.value for m in JobStage} == {
+        "chunking",
+        "embedding_pending",
+        "embedding",
+        "storing",
+    }
+    assert JobStage.EMBEDDING_PENDING.value == "embedding_pending"
 
 
 @pytest.mark.req("REQ-RAG-10.8.2.2")
@@ -269,12 +276,12 @@ def test_service_constructors() -> None:
             "jobs",
             "settings",
         ],
-        CaptionService: ["self", "captioner", "readiness"],
+        CaptionService: ["self", "captioner", "jobs", "readiness"],
         IndexService: ["self", "chunker", "indexer", "jobs", "readiness"],
-        SearchService: ["self", "searcher", "readiness"],
+        SearchService: ["self", "searcher", "jobs", "readiness"],
         DeleteService: ["self", "indexer", "jobs", "readiness"],
         MetadataService: ["self", "indexer", "jobs", "readiness"],
-        EvaluationService: ["self", "evaluator", "readiness"],
+        EvaluationService: ["self", "evaluator", "jobs", "readiness"],
     }
     for cls, params in expected.items():
         assert _params(cls.__init__) == params, cls.__name__
@@ -285,21 +292,27 @@ def test_service_constructors() -> None:
     assert life["indexer"] is Indexer
     assert life["jobs"] is JobQueue
     assert life["settings"] is Settings
-    assert get_type_hints(CaptionService.__init__)["captioner"] is Captioner
+    caption = get_type_hints(CaptionService.__init__)
+    assert caption["captioner"] is Captioner
+    assert caption["jobs"] is JobQueue
     index = get_type_hints(IndexService.__init__)
     assert index["chunker"] is Chunker
     assert index["indexer"] is Indexer
     assert index["jobs"] is JobManager
-    assert get_type_hints(SearchService.__init__)["searcher"] is Searcher
+    search = get_type_hints(SearchService.__init__)
+    assert search["searcher"] is Searcher
+    assert search["jobs"] is JobQueue
     assert get_type_hints(DeleteService.__init__)["jobs"] is JobManager
     assert get_type_hints(MetadataService.__init__)["jobs"] is JobQueue
-    assert get_type_hints(EvaluationService.__init__)["evaluator"] is Evaluator
+    evaluation = get_type_hints(EvaluationService.__init__)
+    assert evaluation["evaluator"] is Evaluator
+    assert evaluation["jobs"] is JobQueue
 
 
 @pytest.mark.req("REQ-RAG-10.8.1.1")
 def test_job_helpers_surface(settings: Settings) -> None:
     """[REQ-RAG-10.8.1.1] 작업 관리·요약 헬퍼의 표면이 명세와 같고 만들 때 I/O가 없다."""
-    JobManager(settings)
+    make_manager(settings)
     assert not settings.jobs_db_path.exists()
     assert not settings.jobs_db_path.parent.exists()
     names = [
@@ -314,8 +327,10 @@ def test_job_helpers_surface(settings: Settings) -> None:
         "index_states",
         "current_index",
         "forget_document",
+        "reject_during_batch",
     ]
-    assert _params(JobManager.__init__) == ["self", "settings"]
+    assert _params(JobManager.__init__) == ["self", "settings", "model_hub"]
+    assert get_type_hints(JobManager.__init__)["model_hub"] is ModelHub
     for name in names:
         assert inspect.iscoroutinefunction(getattr(JobManager, name)), name
     assert _params(JobManager.start) == ["self", "recover"]
@@ -326,9 +341,56 @@ def test_job_helpers_surface(settings: Settings) -> None:
     assert _params(JobManager.wait_running) == ["self", "doc_id"]
     assert _params(JobManager.get_job) == ["self", "job_id"]
     assert _params(JobManager.index_states) == ["self", "doc_ids"]
+    assert _params(JobManager.reject_during_batch) == ["self"]
     assert _params(Captioner.__init__) == ["self", "model_hub"]
     Captioner(cast(ModelHub, FakeHub()))
     location = FailureLocation(("제목",), "t1")
     failure = JobFailure("CODE", "설명", location)
     assert (failure.code, failure.message, failure.location) == ("CODE", "설명", location)
     assert JobFailure("CODE", "설명").location is None
+
+
+@pytest.mark.req("REQ-RAG-10.8.8")
+@pytest.mark.parametrize("target", [JobManager, JobQueue], ids=["JobManager", "JobQueue"])
+def test_batch_methods_surface(target: type) -> None:
+    """[REQ-RAG-10.8.8] caption_slot·note_index_request는 동기, reject_during_batch는 코루틴 함수다.
+
+    JobQueue Protocol과 JobManager가 같은 형태로 갖는다.
+    """
+    assert _params(target.caption_slot) == ["self"]
+    assert _params(target.note_index_request) == ["self"]
+    assert _params(target.reject_during_batch) == ["self"]
+    assert not inspect.iscoroutinefunction(target.caption_slot)
+    assert not inspect.iscoroutinefunction(target.note_index_request)
+    assert inspect.iscoroutinefunction(target.reject_during_batch)
+    assert get_type_hints(target.note_index_request)["return"] is type(None)
+    assert get_type_hints(target.reject_during_batch)["return"] is type(None)
+
+
+@pytest.mark.req("REQ-RAG-10.8.8")
+def test_caption_slot_is_async_context_manager(settings: Settings) -> None:
+    """[REQ-RAG-10.8.8] async with manager.caption_slot(): 이 동작하고 나올 때 오류가 없다."""
+
+    async def scenario() -> None:
+        async with running_manager(settings) as manager:
+            async with manager.caption_slot():
+                pass
+            manager.note_index_request()  # 동기 호출이다
+
+    go(scenario())
+
+
+@pytest.mark.req("REQ-RAG-10.3.2")
+def test_runner_aliases() -> None:
+    """[REQ-RAG-10.3.2] jobs 모듈에 IndexRunner·EmbedRunner 별칭이 있고 IndexRunner는
+    EmbedRunner를 돌려준다."""
+    embed_args = get_args(jobs_module.EmbedRunner)
+    index_args = get_args(jobs_module.IndexRunner)
+    assert get_origin(jobs_module.EmbedRunner) is Callable
+    assert get_origin(jobs_module.IndexRunner) is Callable
+    assert len(embed_args[0]) == 1
+    assert len(index_args[0]) == 1
+    # IndexRunner의 반환은 Awaitable[EmbedRunner]다
+    returned = index_args[1]
+    assert get_origin(returned) is Awaitable
+    assert get_args(returned) == (jobs_module.EmbedRunner,)

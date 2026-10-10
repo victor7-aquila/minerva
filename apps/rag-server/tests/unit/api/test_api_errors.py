@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from minerva_rag import core
 from minerva_rag.core import (
+    BatchIndexingError,
     CaptionFailedError,
     DocumentNotSearchableError,
     GlossaryError,
@@ -77,7 +78,7 @@ def test_minerva_error_status_and_code(
 
     assert response.status_code == status
     assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {"error": {"code": code, "message": exc.message}}
+    assert response.json() == {"error": {"code": code, "message": exc.message, "details": None}}
 
 
 def _all_error_types() -> list[type[MinervaError]]:
@@ -107,6 +108,7 @@ _API_MD_STATUS = {
     "STORE_UNAVAILABLE": 503,
     "SERVER_NOT_READY": 503,
     "SHUTTING_DOWN": 503,
+    "BATCH_INDEXING": 503,
 }
 
 
@@ -116,7 +118,8 @@ def test_every_minerva_error_is_converted(
     client: TestClient, fakes: FakeServices, exc_type: type[MinervaError]
 ) -> None:
     """[REQ-RAG-11.3.1] MinervaError 하위 클래스 전부가 그 code와 message로 바뀐다."""
-    exc = exc_type()
+    # ★ BatchIndexingError는 남은 작업 수가 필수라 인자 없이 만들 수 없다
+    exc = BatchIndexingError(0) if exc_type is BatchIndexingError else exc_type()
     _arm(fakes, ENDPOINT_BY_NAME["search"], exc)
 
     response = send_endpoint(client, ENDPOINT_BY_NAME["search"])
@@ -124,7 +127,11 @@ def test_every_minerva_error_is_converted(
     assert response.headers["content-type"].startswith("application/json")
     body = response.json()
     assert set(body) == {"error"}
-    assert body["error"] == {"code": exc.code, "message": exc.message}
+    assert body["error"] == {
+        "code": exc.code,
+        "message": exc.message,
+        "details": exc.details,
+    }
     if exc.code in _API_MD_STATUS:
         assert response.status_code == _API_MD_STATUS[exc.code]
     else:
@@ -150,7 +157,7 @@ def test_private_subclass_converted_by_its_code(client: TestClient, fakes: FakeS
 
     assert response.status_code == 500
     assert response.json() == {
-        "error": {"code": exc.code, "message": "용어집 항목이 잘못되었습니다"}
+        "error": {"code": exc.code, "message": "용어집 항목이 잘못되었습니다", "details": None}
     }
     assert "내부 사유" not in response.text
 
@@ -168,7 +175,9 @@ def test_server_not_ready_on_every_endpoint(
 
     assert response.status_code == 503
     assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {"error": {"code": "SERVER_NOT_READY", "message": exc.message}}
+    assert response.json() == {
+        "error": {"code": "SERVER_NOT_READY", "message": exc.message, "details": None}
+    }
 
 
 @pytest.mark.req("REQ-RAG-11.3.2")
@@ -186,6 +195,7 @@ def test_unhandled_error_is_500_without_details(
     body = response.json()
     assert set(body) == {"error"}
     assert body["error"]["code"] == "INTERNAL_ERROR"
+    assert body["error"]["details"] is None
     assert _HANGUL.search(body["error"]["message"])
     for leaked in ("SECRET-a1b2", "doc.md", "SELECT", "Traceback"):
         assert leaked not in response.text
@@ -217,3 +227,70 @@ def test_error_messages_are_korean(
         message = response.json()["error"]["message"]
         assert message
         assert _HANGUL.search(message)
+
+
+@pytest.mark.req("REQ-RAG-10.4.3")
+def test_search_batch_indexing(client: TestClient, fakes: FakeServices) -> None:
+    """[REQ-RAG-10.4.3] 검색이 일괄 색인 거부를 내면 503 BATCH_INDEXING과 남은 작업 수를
+    돌려준다."""
+    exc = BatchIndexingError(4)
+    _arm(fakes, ENDPOINT_BY_NAME["search"], exc)
+
+    response = send_endpoint(client, ENDPOINT_BY_NAME["search"])
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "BATCH_INDEXING",
+            "message": exc.message,
+            "details": {"remaining_jobs": 4},
+        }
+    }
+
+
+@pytest.mark.req("REQ-RAG-10.7.2")
+@pytest.mark.parametrize("remaining", [0, 7])
+def test_evaluation_batch_indexing(client: TestClient, fakes: FakeServices, remaining: int) -> None:
+    """[REQ-RAG-10.7.2] 평가도 503 BATCH_INDEXING이다. 남은 작업 수 0도 그대로 0으로 나간다."""
+    exc = BatchIndexingError(remaining)
+    _arm(fakes, ENDPOINT_BY_NAME["evaluation"], exc)
+
+    response = send_endpoint(client, ENDPOINT_BY_NAME["evaluation"])
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "BATCH_INDEXING",
+            "message": exc.message,
+            "details": {"remaining_jobs": remaining},
+        }
+    }
+
+
+@pytest.mark.req("REQ-RAG-9.1.2")
+def test_details_null_for_others(
+    client: TestClient,
+    fakes: FakeServices,
+    set_limits: Callable[..., None],
+    make_client: Callable[[], TestClient],
+) -> None:
+    """[REQ-RAG-9.1.2] 상세를 정하지 않은 모든 오류 본문에 details 키가 있고 값이 null이다."""
+    set_limits(markdown=1024)
+    small_client = make_client()
+    fakes.index.raises["get_job"] = JobNotFoundError()
+    fakes.search.raises["search"] = RuntimeError("내부 오류")
+
+    responses = [
+        send(small_client, "POST", "/v1/search", json={"query": "q", "top_n": 0}),  # 400 검증
+        send(small_client, "GET", "/v1/no-such-path"),  # 400 없는 경로
+        send(small_client, "POST", "/v1/search", token=False, json={"query": "q"}),  # 401
+        send(small_client, "POST", "/v1/index-jobs", json=index_body(markdown="a" * 1025)),  # 413
+        send(small_client, "GET", "/v1/index-jobs/x"),  # 404 MinervaError
+        send(small_client, "POST", "/v1/search", json={"query": "q"}),  # 500
+    ]
+
+    assert [r.status_code for r in responses] == [400, 400, 401, 413, 404, 500]
+    for response in responses:
+        error = response.json()["error"]
+        assert "details" in error
+        assert error["details"] is None

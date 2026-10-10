@@ -66,6 +66,25 @@ def test_blank_answer_span_rejected(settings: Settings, span: str) -> None:
     assert fake.calls == []
 
 
+@pytest.mark.req("REQ-RAG-6.1.1")
+@pytest.mark.parametrize("span", _BLANKS)
+def test_validate_blank_span(settings: Settings, span: str) -> None:
+    """[REQ-RAG-6.1.1] validate는 공백뿐인 정답 구간을 InvalidRequestError로 거부하고 search를
+    부르지 않는다."""
+    fake = FakeSearcher([hit(1, SPAN)])
+    with pytest.raises(InvalidRequestError):
+        make_evaluator(fake, settings).validate(case(answer_span=span))
+    assert fake.calls == []
+
+
+@pytest.mark.req("REQ-RAG-6.1.1")
+def test_validate_ok(settings: Settings) -> None:
+    """[REQ-RAG-6.1.1] validate는 정상 입력에서 None을 돌려주고 search를 부르지 않는다."""
+    fake = FakeSearcher([hit(1, SPAN)])
+    assert make_evaluator(fake, settings).validate(case()) is None
+    assert fake.calls == []
+
+
 @pytest.mark.req("REQ-RAG-6.1.2")
 def test_only_search_is_called(settings: Settings) -> None:
     """[REQ-RAG-6.1.2] search 말고는 document_chunks만 부르고 search는 한 번이다."""

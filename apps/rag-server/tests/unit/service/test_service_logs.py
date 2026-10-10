@@ -18,12 +18,15 @@ from minerva_rag.service.jobs import JobFailure
 from ..resource.fakes import assert_logs_exclude, events_named
 from .fakes import (
     FakeHub,
+    FakeJobQueue,
     FakeSearcher,
+    IdleClock,
     ReadyStub,
     ScriptedRunner,
     assert_service_log,
     build_lifecycle,
     eval_case,
+    finish_batch,
     index_request,
     placeholder,
     run_logged,
@@ -55,6 +58,11 @@ def test_entry_events(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> No
         await services.lifecycle.startup()
         try:
             await services.lifecycle.health()
+            # ★ 요약·캡션과 색인이 일괄 색인을 시작하므로 검색·평가를 먼저 부른다(시작 뒤에는
+            # 거부된다)
+            await services.search.search(SearchQuery("질의"))
+            await services.search.document_chunks("doc-a")
+            await services.evaluation.evaluate(eval_case())
             await services.caption.summarize_table(_TABLE)
             await services.caption.caption_image(b"img")
             accepted = await services.index.submit(index_request())
@@ -62,10 +70,7 @@ def test_entry_events(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> No
             await services.index.get_job(accepted.job_id)
             await services.index.index_state("doc-a")
             await services.index.index_states(["doc-a"])
-            await services.search.search(SearchQuery("질의"))
-            await services.search.document_chunks("doc-a")
             await services.metadata.update("doc-a", "이름", None)
-            await services.evaluation.evaluate(eval_case())
             await services.delete.delete("doc-a")
         finally:
             await services.lifecycle.shutdown()
@@ -216,7 +221,7 @@ def test_caption_failed_log() -> None:
 def test_service_failed_levels() -> None:
     """[REQ-RAG-10.4.1] 서비스 예외는 도메인이면 warning, 그 밖은 스택 있는 error로 남긴다."""
     fake = FakeSearcher()
-    service = SearchService(cast(Searcher, fake), ReadyStub(True))
+    service = SearchService(cast(Searcher, fake), FakeJobQueue(), ReadyStub(True))
 
     async def domain() -> None:
         fake.error = StoreUnavailableError()
@@ -246,7 +251,9 @@ def test_service_failed_levels() -> None:
 
 @pytest.mark.req("REQ-RAG-10.3.1")
 @pytest.mark.req("REQ-RAG-10.2.2.1")
-def test_logs_exclude_content(monkeypatch: pytest.MonkeyPatch, settings: Settings) -> None:
+def test_logs_exclude_content(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, idle_clock: IdleClock
+) -> None:
     """[REQ-RAG-10.3.1] 문서 본문·표·요약·질의·정답 구간·이름·토큰 값이 어떤 로그에도 없다."""
     services, parts = wire(monkeypatch, settings)
     parts.hub.reply = _SECRETS["reply"]
@@ -265,6 +272,8 @@ def test_logs_exclude_content(monkeypatch: pytest.MonkeyPatch, settings: Setting
                 )
             )
             await wait_state(parts.manager, accepted.job_id, JobState.SUCCEEDED)
+            # ★ 일괄 색인 중에는 검색·평가를 거부하므로 끝낸 뒤에 부른다
+            await finish_batch(idle_clock, parts.timeline)
             await services.search.search(SearchQuery(_SECRETS["query"]))
             await services.evaluation.evaluate(
                 eval_case(query=_SECRETS["query"], answer_span=_SECRETS["span"])

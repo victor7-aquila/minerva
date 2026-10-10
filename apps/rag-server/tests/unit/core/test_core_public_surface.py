@@ -13,6 +13,7 @@ import pytest
 
 import minerva_rag.core as core
 from minerva_rag.core import (
+    BatchIndexingError,
     Chunk,
     ChunkingFailedError,
     ChunkingResult,
@@ -45,6 +46,7 @@ ERROR_CLASS_NAMES = {
     "ChunkingFailedError",
     "ServerNotReadyError",
     "ShuttingDownError",
+    "BatchIndexingError",
 }
 
 EXPECTED_SYMBOLS = {
@@ -118,6 +120,16 @@ def test_error_surface() -> None:
     assert chunking["location"].kind is inspect.Parameter.KEYWORD_ONLY
     assert chunking["location"].default is None
     assert isinstance(ChunkingFailedError.location, property)
+
+    assert isinstance(MinervaError.details, property)
+    batch = inspect.signature(BatchIndexingError.__init__).parameters
+    assert list(batch) == ["self", "remaining_jobs", "message"]
+    assert batch["message"].default is None
+    assert batch["remaining_jobs"].default is inspect.Parameter.empty
+    assert isinstance(BatchIndexingError.remaining_jobs, property)
+    assert isinstance(BatchIndexingError.details, property)
+    assert issubclass(BatchIndexingError, MinervaError)
+    assert "BatchIndexingError" in core.__all__
 
 
 @pytest.mark.req("REQ-RAG-2")

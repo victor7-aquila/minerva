@@ -78,6 +78,9 @@ def test_model_hub_signatures() -> None:
         "rerank": _positional("query", "passages"),
         "count_tokens": _positional("text"),
         "ollama_available": [],
+        "release_ollama_models": [],
+        "release_local_models": [],
+        "load_local_models": [],
     }
     for name, signature in expected.items():
         assert _signature(getattr(ModelHub, name)) == signature, name
@@ -88,6 +91,19 @@ def test_model_hub_signatures() -> None:
             assert inspect.iscoroutinefunction(getattr(ModelHub, name)), name
     assert isinstance(ModelHub.embedding_dimension, property)
     assert isinstance(ModelHub.embedding_model_name, property)
+
+
+@pytest.mark.req("REQ-RAG-12.1.3")
+@pytest.mark.parametrize(
+    "name", ["release_ollama_models", "release_local_models", "load_local_models"]
+)
+def test_model_switch_surface(name: str) -> None:
+    """[REQ-RAG-12.1.3] 모델 내리기·올리기 메서드는 인자 없이 None을 돌려주는 코루틴 함수다."""
+    func = getattr(ModelHub, name)
+
+    assert _signature(func) == []
+    assert inspect.iscoroutinefunction(func)
+    assert get_type_hints(func)["return"] is type(None)
 
 
 @pytest.mark.req("REQ-RAG-12.2")
