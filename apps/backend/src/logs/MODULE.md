@@ -19,7 +19,7 @@
 
 **비범위**
 
-- 언제 무엇을 기록할지 — 일이 일어난 모듈(documents, assets). 처리 상태 변경은 실제로 바뀐 경우에만 documents가 부른다(`IF-BE-1`)
+- 언제 무엇을 기록할지 — 일이 일어난 모듈(documents). 요약·캡션 생성 결과(`captioning`)도 예약 색인을 조정하는 documents가 남긴다. 처리 상태 변경은 실제로 바뀐 경우에만 documents가 부른다(`IF-BE-1`)
 
 ## 구조
 
