@@ -16,7 +16,7 @@ Backend가 보낸 색인용 MD를 검색 단위인 청크(`IF-RAG-1`의 `Chunk`)
 | :--- | :--- | :--- |
 | `REQ-RAG-2.1` | 의미 단위 분할 | 문서를 의미 단위 청크로 나누고 제목·요약·헤딩 경로·순서를 붙인다. 지정되면 규칙 분할로 나눈다 |
 | `REQ-RAG-2.2` | 자리표시 보존 | 분할 결과의 자리표시가 빠짐·중복·잘림 없이 원형 그대로인지 검증한다 |
-| `REQ-RAG-2.3` | 대체 분할 | 검증 실패 시 다시 시도하고, 끝내 실패하면 규칙 분할로 대신하고 그 사실을 남긴다 |
+| `REQ-RAG-2.3` | 대체 분할 | 응답을 해석할 수 없거나 검증에 실패하면 다시 시도하고, 끝내 실패하면 규칙 분할로 대신하고 그 사실을 남긴다 |
 | `REQ-RAG-2.4` | 표·이미지 청크 | 표·이미지마다 자리표시 하나로 된 청크를 따로 만든다 |
 | `REQ-RAG-2.5` | 크기 상한 | 상한을 넘는 청크를 다시 나누고, 분할 LLM 입력 한도를 넘는 문서를 먼저 나누고, 분할 조각을 묶는다 |
 
@@ -84,10 +84,10 @@ class Chunker:
 **`REQ-RAG-2.1.1`** 의미 단위로 나누기
 
 - 처리 계약: `mode`가 `SEMANTIC`이면 `LlmRole.CHUNKING`으로 청크 경계를 정한다. 본문 청크의 `text`는 원문 구간 그대로다(「요약」 핵심 계약). `markdown`이 비었거나 공백뿐이면 LLM을 부르지 않고 `chunks`가 빈 결과(`fallback_used=False`)를 돌려준다
-- 실패: LLM 응답을 경계로 해석할 수 없으면 다시 시도하지 않고 `ChunkingFailedError`를 낸다. 해석할 수 없는 응답은 정해진 형식이 아니거나, 청크가 하나도 없거나, 원문에 없는 위치를 가리키거나, 제목·요약이 비었거나 공백뿐인 응답이다. 경계는 읽히지만 원문을 빠짐·겹침·순서 바뀜 없이 나누지 못하거나 코드 블록 중간에 있는 응답은 해석 불가가 아니라 경계 검증 실패다(`REQ-RAG-2.3.1`)
+- 처리 계약: LLM 응답을 경계로 해석할 수 없으면 `ChunkingFailedError`를 내지 않고 검증 실패와 똑같이 다시 시도하고(`REQ-RAG-2.3.1`), 끝내 해석할 수 없으면 그 부분을 대체 분할한다(`REQ-RAG-2.3.2`). 해석할 수 없는 응답은 정해진 형식이 아니거나, 청크가 하나도 없거나, 원문에 없는 위치를 가리키거나, 빈 줄이 아닌 줄을 덮는 범위의 제목·요약이 비었거나 공백뿐인 응답이다. ★ 빈 줄만 덮는 범위는 결과 청크가 되지 않으므로 제목·요약이 비었거나 공백뿐이어도 해석할 수 있는 응답이다. 경계는 읽히지만 원문을 빠짐·겹침·순서 바뀜 없이 나누지 못하거나 코드 블록 중간에 있는 응답은 해석 불가가 아니라 경계 검증 실패다(`REQ-RAG-2.3.1`)
 - 실패: resource가 `PromptTooLongError`를 내거나, 연결된 뒤 생성이 실패해 `MinervaError`가 아닌 예외를 내면 `ChunkingFailedError`로 바꿔 내고 다시 시도하지 않는다. `ModelUnavailableError`(Ollama 연결 실패)는 그대로 낸다
 - 실패 위치: 경계 호출의 실패는 `FailureLocation.heading_path`에 그 부분의 헤딩 경로(부분의 첫 본문 줄이 속한 절, `REQ-RAG-2.1.3`과 같은 규칙)를 담고, `placeholder_id`는 `None`이다
-- 충족 기준: LLM이 정한 경계대로 본문 청크가 만들어지고, 본문 청크의 `text`를 순서대로 이으면 경계 공백을 빼고 입력과 같다. 해석할 수 없는 응답이면 `ChunkingFailedError`가 난다
+- 충족 기준: LLM이 정한 경계대로 본문 청크가 만들어지고, 본문 청크의 `text`를 순서대로 이으면 경계 공백을 빼고 입력과 같다. 빈 줄만 덮는 범위의 제목·요약이 공백뿐인 응답도 그 경계대로 나뉜다
 
 **`REQ-RAG-2.1.2`** 본문 청크의 제목과 요약
 
@@ -149,13 +149,13 @@ class Chunker:
 
 **`REQ-RAG-2.3.1`** 검증 실패 시 다시 시도
 
-- 처리 계약: 의미 단위 분할의 결과가 자리표시 보존 검증(`REQ-RAG-2.2.1`)이나 경계 검증에 실패하면 그 부분(사전 분할로 나눈 부분, 나누지 않았으면 문서 전체)의 의미 단위 분할을 다시 한다. 경계 검증은 경계가 그 부분의 빈 줄이 아닌 모든 줄(헤딩 줄 포함)을 빠짐·겹침 없이 차례대로 나누는지, 코드 블록 중간(여는 펜스 줄이 아닌 블록 안 줄)에 경계가 없는지 본다. 빈 줄만 빠지는 것은 실패가 아니다
-- 충족 기준: 첫 응답이 자리표시를 빠뜨리거나 빈 줄이 아닌 줄을 빠뜨리고 두 번째 응답이 올바르면, 두 번째 응답대로 나뉘고 `fallback_used`가 `False`다
+- 처리 계약: 의미 단위 분할의 응답을 해석할 수 없거나(`REQ-RAG-2.1.1`) 그 결과가 자리표시 보존 검증(`REQ-RAG-2.2.1`)이나 경계 검증에 실패하면 그 부분(사전 분할로 나눈 부분, 나누지 않았으면 문서 전체)의 의미 단위 분할을 다시 한다. 경계 검증은 경계가 그 부분의 빈 줄이 아닌 모든 줄(헤딩 줄 포함)을 빠짐·겹침 없이 차례대로 나누는지, 코드 블록 중간(여는 펜스 줄이 아닌 블록 안 줄)에 경계가 없는지 본다. 빈 줄만 빠지는 것은 실패가 아니다
+- 충족 기준: 첫 응답을 해석할 수 없거나(예: 빈 줄이 아닌 줄을 덮는 범위의 제목이 공백뿐) 자리표시나 빈 줄이 아닌 줄을 빠뜨리고 두 번째 응답이 올바르면, 두 번째 응답대로 나뉘고 `fallback_used`가 `False`다
 
 **`REQ-RAG-2.3.2`** 끝내 실패하면 대체 분할
 
 - 처리 계약: `RAG_CHUNKING_RETRIES`번 다시 시도해도 실패하면 그 부분을 규칙 분할로 나눈다. 대체 분할 결과도 자리표시 보존 불변 조건을 지킨다
-- 충족 기준: 설정한 횟수 + 1번 모두 검증에 실패하면 LLM 경계 호출이 그 횟수에서 멈추고, 그 부분의 청크 경계가 헤딩 줄 앞이다
+- 충족 기준: 설정한 횟수 + 1번 모두 해석할 수 없거나 검증에 실패하면 LLM 경계 호출이 그 횟수에서 멈추고, 그 부분의 청크 경계가 헤딩 줄 앞이다
 
 **`REQ-RAG-2.3.3`** 대체 분할 사실 남기기
 
@@ -252,7 +252,7 @@ flowchart TB
 ```
 
 1. **사전 분할** — 의미 단위 분할의 입력이 한도를 넘으면 먼저 나눈다. (`REQ-RAG-2.5.2`)
-2. **나누기와 검증** — 부분마다 나누고 경계와 자리표시를 검증한다. 실패하면 다시 시도하고, 횟수를 다 쓰면 그 부분만 규칙 분할로 대신한다. (`REQ-RAG-2.1`, `REQ-RAG-2.2`, `REQ-RAG-2.3`)
+2. **나누기와 검증** — 부분마다 나누고 응답 해석, 경계, 자리표시를 검증한다. 실패하면 다시 시도하고, 횟수를 다 쓰면 그 부분만 규칙 분할로 대신한다. (`REQ-RAG-2.1`, `REQ-RAG-2.2`, `REQ-RAG-2.3`)
 3. **합치기** — 헤딩만 있는 청크를 다음 청크(문서 끝이면 앞 청크)에 합친다. 재분할 전에 해야 합친 결과도 상한 검사를 받는다. 규칙·대체 분할 청크의 제목·요약은 합친 뒤 만든다. (`REQ-RAG-2.1.7`~`REQ-RAG-2.1.9`, `REQ-RAG-2.1.2`)
 4. **재분할** — 상한을 넘는 본문 청크를 나눈다. (`REQ-RAG-2.5.1`)
 5. **표·이미지 청크** — 재분할 뒤에 만든다. 그래야 `order`가 자리표시를 담은 조각의 순서를 따른다. (`REQ-RAG-2.4.4`)
@@ -267,16 +267,18 @@ flowchart TB
 
 | 예외 | 발생 조건 | 코드·상태 | 처리 책임 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| `ChunkingFailedError` | LLM의 경계·제목·요약 응답을 해석할 수 없거나, 생성이 실패하거나(`PromptTooLongError` 포함) | 작업 실패 사유 `CHUNKING_FAILED` | 발생: chunking. 변환: service | `REQ-RAG-2.1.1`, `REQ-RAG-2.1.2` |
+| `ChunkingFailedError` | 규칙 분할·대체 분할 청크의 제목·요약 응답을 해석할 수 없거나, 생성이 실패하거나(`PromptTooLongError` 포함) | 작업 실패 사유 `CHUNKING_FAILED` | 발생: chunking. 변환: service | `REQ-RAG-2.1.1`, `REQ-RAG-2.1.2` |
 | `ModelUnavailableError` | Ollama 연결 실패 | 작업 실패 사유 `MODEL_UNAVAILABLE` | 발생: resource. 전파: chunking | `REQ-RAG-12.1.2` |
 
 ### 로그
 
 | 이벤트 | 발생 시점 | 레벨 | 허용 필드 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| `chunking.validation_failed` | 경계·자리표시 검증 실패 | warning | `part`, `attempt`, `reason`(`boundary`·`placeholder`), `missing`, `duplicated` (개수) | `REQ-RAG-2.3.1` |
+| `chunking.validation_failed` | 경계 응답 해석 불가, 경계·자리표시 검증 실패 | warning | `part`, `attempt`, `reason`(`unparseable`·`boundary`·`placeholder`), `detail`(아래), `item`(걸린 범위의 차례, 1부터), `line`(걸린 줄 번호, 부분 안 1부터), `line_count`(부분의 줄 수), `missing`, `duplicated` (개수). 해당하지 않는 필드는 `None` | `REQ-RAG-2.3.1` |
 | `chunking.fallback` | 대체 분할로 넘어갈 때 | warning | `part`, `attempts` | `REQ-RAG-2.3.2` |
 | `chunking.done` | `split` 끝 | info | `text_chunks`, `asset_chunks`, `split_groups`, `fallback_used`, `parts` | `REQ-RAG-2.1.1` |
+
+`detail`은 걸린 규칙이다. `unparseable`이면 `not_json`(JSON 객체가 아님), `no_chunks`(청크 목록이 없거나 비었음), `bad_item`(범위가 객체가 아니거나 줄 번호가 정수가 아님), `line_out_of_range`(부분에 없는 줄), `empty_title`, `empty_summary` 중 하나이고, `boundary`면 `order`(순서 바뀜·겹침), `uncovered`(빈 줄이 아닌 줄 빠짐), `code_block`(코드 블록 중간 경계) 중 하나다. 한 응답에 여럿이 걸리면 처음 걸린 것 하나를 남긴다.
 
 헤딩 텍스트와 청크 본문, 제목·요약은 로그에 넣지 않는다. 자리표시 ID 대신 개수를 남긴다.
 
@@ -290,7 +292,7 @@ LLM 응답은 mock으로 대체하고, 실행마다 달라지는 값은 성질�
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-2.1.1` | unit | LLM 경계대로 나뉨, 원문 보존, 빈 문서, 해석 불가 응답·생성 실패·`PromptTooLongError` 시 `ChunkingFailedError`와 위치, `ModelUnavailableError` 전파 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.1.1` | unit | LLM 경계대로 나뉨, 원문 보존, 빈 문서, 빈 줄만 덮는 범위의 공백 제목·요약 허용, 생성 실패·`PromptTooLongError` 시 `ChunkingFailedError`와 위치, `ModelUnavailableError` 전파 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.1.2` | unit | 세 방식 모두 제목·요약 있음, 조각은 원래 값 유지, 해석 불가 시 실패 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.1.3` | unit | 헤딩 경로, 여러 절에 걸친 청크, 헤딩 앞 본문, 건너뛴 수준, 코드 블록 안 `#` 줄은 헤딩 아님 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.1.4` | unit | 본문 청크 순서 증가, 조각은 같은 순서 | resource (mock) | `tests/unit/chunking/` |
@@ -302,8 +304,8 @@ LLM 응답은 mock으로 대체하고, 실행마다 달라지는 값은 성질�
 | `REQ-RAG-2.2.1` | unit | 자리표시 목록이 입력과 같음 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.2.2` | unit | 자리표시 일부만 든 청크 없음 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.2.3` | unit | `placeholder_ids`가 본문과 일치 | resource (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.3.1` | unit | 자리표시·경계(본문 줄 빠짐·겹침·코드 블록 중간) 검증 실패 뒤 다시 시도해 성공 | resource (mock) | `tests/unit/chunking/` |
-| `REQ-RAG-2.3.2` | unit | 횟수 소진 시 호출 중단과 규칙 분할 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.3.1` | unit | 해석 불가 응답(형식·청크 없음·범위 밖 줄·빈 제목·요약)과 자리표시·경계(본문 줄 빠짐·겹침·코드 블록 중간) 검증 실패 뒤 다시 시도해 성공, `chunking.validation_failed`의 `reason`·`detail` | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.3.2` | unit | 해석 불가·검증 실패로 횟수 소진 시 호출 중단과 규칙 분할 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.3.3` | unit | `fallback_used` 참·거짓 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.4.1` | unit | 자리표시마다 `ASSET` 청크 하나 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.4.2` | unit | `ASSET` 본문이 자리표시 하나 | resource (mock) | `tests/unit/chunking/` |
