@@ -1,6 +1,7 @@
 import {
   AnswerSpanNotFoundError,
   AssetNotFoundError,
+  BatchIndexingError,
   CommonModule,
   DocumentLockedError,
   DocumentNotFoundError,
@@ -44,6 +45,7 @@ describe('REQ-BE-8.1.1', () => {
       'AnswerSpanNotFoundError',
       'EvaluationInProgressError',
       'RagUnavailableError',
+      'BatchIndexingError',
       'toIsoUtc',
       'kstDayRange',
       'parseKstDayRange',
@@ -113,7 +115,7 @@ describe('REQ-BE-8.3.1', () => {
   });
 
   it('하위 클래스 인스턴스가 배럴의 DomainError 인스턴스다', () => {
-    const classes = [
+    const classes: (new () => DomainError)[] = [
       InvalidRequestError,
       UnsupportedFileError,
       PayloadTooLargeError,
@@ -131,6 +133,8 @@ describe('REQ-BE-8.3.1', () => {
     for (const Cls of classes) {
       expect(new Cls()).toBeInstanceOf(DomainError);
     }
+    // ★ BatchIndexingError는 생성자 인자가 달라 따로 본다
+    expect(new BatchIndexingError(1)).toBeInstanceOf(DomainError);
   });
 });
 

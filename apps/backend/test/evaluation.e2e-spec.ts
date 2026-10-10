@@ -79,6 +79,13 @@ function router(req: RecordedRequest): FakeReply {
           status: 200,
           json: { n: 10, base: wireMetrics(null), expanded: wireMetrics(null) },
         };
+      case 'Q-BATCH':
+        return {
+          status: 503,
+          json: {
+            error: { code: 'BATCH_INDEXING', message: 'x', details: { remaining_jobs: 7 } },
+          },
+        };
       case 'Q-ERR':
         return {
           status: 409,
@@ -215,10 +222,12 @@ interface ListBody {
 /** 오류 응답의 모양과 코드를 확인한다. */
 function expectError(res: request.Response, status: number, code: string): string {
   expect(res.status).toBe(status);
-  const body = res.body as { error: { code: string; message: string } };
+  const body = res.body as { error: { code: string; message: string; details: unknown } };
   expect(Object.keys(body)).toEqual(['error']);
-  expect(Object.keys(body.error).sort()).toEqual(['code', 'message']);
+  expect(Object.keys(body.error).sort()).toEqual(['code', 'details', 'message']);
   expect(body.error.code).toBe(code);
+  // ★ 평가 API의 오류는 모두 details가 null이다
+  expect(body.error.details).toBeNull();
   return body.error.message;
 }
 
@@ -443,6 +452,23 @@ describe('REQ-BE-5.2.4', () => {
       await harness.db.collection('evaluation_records').countDocuments({ goldenSetId: id }),
     ).toBe(2);
     expect(evaluationRequests()).toHaveLength(2);
+  });
+});
+
+describe('REQ-BE-5.2.9', () => {
+  it('T-E2E-BATCH-1 RAG Server가 일괄 색인으로 거부하면 기록이 error와 전용 사유로 끝난다', async () => {
+    const added = await addQuery('Q-BATCH');
+    expect(added.status).toBe(201);
+    const id = (added.body as { golden_set_id: string }).golden_set_id;
+    await waitAllDone();
+    const list = (await listGolden()).body as ListBody;
+    expect(list.items.find((item) => item.golden_set_id === id)?.latest.outcome).toBe('error');
+    const record = await harness.db.collection('evaluation_records').findOne({ goldenSetId: id });
+    expect(record?.errorMessage).toBe('RAG Server가 일괄 색인 중이라 평가하지 못했습니다');
+    expect(String(record?.errorMessage)).not.toContain('7');
+    expect(String(record?.errorMessage)).not.toContain('BATCH_INDEXING');
+    // ★ 다시 시도하지 않는다
+    expect(evaluationRequests()).toHaveLength(1);
   });
 });
 

@@ -1450,6 +1450,14 @@ describe('REQ-BE-1.3.6', () => {
     fakeRag.getIndexStates.mockRejectedValue(new Error('boom'));
     await expect(service.getStages(['a'])).rejects.toThrow('boom');
   });
+
+  it('T-STG-5 embedding_pending 단계는 값을 바꾸지 않고 그대로 준다', async () => {
+    fakeRag.getIndexStates.mockResolvedValue([
+      state({ docId: 'a', latestJobState: 'running', latestJobStage: 'embedding_pending' }),
+    ]);
+    const stages = await service.getStages(['a']);
+    expect([...stages.entries()]).toEqual([['a', 'embedding_pending']]);
+  });
 });
 
 describe('REQ-BE-3.4.1', () => {

@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import request from 'supertest';
 import { AssetsService } from '../src/assets';
-import type { HintContext, UploadedImage } from '../src/assets';
+import type { HintContext, HintRunResult, UploadedImage } from '../src/assets';
 import { bootAppHarness } from './support/app-harness';
 import type { AppHarness } from './support/app-harness';
 import { startFakeRagServer } from './support/fake-rag-server';
@@ -76,9 +76,27 @@ function up(
 function ctx(answers: boolean[] = []): HintContext {
   const queue = [...answers];
   return {
-    name: 'e2e 문서',
-    editionLabel: null,
     shouldContinue: async () => (queue.length > 0 ? (queue.shift() as boolean) : true),
+  };
+}
+
+/**
+ * 이미지 -> 표 순서로 요약·캡션을 만든다(예약 색인의 3·4단계와 같다). 합계를 돌려준다.
+ * ★ 이미지 단계가 멈추면 표 단계를 부르지 않는다
+ */
+async function runAll(
+  docId: string,
+  version: string,
+  context: HintContext = ctx(),
+): Promise<HintRunResult> {
+  const image = await assets.generateHints(docId, version, 'image', context);
+  if (image.stopped) return image;
+  const table = await assets.generateHints(docId, version, 'table', context);
+  return {
+    generated: image.generated + table.generated,
+    temporary: image.temporary + table.temporary,
+    stopped: table.stopped,
+    remaining: table.remaining,
   };
 }
 
@@ -196,10 +214,13 @@ describe('REQ-BE-2.4.1', () => {
   ])('T-E2E-IMG-3 %s는 404 ASSET_NOT_FOUND와 한국어 메시지다', async (_label, urlPath) => {
     const res = await request(baseUrl).get(urlPath);
     expect(res.status).toBe(404);
-    const body = res.body as { error: { code: string; message: string } };
+    const body = res.body as {
+      error: { code: string; message: string; details: unknown };
+    };
     expect(Object.keys(body)).toEqual(['error']);
-    expect(Object.keys(body.error).sort()).toEqual(['code', 'message']);
+    expect(Object.keys(body.error).sort()).toEqual(['code', 'details', 'message']);
     expect(body.error.code).toBe('ASSET_NOT_FOUND');
+    expect(body.error.details).toBeNull();
     expect(body.error.message).toMatch(/[가-힣]/);
     for (const secret of [tmpDir, 'e2e-a/1', 'gone.png', 'p.png']) {
       expect(body.error.message).not.toContain(secret);
@@ -266,7 +287,7 @@ describe('REQ-BE-2.1.3', () => {
     ragSucceeds();
     const collection = harness.db.collection('assets');
     await assets.prepareVersion('e2e-twice', '1', HINT_MD, [up('a.png', PNG)]);
-    await assets.generateHints('e2e-twice', '1', ctx());
+    await runAll('e2e-twice', '1', ctx());
     const changed = new Map([['t1', '새 요약']]);
     await assets.inheritVersion('e2e-twice', '1', '2', changed);
     const once = await assets.listViews('e2e-twice', '2');
@@ -283,18 +304,22 @@ describe('REQ-BE-2.3.6', () => {
   it('T-E2E-DB-2 실제 MongoDB로 멈춘 뒤 이어서 하면 남은 것만 요청하고 모두 문장이 된다', async () => {
     ragSucceeds();
     await assets.prepareVersion('e2e-hint', '1', HINT_MD, [up('a.png', PNG)]);
-    const first = await assets.generateHints('e2e-hint', '1', ctx([true, true, false]));
-    expect(first).toMatchObject({ generated: 2, stopped: true });
+    // 이미지 i1(true) -> 표 t1(true) -> 표 t2(false)로 멈춘다
+    const first = await runAll('e2e-hint', '1', ctx([true, true, false]));
+    expect(first).toMatchObject({ generated: 2, stopped: true, remaining: 1 });
     expect(fake.requests.map((req) => req.url)).toEqual([
-      '/v1/captions/table',
       '/v1/captions/image',
+      '/v1/captions/table',
     ]);
+    // 아직 만들지 못한 표는 조회에서 text가 null이다
+    const midViews = await assets.listViews('e2e-hint', '1');
+    expect(midViews.map((view) => view.text === null)).toEqual([false, false, true]);
 
-    const second = await assets.generateHints('e2e-hint', '1', ctx());
-    expect(second).toMatchObject({ generated: 1, stopped: false });
+    const second = await runAll('e2e-hint', '1', ctx());
+    expect(second).toMatchObject({ generated: 1, stopped: false, remaining: 0 });
     expect(fake.requests.map((req) => req.url)).toEqual([
-      '/v1/captions/table',
       '/v1/captions/image',
+      '/v1/captions/table',
       '/v1/captions/table',
     ]);
     const hints = await assets.hintsFor('e2e-hint', '1');
@@ -308,8 +333,8 @@ describe('REQ-BE-1.7.1', () => {
     const md = [TABLE1, '![A](a.png)', '![B](gone.png)', TABLE2].join('\n\n');
     await assets.prepareVersion('e2e-tmp', '1', md, [up('a.png', PNG)]);
     ragFails();
-    const first = await assets.generateHints('e2e-tmp', '1', ctx());
-    expect(first).toEqual({ generated: 4, temporary: 4, stopped: false });
+    const first = await runAll('e2e-tmp', '1', ctx());
+    expect(first).toEqual({ generated: 4, temporary: 4, stopped: false, remaining: 0 });
     // 짝 없는 이미지는 RAG 요청이 없다
     expect(fake.requests).toHaveLength(3);
 
@@ -317,10 +342,44 @@ describe('REQ-BE-1.7.1', () => {
     expect(await assets.markTemporaryForRegeneration('e2e-tmp', '1')).toBe(3);
 
     ragSucceeds();
-    const second = await assets.generateHints('e2e-tmp', '1', ctx());
-    expect(second).toEqual({ generated: 3, temporary: 0, stopped: false });
+    const second = await runAll('e2e-tmp', '1', ctx());
+    expect(second).toEqual({ generated: 3, temporary: 0, stopped: false, remaining: 0 });
     const views = await assets.listViews('e2e-tmp', '1');
     expect(views.map((view) => view.isTemporary)).toEqual([false, false, true, false]);
+  });
+});
+
+describe('REQ-BE-2.3.7', () => {
+  it('T-E2E-NORAG-1 실제 MongoDB에서 추출·다시 추출·이어받기·재생성 표시 뒤에도 요약·캡션 요청이 없고 최상위는 모두 pending이다', async () => {
+    ragSucceeds();
+    const collection = harness.db.collection('assets');
+    const before = fake.requests.length;
+    await assets.prepareVersion('e2e-norag', '1', HINT_MD, [up('a.png', PNG)]);
+    expect(await collection.countDocuments({ docId: 'e2e-norag', hintStatus: 'pending' })).toBe(3);
+    expect(await collection.countDocuments({ docId: 'e2e-norag', hintStatus: 'done' })).toBe(0);
+
+    await assets.rebuildVersion('e2e-norag', '1', HINT_MD);
+    await assets.inheritVersion('e2e-norag', '1', '2', new Map([['t1', '새 요약']]));
+    expect(await assets.markTemporaryForRegeneration('e2e-norag', '2')).toBe(0);
+    expect(await assets.pendingHints('e2e-norag', '1')).toBe(3);
+    // 이어받은 버전: 바꾼 표만 done, 나머지는 pending 그대로
+    expect(await assets.pendingHints('e2e-norag', '2')).toBe(2);
+    await assets.hintsFor('e2e-norag', '1');
+
+    // ★ 요약·캡션 요청 0건
+    expect(fake.requests.length - before).toBe(0);
+    const views = await assets.listViews('e2e-norag', '1');
+    expect(views.map((view) => [view.text, view.isTemporary])).toEqual([
+      [null, false],
+      [null, false],
+      [null, false],
+    ]);
+    // 다시 추출해도 모두 pending이고 파일은 그대로다
+    expect(
+      await collection.countDocuments({ docId: 'e2e-norag', version: '1', hintStatus: 'pending' }),
+    ).toBe(3);
+    const res = await getBinary('/v1/documents/e2e-norag/versions/1/assets/i1');
+    expect(res.status).toBe(200);
   });
 });
 
@@ -328,7 +387,7 @@ describe('REQ-BE-2.5.1', () => {
   it('T-E2E-DB-4 실제 MongoDB로 복원하면 표 원문과 이미지 주소가 나오고 주소로 GET하면 200이다', async () => {
     ragSucceeds();
     const prepared = await assets.prepareVersion('e2e-rst', '1', HINT_MD, [up('a.png', PNG)]);
-    await assets.generateHints('e2e-rst', '1', ctx());
+    await runAll('e2e-rst', '1', ctx());
     const restored = await assets.restore('e2e-rst', '1', prepared.indexingMarkdown);
     expect(restored).toContain(TABLE1);
     expect(restored).toContain(TABLE2);
@@ -366,7 +425,7 @@ describe('REQ-BE-8.2.1', () => {
       `![${SENTINELS.alt}](${SENTINELS.path})`,
     ].join('\n\n');
     const prepared = await assets.prepareVersion('e2e-sent', '1', md, [up(SENTINELS.path, PNG)]);
-    await assets.generateHints('e2e-sent', '1', ctx());
+    await runAll('e2e-sent', '1', ctx());
     await assets.restore('e2e-sent', '1', prepared.indexingMarkdown);
     const urls = await assets.imageUrls('e2e-sent', '1');
     const res = await getBinary(urls[SENTINELS.path] as string);

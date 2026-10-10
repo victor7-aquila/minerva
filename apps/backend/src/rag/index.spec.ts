@@ -95,6 +95,9 @@ describe('REQ-BE-10.1.1', () => {
     const chunking: RagChunking = 'rule';
     const state: RagJobState = 'superseded';
     const stage: RagJobStage = 'storing';
+    // ★ 일괄 색인에서 임베딩을 미룬 단계도 RagJobStage다
+    const pendingStage: RagJobStage = 'embedding_pending';
+    expect(pendingStage).toBe('embedding_pending');
     const outcome: RagIndexOutcome = 'joined';
     const kind: RagChunkKind = 'asset';
     const scope: RagEditionScope = 'latest';

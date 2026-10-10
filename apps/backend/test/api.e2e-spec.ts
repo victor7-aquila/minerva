@@ -9,6 +9,7 @@ import { LogsService } from '../src/logs';
 import {
   AnswerSpanNotFoundError,
   AssetNotFoundError,
+  BatchIndexingError,
   DocumentLockedError,
   DocumentNotFoundError,
   DocumentNotSearchableError,
@@ -56,20 +57,21 @@ class ProbeBodyDto {
   @IsInt() count!: number;
 }
 
-/** 12개 코드와 그 common 오류 클래스다. */
-const CODE_CLASSES: Record<string, new () => DomainError> = {
-  INVALID_REQUEST: InvalidRequestError,
-  UNSUPPORTED_FILE: UnsupportedFileError,
-  ANSWER_SPAN_NOT_FOUND: AnswerSpanNotFoundError,
-  UNAUTHORIZED: UnauthorizedError,
-  DOCUMENT_NOT_FOUND: DocumentNotFoundError,
-  ASSET_NOT_FOUND: AssetNotFoundError,
-  GOLDEN_SET_NOT_FOUND: GoldenSetNotFoundError,
-  DOCUMENT_LOCKED: DocumentLockedError,
-  DOCUMENT_NOT_SEARCHABLE: DocumentNotSearchableError,
-  EVALUATION_IN_PROGRESS: EvaluationInProgressError,
-  PAYLOAD_TOO_LARGE: PayloadTooLargeError,
-  RAG_UNAVAILABLE: RagUnavailableError,
+/** 13개 코드와 그 common 오류를 만드는 팩토리다. ★ BatchIndexingError는 생성자 인자가 있어 팩토리로 만든다 */
+const CODE_CLASSES: Record<string, () => DomainError> = {
+  INVALID_REQUEST: () => new InvalidRequestError(),
+  UNSUPPORTED_FILE: () => new UnsupportedFileError(),
+  ANSWER_SPAN_NOT_FOUND: () => new AnswerSpanNotFoundError(),
+  UNAUTHORIZED: () => new UnauthorizedError(),
+  DOCUMENT_NOT_FOUND: () => new DocumentNotFoundError(),
+  ASSET_NOT_FOUND: () => new AssetNotFoundError(),
+  GOLDEN_SET_NOT_FOUND: () => new GoldenSetNotFoundError(),
+  DOCUMENT_LOCKED: () => new DocumentLockedError(),
+  DOCUMENT_NOT_SEARCHABLE: () => new DocumentNotSearchableError(),
+  EVALUATION_IN_PROGRESS: () => new EvaluationInProgressError(),
+  PAYLOAD_TOO_LARGE: () => new PayloadTooLargeError(),
+  RAG_UNAVAILABLE: () => new RagUnavailableError(),
+  BATCH_INDEXING: () => new BatchIndexingError(7),
 };
 
 /** API.md 「오류 코드」 상태 표다. */
@@ -86,6 +88,7 @@ const STATUS_TABLE: Record<string, number> = {
   EVALUATION_IN_PROGRESS: 409,
   PAYLOAD_TOO_LARGE: 413,
   RAG_UNAVAILABLE: 503,
+  BATCH_INDEXING: 503,
 };
 
 /** 테스트 전용 컨트롤러다. ★ src/에 두지 않는다 */
@@ -122,8 +125,8 @@ class ApiProbeController {
   /** 도메인 오류 탐침: kind에 맞는 오류를 던진다. */
   @Get('throw/:kind')
   throwIt(@Param('kind') kind: string): never {
-    const Cls = CODE_CLASSES[kind];
-    if (Cls !== undefined) throw new Cls();
+    const make = CODE_CLASSES[kind];
+    if (make !== undefined) throw make();
     throw new Error('SECRET-7f3a C:\\secret\\path SELECT * FROM t');
   }
 }
@@ -212,12 +215,14 @@ afterAll(async () => {
   if (tmpDir !== undefined) await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
-/** 오류 본문이 키 `error` 하나이고 그 안이 code·message 둘뿐임을 단언한다. */
+/** 오류 본문이 키 `error` 하나이고 그 안이 code·message·details 셋뿐임을 단언한다. */
 function expectErrorShape(body: unknown, code: string, message?: string): void {
-  const typed = body as { error: { code: string; message: string } };
+  const typed = body as { error: { code: string; message: string; details: unknown } };
   expect(Object.keys(typed)).toEqual(['error']);
-  expect(Object.keys(typed.error).sort()).toEqual(['code', 'message']);
+  expect(Object.keys(typed.error).sort()).toEqual(['code', 'details', 'message']);
   expect(typed.error.code).toBe(code);
+  // ★ details는 BATCH_INDEXING만 { remaining_jobs }를 갖고 나머지(500·404·검증 오류 포함)는 null이다 (REQ-BE-7.1.2)
+  expect(typed.error.details).toEqual(code === 'BATCH_INDEXING' ? { remaining_jobs: 7 } : null);
   expect(typed.error.message).toMatch(/[가-힣]/);
   if (message !== undefined) expect(typed.error.message).toBe(message);
 }

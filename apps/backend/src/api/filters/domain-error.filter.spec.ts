@@ -11,6 +11,7 @@ import { createTestCommonModule } from '../../../test/support/test-common.module
 import {
   AnswerSpanNotFoundError,
   AssetNotFoundError,
+  BatchIndexingError,
   DocumentLockedError,
   DocumentNotFoundError,
   DocumentNotSearchableError,
@@ -45,6 +46,7 @@ const STATUS_TABLE: Record<string, number> = {
   EVALUATION_IN_PROGRESS: 409,
   PAYLOAD_TOO_LARGE: 413,
   RAG_UNAVAILABLE: 503,
+  BATCH_INDEXING: 503,
 };
 
 const INTERNAL_MESSAGE = '서버에서 예상하지 못한 오류가 발생했습니다';
@@ -116,11 +118,18 @@ function handle(
 }
 
 /** 오류 본문 모양을 단언한다. */
-function expectErrorBody(body: unknown, code: string, message?: string): void {
-  const typed = body as { error: { code: string; message: string } };
+function expectErrorBody(
+  body: unknown,
+  code: string,
+  message?: string,
+  details: unknown = null,
+): void {
+  const typed = body as { error: { code: string; message: string; details: unknown } };
   expect(Object.keys(typed)).toEqual(['error']);
-  expect(Object.keys(typed.error).sort()).toEqual(['code', 'message']);
+  expect(Object.keys(typed.error).sort()).toEqual(['code', 'details', 'message']);
   expect(typed.error.code).toBe(code);
+  // ★ details는 BatchIndexingError만 값을 갖고 나머지는 null이다
+  expect(typed.error.details).toEqual(details);
   if (message !== undefined) expect(typed.error.message).toBe(message);
   expect(typed.error.message).toMatch(/[가-힣]/);
 }
@@ -152,8 +161,10 @@ describe('REQ-BE-8.3.1', () => {
     },
   );
 
-  it('T-FLT-2 ERROR_STATUS는 12개 코드의 상태 표와 같고 필터 전용 코드를 담지 않는다', () => {
+  it('T-FLT-2 ERROR_STATUS는 13개 코드의 상태 표와 같고 필터 전용 코드를 담지 않는다', () => {
     expect({ ...ERROR_STATUS }).toEqual(STATUS_TABLE);
+    expect(Object.keys(ERROR_STATUS)).toHaveLength(13);
+    expect(ERROR_STATUS.BATCH_INDEXING).toBe(503);
     expect(Object.keys(ERROR_STATUS)).not.toContain('NOT_FOUND');
     expect(Object.keys(ERROR_STATUS)).not.toContain('INTERNAL_ERROR');
     expect(INTERNAL_ERROR).toMatchObject({ code: 'INTERNAL_ERROR', status: 500 });
@@ -182,6 +193,42 @@ describe('REQ-BE-8.3.1', () => {
     );
     expect(res.statusCode).toBe(413);
     expect(res.headers.connection).toBe('close');
+  });
+});
+
+describe('REQ-BE-7.1.2', () => {
+  it('T-FLT-12 BatchIndexingError는 503과 remaining_jobs를 담은 details로 응답한다', () => {
+    const error = new BatchIndexingError(7);
+    const { res, logs } = handle(error);
+    expect(res.statusCode).toBe(503);
+    expect(res.body).toEqual({
+      error: { code: 'BATCH_INDEXING', message: error.message, details: { remaining_jobs: 7 } },
+    });
+    expect(error.message).toMatch(/[가-힣]/);
+    expect(logs).toHaveLength(0);
+  });
+
+  it('T-FLT-13 다른 모든 오류의 details는 null이다', () => {
+    const exceptions: unknown[] = [
+      new DocumentLockedError(),
+      new RagUnavailableError(),
+      new RequestValidationError(['page_size']),
+      new NotFoundException('Cannot GET /v1/nope'),
+      Object.assign(new Error('request entity too large'), {
+        status: 413,
+        statusCode: 413,
+        expose: true,
+        type: 'entity.too.large',
+      }),
+      new HttpException('x', 405),
+      new BadRequestException('bad'),
+      new Error('boom'),
+    ];
+    for (const exception of exceptions) {
+      const { res } = handle(exception);
+      const error = (res.body as { error: { details: unknown } }).error;
+      expect(error.details).toBeNull();
+    }
   });
 });
 
