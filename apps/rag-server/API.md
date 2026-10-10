@@ -325,7 +325,7 @@ Content-Type: application/json
 | :--- | :--- | :--- | :--- | :--- |
 | body | `query` | `string` | 필수 | |
 | body | `doc_id` | `string` | 필수 | 정답 문서 |
-| body | `answer_span` | `string` | 필수 | 정답 원문 구간 |
+| body | `answer_span` | `string` | 필수 | 정답 원문 구간. 공백 문자를 모두 지운 뒤 비어 있지 않다. 공백 문자는 JavaScript 정규식 `\s`와 같은 글자 집합이다(띄어쓰기·탭·줄바꿈과 U+00A0, U+1680, U+2000~U+200A, U+2028, U+2029, U+202F, U+205F, U+3000, U+FEFF) (`REQ-RAG-6.1.1`) |
 | body | `edition_only` | `boolean` | 선택 | `false`면 정답 문서와 이름이 같은 다른 판의 결과도 적중으로 세고, `true`면 정답 문서의 결과만 센다. 기본값 `false` (`REQ-RAG-6.1.3`) |
 | body | `top_n` | `integer` | 선택 | 1 이상. 빠지면 설정한 기본 개수 |
 
@@ -337,6 +337,7 @@ Content-Type: application/json
 
 | 상태 | 오류 코드 | 조건 |
 | :--- | :--- | :--- |
+| `400` | `INVALID_REQUEST` | 공백 문자를 지운 `answer_span`이 비어 있다. 정답 문서 확인과 검색보다 먼저 검사한다 (`REQ-RAG-6.1.1`) |
 | `409` | `DOCUMENT_NOT_SEARCHABLE` | 정답 문서가 검색되지 않는 상태다 (`REQ-RAG-6.3.2`) |
 | `503` | `MODEL_UNAVAILABLE` | 모델 서버에 연결할 수 없다 (`REQ-RAG-12.1.2`) |
 | `503` | `STORE_UNAVAILABLE` | Qdrant에 연결할 수 없다 (`REQ-RAG-12.2.1`) |

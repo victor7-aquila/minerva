@@ -40,18 +40,28 @@ def _redact_value(value: Any) -> Any:
         }
     if isinstance(value, (list, tuple)):
         items = cast(list[Any] | tuple[Any, ...], value)
-        return type(items)(_redact_value(item) for item in items)
+        redacted = [_redact_value(item) for item in items]
+        # ★ namedtuple 같은 하위 타입은 생성자가 달라 다시 만들 수 없다 — 기본 타입으로 돌려준다
+        return redacted if isinstance(items, list) else tuple(redacted)
     return value
 
 
 def _redact_forbidden_keys(
     logger: WrappedLogger, method_name: str, event_dict: EventDict
 ) -> EventDict:
-    """금지 키의 값을 "[removed]"로 바꾼다."""
-    return {
-        key: _REMOVED if _is_forbidden(key) else _redact_value(value)
-        for key, value in event_dict.items()
-    }
+    """금지 키의 값을 "[removed]"로 바꾼다. 예기치 않게 실패하면 안전한 최소 이벤트를 돌려준다."""
+    try:
+        return {
+            key: _REMOVED if _is_forbidden(key) else _redact_value(value)
+            for key, value in event_dict.items()
+        }
+    except Exception:
+        # ★ 예외가 나가면 logging이 이벤트 dict 전체(금지 키 원문 포함)를 stderr로 내보낸다
+        return {
+            key: value
+            for key in ("level", "logger", "timestamp")
+            if isinstance(value := event_dict.get(key), str)
+        } | {"event": "log.redaction_failed"}
 
 
 _SHARED_PROCESSORS: list[Processor] = [

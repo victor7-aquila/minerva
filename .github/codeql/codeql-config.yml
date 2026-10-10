@@ -1,0 +1,9 @@
+# CodeQL 고급 설정의 분석 구성
+name: minerva CodeQL config
+
+query-filters:
+  # ★ Backend는 전역 ValidationPipe가 DTO(class-validator)로 docId 같은 질의 값을 문자열로 고정한다.
+  #   CodeQL은 이 검증을 따라가지 못해 MongoDB 질의마다 NoSQL 주입 오탐을 낸다.
+  #   Python의 py/nosql-injection 등 다른 언어의 주입 규칙은 그대로 둔다.
+  - exclude:
+      id: js/sql-injection

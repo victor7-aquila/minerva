@@ -125,17 +125,21 @@ def _read_snapshot(path: Path) -> _Snapshot:
         raw = path.read_bytes()
     except FileNotFoundError:
         return _EMPTY
-    except OSError as exc:
-        raise _InvalidGlossaryError("용어집 파일을 읽지 못했습니다", "unreadable") from exc
+    except OSError:
+        # ★ OSError 메시지에는 경로가 들어 있으므로 원인을 잇지 않는다
+        raise _InvalidGlossaryError("용어집 파일을 읽지 못했습니다", "unreadable") from None
     try:
         text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise _InvalidGlossaryError("용어집 파일이 UTF-8이 아닙니다", "unreadable") from exc
+    except UnicodeDecodeError:
+        raise _InvalidGlossaryError("용어집 파일이 UTF-8이 아닙니다", "unreadable") from None
     try:
         # ★ safe_load만 쓴다 — 임의 객체를 만들지 않는다
         data: object = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise _InvalidGlossaryError("용어집 파일이 YAML 형식이 아닙니다", "invalid_yaml") from exc
+    except Exception:
+        # ★ PyYAML은 YAMLError 밖의 예외(잘못된 날짜의 ValueError, !!timestamp의 AttributeError,
+        #   !!bool의 KeyError, 깊은 중첩의 RecursionError 등)도 낸다. safe_load 한 줄만 감싸므로
+        #   모두 형식 오류로 본다. 파일 내용이 담긴 원인은 잇지 않는다
+        raise _InvalidGlossaryError("용어집 파일이 YAML 형식이 아닙니다", "invalid_yaml") from None
     if not isinstance(data, dict):
         raise _invalid("최상위")
     top: dict[object, object] = dict(data)
