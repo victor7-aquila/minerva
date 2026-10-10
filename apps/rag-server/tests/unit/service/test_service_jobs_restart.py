@@ -16,11 +16,13 @@ from .fakes import (
     ScriptedRunner,
     assert_service_log,
     go,
+    install_write_failure,
     new_manager,
     notified,
     running_manager,
     settle,
     submit,
+    until,
     wait_event,
     wait_state,
 )
@@ -293,5 +295,64 @@ def test_restart_resolved_log(settings: Settings, receiver: FakeReceiver) -> Non
         )
         assert sum(int(e["failed"]) for e in entries) == 1  # 대기 작업 Q
         assert sum(int(e["recovered"]) for e in entries) == 1  # 색인 중이던 R
+
+    go(scenario())
+
+
+@pytest.mark.req("REQ-RAG-10.1.3")
+def test_stop_during_assignment_leaves_running(
+    settings: Settings, receiver: FakeReceiver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[REQ-RAG-10.1.3] 배정 커밋을 기다리는 중 stop이 불리면 러너를 띄우지 않고 RUNNING으로 남긴다.
+
+    ★ 배정 쓰기(skip=1)를 작업 스레드에서 멈춘 채 stop을 부른다. 쓰기가 끝난 뒤 새 실행 태스크가
+    stop의 대기·취소 대상 밖에서 만들어지면 안 된다. 남긴 작업은 다음 start가 끝맺는다.
+    """
+    failure = install_write_failure(monkeypatch)
+
+    async def scenario() -> None:
+        first = await new_manager(settings)
+        runner = ScriptedRunner()
+        pause = failure.pause_transaction(skip=1)
+        caller = asyncio.create_task(submit(first, "doc-a", runner))
+        stopper: asyncio.Task[None] | None = None
+        try:
+            await until(pause.entered.is_set)  # 배정 쓰기가 멈춘 채 접수 호출은 기다린다
+            stopper = asyncio.create_task(first.stop(5))
+            await settle()  # stop이 새 접수·배정을 막은 뒤 쓰기를 푼다
+        finally:
+            pause.release.set()
+        job_id = await caller
+        assert stopper is not None
+        await stopper
+
+        assert runner.calls == 0
+        assert (await first.get_job(job_id)).state is JobState.RUNNING
+
+        spy = RecoverSpy(False)
+        async with running_manager(settings, spy) as second:
+            assert spy.calls == [("doc-a", job_id)]
+            view = await second.get_job(job_id)
+            assert view.state is JobState.FAILED
+            assert view.failure is not None
+            assert view.failure.code == "SERVER_RESTARTED"
+
+    go(scenario())
+
+
+@pytest.mark.req("REQ-RAG-10.8.7.1")
+def test_stop_flushes_last_notification(settings: Settings, receiver: FakeReceiver) -> None:
+    """[REQ-RAG-10.8.7.1] stop은 닫기 전에 방금 끝난 작업의 알림이 첫 전송을 시도하게 한다."""
+
+    async def scenario() -> None:
+        manager = await new_manager(settings)
+        runner = ScriptedRunner(WAIT)
+        job_id = await submit(manager, "doc-a", runner)
+        await wait_event(runner.waiting)
+        runner.release.set()
+        await manager.stop(5)  # 종료 직전에 끝난 작업이다 — 알림을 기다리지 않고 바로 stop한다
+
+        sent = [b["job_state"] for b in receiver.firsts(job_id=job_id)]
+        assert "succeeded" in sent
 
     go(scenario())

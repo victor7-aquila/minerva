@@ -108,6 +108,25 @@ def test_open_job_joined(settings: Settings, receiver: FakeReceiver) -> None:
 
 
 @pytest.mark.req("REQ-RAG-10.3.1")
+def test_concurrent_same_request_makes_one_job(settings: Settings) -> None:
+    """[REQ-RAG-10.3.1] 같은 요청 둘이 동시에 와도 새 작업은 하나이고 둘째는 joined다."""
+
+    async def scenario() -> None:
+        chunker = FakeChunker()
+        chunker.block = asyncio.Event()
+        async with running_manager(settings) as manager:
+            service = _service(manager, chunker)
+            results = await asyncio.gather(
+                service.submit(index_request()), service.submit(index_request())
+            )
+
+            assert sorted(r.outcome for r in results) == ["joined", "queued"]
+            assert results[0].job_id == results[1].job_id
+
+    go(scenario())
+
+
+@pytest.mark.req("REQ-RAG-10.3.1")
 def test_current_index_reused(settings: Settings) -> None:
     """[REQ-RAG-10.3.1] 이미 완료한 같은 내용은 reused와 그 작업 ID를 돌려주고 새 작업이 없다."""
 
