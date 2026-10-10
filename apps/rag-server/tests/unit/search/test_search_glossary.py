@@ -250,3 +250,50 @@ def test_search_uses_reloaded_glossary(settings: Settings, glossary_path: Path) 
     run(searcher.search(SearchQuery("vpn 설정")))
 
     assert "가상 사설망" in hub.embed_inputs[-1]
+
+
+# 따옴표 없는 2월 30일 — PyYAML이 YAMLError가 아닌 ValueError를 낸다
+_BAD_DATE = "terms:\n  - canonical: 가\n    synonyms: [2024-02-30]\n"
+
+
+@pytest.mark.req("REQ-RAG-4.8.1")
+def test_load_invalid_date_raises_glossary_error(settings: Settings, glossary_path: Path) -> None:
+    """[REQ-RAG-4.8.1] 따옴표 없는 잘못된 날짜가 든 파일을 load하면 GlossaryError가 난다."""
+    write_glossary(glossary_path, _BAD_DATE)
+
+    with pytest.raises(GlossaryError) as info:
+        Glossary(settings).load()
+
+    assert "2024-02-30" not in str(info.value)
+
+
+@pytest.mark.req("REQ-RAG-4.8.3")
+def test_reload_invalid_date_keeps_previous(settings: Settings, glossary_path: Path) -> None:
+    """[REQ-RAG-4.8.3] 잘못된 날짜 파일로 바뀌면 직전 묶음으로 확장하고 경고를 한 번 남긴다."""
+    glossary = _loaded(settings, glossary_path, _BEFORE)
+    write_glossary(glossary_path, _BAD_DATE)
+
+    with capture_logs() as logs:
+        first = _terms(glossary, "인증서")
+        second = _terms(glossary, "인증서")  # 같은 실패를 되풀이하지 않는다
+
+    assert first == second == {"cert"}
+    failed = [e for e in logs if e["event"] == "search.glossary_reload_failed"]
+    assert len(failed) == 1
+    assert failed[0]["reason"] == "invalid_yaml"
+
+
+@pytest.mark.req("REQ-RAG-4.8.3", "REQ-RAG-4.9.1")
+def test_search_survives_invalid_date_reload(settings: Settings, glossary_path: Path) -> None:
+    """[REQ-RAG-4.8.3] 실행 중 잘못된 날짜 파일로 바뀌어도 검색은 직전 용어집으로 확장한다."""
+    write_glossary(glossary_path, _BEFORE)
+    hub = FakeSearchHub()
+    searcher = make_searcher(scripted_store([rec("a")]), hub, settings)
+    run(searcher.search(SearchQuery("인증서")))
+    write_glossary(glossary_path, _BAD_DATE)
+
+    with capture_logs() as logs:
+        run(searcher.search(SearchQuery("인증서")))
+
+    assert "cert" in hub.embed_inputs[-1]
+    assert len([e for e in logs if e["event"] == "search.glossary_reload_failed"]) == 1
