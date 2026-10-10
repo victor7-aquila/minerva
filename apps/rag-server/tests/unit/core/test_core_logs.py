@@ -4,7 +4,9 @@
 ★ JSON이 한글을 \\uXXXX로 이스케이프할 수 있어, ASCII 고유 문자열과 파싱한 값을 함께 확인한다.
 """
 
+import io
 import json
+import sys
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
 
@@ -137,3 +139,57 @@ def test_tuple_subtype_value_does_not_break_redaction(
     record = json.loads(out.strip().splitlines()[-1])
     assert record["text"] == REMOVED
     assert record["pair"][1]["text"] == REMOVED
+
+
+def _cp949_stdout(monkeypatch: pytest.MonkeyPatch) -> io.BytesIO:
+    """sys.stdout을 cp949 스트림으로 바꾼다. 테스트가 끝나면 monkeypatch가 되돌린다."""
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp949", write_through=True)
+    monkeypatch.setattr(sys, "stdout", stream)
+    return raw
+
+
+@pytest.mark.req("REQ-RAG-11.2.1")
+def test_cp949_stream_keeps_event_and_hides_forbidden(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[REQ-RAG-11.2.1] cp949 출력에서 못 쓰는 문자가 있어도 이벤트가 남고 금지 키 원문은 없다."""
+    raw = _cp949_stdout(monkeypatch)
+    configure_logging()
+    get_logger("tests.core").info("core.test", query="SECRET-Q-9c1", doc_id="doc-😀")
+    written = raw.getvalue().decode("cp949")
+    captured = capsys.readouterr()
+    assert "SECRET-Q-9c1" not in written + captured.out + captured.err
+    assert captured.err == ""
+    record = json.loads(written.strip().splitlines()[-1])
+    assert record["event"] == "core.test"
+    assert record["query"] == REMOVED
+    assert record["doc_id"] == "doc-😀"  # 이스케이프된 JSON을 파싱하면 원래 값이다
+    assert "\\ud83d\\ude00" in written
+
+
+@pytest.mark.req("REQ-RAG-11.2.1")
+def test_handler_failure_prints_no_original(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """[REQ-RAG-11.2.1] 쓰기가 실패해도 stderr에는 원문 없이 실패 사실과 예외 타입만 나온다."""
+
+    class _BrokenStream:
+        encoding = "utf-8"
+
+        def write(self, _text: str) -> int:
+            raise OSError("SECRET-ERR-5d2")
+
+        def flush(self) -> None:
+            return None
+
+    monkeypatch.setattr(sys, "stdout", _BrokenStream())
+    configure_logging()
+    get_logger("tests.core").info("core.test", query="SECRET-Q-9c1", doc_id="d1")
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "SECRET-Q-9c1" not in out
+    assert "SECRET-ERR-5d2" not in out
+    assert "d1" not in out
+    assert "log.emit_failed" in captured.err
+    assert "OSError" in captured.err

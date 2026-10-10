@@ -11,6 +11,39 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 - MongoDB와 파일 저장소에 접속하지 않는다. 처리할 데이터는 Backend가 요청에 담아 보낸 것만 쓴다 — 원본 문서·표·이미지·요약·캡션은 Backend가 저장한다
 - 외부에서 호스팅하는 모델 API(클라우드 LLM·임베딩·리랭커 API)를 호출하지 않는다. 모델은 로컬에서 Ollama(LLM·VLM)와 sentence-transformers(임베딩·리랭커)로 실행한다 — 사내 폐쇄망 배포를 가정한다
 
+## 명령어
+
+모든 명령은 `apps/rag-server`에서 실행한다. `uv run`은 bash와 Windows PowerShell에서 같게 쓴다.
+
+| 목적 | 명령 | 비고 |
+| :--- | :--- | :--- |
+| 설치 | `uv sync` | `uv.lock` 기준. torch는 CPU 휠 인덱스에서 받는다 |
+| 포맷 검사 | `uv run ruff format --check .` | |
+| 린트 | `uv run ruff check .` | |
+| 타입 검사 | `uv run basedpyright` | |
+| 의존 방향 | `uv run lint-imports` | 계약은 `pyproject.toml` `[tool.importlinter]` |
+| 미사용 의존성 | `uv run deptry .` | |
+| 단위 테스트 | `uv run pytest tests/unit` | 외부 자원 없이 돈다 |
+| 통합 테스트 | `uv run pytest tests/integration` | Qdrant·설정이 없으면 skip. 실제 모델 테스트는 `MINERVA_IT_MODELS=1`과 Ollama가 있어야 돈다 |
+| 서버 실행 | `uv run uvicorn minerva_rag.api:create_app --factory` | Qdrant·Ollama가 먼저 떠 있어야 하고 설정 모델이 준비돼 있어야 한다. 설정은 `.env` 또는 환경 변수(`.env.example` 참고) |
+
+인프라는 저장소 루트에서 띄운다.
+
+| 목적 | 명령 | 비고 |
+| :--- | :--- | :--- |
+| Qdrant | `docker compose up -d qdrant` | |
+| Ollama (compose) | `docker compose --profile ollama up -d ollama` | 호스트에 Ollama를 설치했으면 띄우지 않는다(같은 포트). Windows는 GPU를 쓰는 호스트 설치를 권장한다 |
+
+환경 변수로 설정할 때의 문법만 셸마다 다르다: bash는 `RAG_QDRANT_URL=http://127.0.0.1:6333 uv run …`, PowerShell은 `$env:RAG_QDRANT_URL="http://127.0.0.1:6333"; uv run …`.
+
+**Windows에서 주의할 점**
+
+- 주소는 `localhost` 대신 `127.0.0.1`을 쓴다. `localhost`는 IPv6(`::1`)를 먼저 시도해 Qdrant 호출마다 수백 ms 늦어진다
+- `.env`는 UTF-8로 저장한다. PowerShell 5.1의 `>`·`Set-Content` 기본값(UTF-16, cp949)으로 저장하면 기동하지 못한다
+- 서버 출력을 파일·파이프로 리디렉션할 때는 `$env:PYTHONUTF8="1"`을 준다. 한국어 Windows는 리디렉션 출력이 cp949라 일부 문자가 이스케이프돼 기록된다
+- pytest 출력의 `Windows fatal exception: access violation` 스택 덤프는 네이티브 라이브러리 안에서 이미 처리된 예외를 faulthandler가 찍은 것이다. 테스트 결과(passed·failed)로 판정한다
+- 서버는 Ctrl+C로 정상 종료하고 종료 코드 0을 낸다. Ctrl+Break도 종료 처리는 같지만 종료 코드가 0이 아니다
+
 ## 코딩 규칙
 
 - 로그는 structlog 구조화 이벤트로만 남긴다. 모듈 맨 위에 `log = get_logger(__name__)`를 두고, 이벤트명은 `모듈.동작` 형식으로 쓴다 (예: `log.info("resource.upsert", doc_id=doc_id, chunks=len(chunks))`). `print()`나 f-string으로 조립한 메시지를 로그로 남기지 않는다

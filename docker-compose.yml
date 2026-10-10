@@ -16,9 +16,13 @@ services:
       - qdrant-data:/qdrant/storage
 
   # RAG Server의 LLM·VLM 실행기. 모델은 자동으로 받지 않는다
+  # ★ 기본 기동에서 빠진다(profile). 쓰려면: docker compose --profile ollama up -d ollama
+  #   호스트에 Ollama를 설치했으면 같은 11434 포트를 쓰므로 이 서비스는 띄우지 않는다.
+  #   Windows는 GPU를 바로 쓰는 호스트 설치를 권장한다(이 컨테이너는 GPU 설정 없이 CPU로 돈다)
   # ★ 모델은 직접 받는다: docker compose exec ollama ollama pull qwen3:14b (이미지 캡션용은 qwen3-vl:8b)
   ollama:
     image: ollama/ollama:0.40.2
+    profiles: ['ollama']
     ports:
       - '127.0.0.1:11434:11434'
     volumes:

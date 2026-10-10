@@ -1,5 +1,6 @@
 """structlog 구성과 금지 키 제거 처리기 (REQ-RAG-11.2)."""
 
+import contextlib
 import logging
 import sys
 from typing import Any, cast
@@ -96,11 +97,56 @@ def configure_logging() -> None:
             structlog.processors.JSONRenderer(ensure_ascii=False),
         ],
     )
-    handler = logging.StreamHandler(sys.stdout)  # ★ 호출 시점의 sys.stdout에 붙인다
+    handler = _SafeStreamHandler(sys.stdout)  # ★ 호출 시점의 sys.stdout에 붙인다
     handler.setFormatter(formatter)
     root = logging.getLogger()
     root.handlers = [handler]  # ★ 여러 번 불러도 처리기가 겹치지 않게 바꿔 끼운다
     root.setLevel(logging.INFO)
+
+
+def _escape_unencodable(text: str, encoding: str) -> str:
+    """출력 인코딩으로 표현할 수 없는 문자를 JSON 유니코드 이스케이프로 바꾼다."""
+    try:
+        text.encode(encoding)
+    except UnicodeEncodeError:
+        pass
+    except LookupError:
+        return text.encode("ascii", "backslashreplace").decode("ascii")
+    else:
+        return text
+    parts: list[str] = []
+    for char in text:
+        try:
+            char.encode(encoding)
+        except UnicodeEncodeError:
+            code = ord(char)
+            if code > 0xFFFF:  # JSON은 BMP 밖 문자를 서로게이트 쌍으로 쓴다
+                code -= 0x10000
+                high, low = 0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF)
+                parts.append(f"\\u{high:04x}\\u{low:04x}")
+            else:
+                parts.append(f"\\u{code:04x}")
+        else:
+            parts.append(char)
+    return "".join(parts)
+
+
+class _SafeStreamHandler(logging.StreamHandler):
+    """출력 인코딩에 맞지 않는 문자가 있어도 쓰기가 실패하지 않는 처리기다."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        """JSON 한 줄을 만들고 스트림 인코딩으로 쓸 수 없는 문자를 이스케이프한다."""
+        text = super().format(record)
+        encoding = getattr(self.stream, "encoding", None)
+        return _escape_unencodable(text, encoding) if isinstance(encoding, str) else text
+
+    def handleError(self, record: logging.LogRecord) -> None:  # noqa: N802 — logging의 메서드 이름
+        """★ 레코드(가림 전 값 포함)를 출력하지 않고, 실패 사실과 예외 타입만 stderr에 남긴다."""
+        exc_type = sys.exc_info()[0]
+        name = exc_type.__name__ if exc_type is not None else "unknown"
+        # ★ stderr마저 막히면 더 할 수 있는 일이 없다
+        with contextlib.suppress(Exception):
+            sys.stderr.write(f"log.emit_failed error_type={name}\n")
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
