@@ -6,6 +6,7 @@ JSON을 해석하므로 쓰지 않고, `BaseHTTPMiddleware`도 쓰지 않는다 
 
 import hmac
 
+from starlette.requests import ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from minerva_rag.core import PayloadTooLargeError, UnauthorizedError, get_logger
@@ -134,6 +135,10 @@ class GuardMiddleware:
             if started:
                 raise
             await self._reject_too_large(scope, receive, send, path, signal.size, read_limit or 0)
+        except ClientDisconnect:
+            # ★ 클라이언트가 먼저 연결을 끊은 것이라 오류가 아니다. 받을 사람이 없으므로
+            #   로그도 응답도 남기지 않는다 (api.unhandled 에러 노이즈 방지)
+            return
         except Exception as exc:
             # ★ 예외 문자열은 응답에도 로그 필드에도 넣지 않는다. 스택은 로그에만 남는다
             log.exception("api.unhandled", path=path, error_type=type(exc).__name__)

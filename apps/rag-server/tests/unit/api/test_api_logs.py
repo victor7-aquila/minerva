@@ -1,12 +1,16 @@
 """로그 이벤트(MODULE.md 「로그」) 테스트."""
 
+import asyncio
 from collections.abc import Callable
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 from structlog.testing import capture_logs
 
 from minerva_rag.api import create_app
+from minerva_rag.search import SearchQuery
 
 from .fakes import (
     AUTH,
@@ -133,3 +137,42 @@ def test_no_body_in_logs(client: TestClient, fakes: FakeServices) -> None:
     for entry in api_events(logs):
         assert "MARKER" not in str(entry)
     assert events_named(logs, "api.unhandled") == []
+
+
+@pytest.mark.req("REQ-RAG-11.3.2")
+def test_client_disconnect_is_not_unhandled(client: TestClient, fakes: FakeServices) -> None:
+    """[REQ-RAG-11.3.2] 클라이언트가 연결을 끊어 생긴 ClientDisconnect는 api.unhandled가 아니다."""
+    fakes.search.raises["search"] = ClientDisconnect()
+    app = cast(Any, client.app)
+    scope: dict[str, Any] = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/search",
+        "raw_path": b"/v1/search",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"x-minerva-token", AUTH["X-Minerva-Token"].encode()),
+            (b"content-type", b"application/json"),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+    sent: list[dict[str, Any]] = []
+
+    async def receive() -> dict[str, Any]:
+        return {"type": "http.request", "body": b'{"query":"q"}', "more_body": False}
+
+    async def send_message(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    with capture_logs() as logs:
+        asyncio.run(app(scope, receive, send_message))
+
+    assert fakes.search.calls == [("search", (SearchQuery("q"),))]
+    assert events_named(logs, "api.unhandled") == []
+    assert [e for e in logs if e.get("log_level") == "error"] == []
+    assert sent == []  # 끊긴 연결에는 응답을 시도하지 않는다
