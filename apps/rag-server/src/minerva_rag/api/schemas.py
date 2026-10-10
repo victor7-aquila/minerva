@@ -6,6 +6,7 @@ from datetime import date
 from typing import Annotated, Any, Literal, Protocol
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     BeforeValidator,
     Field,
@@ -44,19 +45,33 @@ def _parse_iso_date(value: object) -> date:
     return date.fromisoformat(value)
 
 
+def _reject_lone_surrogate(value: str) -> str:
+    """★ 단독 서로게이트(JSON `\ud800` 이스케이프)가 든 문자열은 형식 오류로 거부한다.
+
+    UTF-8로 인코딩할 수 없어 뒤 단계(크기 계산·체크섬·로그)에서 500이 되기 때문이다.
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("UTF-8로 표현할 수 없는 문자가 있습니다") from None
+    return value
+
+
+# 모든 요청 문자열 필드가 쓰는 타입이다 (중첩 모델·목록 원소 포함)
+Text = Annotated[StrictStr, AfterValidator(_reject_lone_surrogate)]
 PositiveInt = Annotated[StrictInt, Field(ge=1)]
 
 
 class TableCaptionBody(BaseModel):
     """표 요약 요청 본문이다."""
 
-    table_markdown: StrictStr
+    table_markdown: Text
 
 
 class EditionBody(BaseModel):
     """판 정보 요청 모델이다."""
 
-    label: StrictStr
+    label: Text
     edition_date: Annotated[date, BeforeValidator(_parse_iso_date)]
 
     def to_edition(self) -> Edition:
@@ -67,18 +82,18 @@ class EditionBody(BaseModel):
 class AssetTextBody(BaseModel):
     """자리표시 ID별 요약·캡션 요청 모델이다."""
 
-    placeholder_id: StrictStr
-    text: StrictStr
+    placeholder_id: Text
+    text: Text
 
 
 class IndexJobBody(BaseModel):
     """색인 요청 본문이다."""
 
-    doc_id: StrictStr
-    version: StrictStr
-    markdown: StrictStr
+    doc_id: Text
+    version: Text
+    markdown: Text
     assets: list[AssetTextBody]
-    name: StrictStr
+    name: Text
     edition: EditionBody | None = None
     chunking: Literal["semantic", "rule"] | None = None
     force: StrictBool | None = None
@@ -108,29 +123,29 @@ class IndexJobBody(BaseModel):
 class IndexStatesBody(BaseModel):
     """여러 문서의 색인 상태 조회 요청 본문이다."""
 
-    doc_ids: Annotated[list[StrictStr], Field(min_length=1, max_length=100)]
+    doc_ids: Annotated[list[Text], Field(min_length=1, max_length=100)]
 
 
 class MetadataBody(BaseModel):
     """이름·판 정보 변경 요청 본문이다. ★ edition은 필수이고 null을 허용한다."""
 
-    name: StrictStr
+    name: Text
     edition: EditionBody | None
 
 
 class EditionRefBody(BaseModel):
     """이름과 판 표기로 판을 가리키는 요청 모델이다."""
 
-    name: StrictStr
-    label: StrictStr
+    name: Text
+    label: Text
 
 
 class SearchBody(BaseModel):
     """검색 요청 본문이다."""
 
-    query: StrictStr
+    query: Text
     top_n: PositiveInt | None = None
-    doc_ids: list[StrictStr] | None = None
+    doc_ids: list[Text] | None = None
     edition_scope: Literal["all", "latest", "specific"] | None = None
     edition: EditionRefBody | None = None
     expand_neighbors: StrictBool | None = None
@@ -163,9 +178,9 @@ class SearchBody(BaseModel):
 class EvaluationBody(BaseModel):
     """골든셋 한 건 평가 요청 본문이다."""
 
-    query: StrictStr
-    doc_id: StrictStr
-    answer_span: StrictStr
+    query: Text
+    doc_id: Text
+    answer_span: Text
     edition_only: StrictBool | None = None
     top_n: PositiveInt | None = None
 

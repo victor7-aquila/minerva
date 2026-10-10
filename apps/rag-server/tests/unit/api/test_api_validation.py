@@ -264,3 +264,32 @@ def test_optional_null_means_default(client: TestClient, fakes: FakeServices) ->
     assert req.chunking == ChunkingMode.SEMANTIC
     assert req.force is False
     assert fakes.evaluation.calls == [("evaluate", (EvaluationCase("질의", "doc-1", "정답 구간"),))]
+
+
+@pytest.mark.req("REQ-RAG-9.1.2")
+@pytest.mark.parametrize(
+    ("path", "raw"),
+    [
+        (
+            "/v1/index-jobs",
+            rb'{"doc_id":"d","version":"v","markdown":"a\ud800b","assets":[],"name":"n"}',
+        ),
+        (
+            "/v1/index-jobs",
+            rb'{"doc_id":"d","version":"v","markdown":"m","assets":'
+            rb'[{"placeholder_id":"p","text":"\udfff"}],"name":"n"}',
+        ),
+        (_SEARCH, rb'{"query":"\ud800"}'),
+        ("/v1/documents/index-states", rb'{"doc_ids":["ok","\ud83d"]}'),
+    ],
+    ids=["index-markdown", "index-nested-asset", "search-query", "index-states-list-item"],
+)
+def test_lone_surrogate_is_invalid_request(
+    client: TestClient, fakes: FakeServices, path: str, raw: bytes
+) -> None:
+    """[REQ-RAG-9.1.2] JSON 이스케이프된 단독 서로게이트는 400이고 service를 부르지 않는다."""
+    response = send(client, "POST", path, content=raw, headers={"content-type": "application/json"})
+
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert fakes.total_calls() == 0
