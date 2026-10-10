@@ -4,7 +4,6 @@ import asyncio
 from collections import Counter
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from itertools import pairwise
 from typing import Any
 
 from minerva_rag.core import (
@@ -25,6 +24,7 @@ from .llm_protocol import (
     BOUNDARY_SCHEMA,
     TITLE_SCHEMA,
     BoundaryItem,
+    BoundaryParseError,
     build_boundary_prompt,
     build_title_prompt,
     parse_boundary_response,
@@ -35,6 +35,7 @@ from .structure import MarkdownDocument, Span
 
 log = get_logger(__name__)
 
+_REASON_UNPARSEABLE = "unparseable"
 _REASON_BOUNDARY = "boundary"
 _REASON_PLACEHOLDER = "placeholder"
 
@@ -85,10 +86,19 @@ class _PartLines:
 
 
 @dataclass(frozen=True)
+class _BoundaryFault:
+    """경계 검증에 처음 걸린 규칙이다. 줄·차례 번호는 1부터다."""
+
+    detail: str  # order, uncovered, code_block
+    item: int | None = None
+    line: int | None = None
+
+
+@dataclass(frozen=True)
 class _Verdict:
     """경계 응답의 검증 결과다."""
 
-    boundary_ok: bool
+    fault: _BoundaryFault | None
     placeholder_ok: bool
     missing: int
     duplicated: int
@@ -96,7 +106,7 @@ class _Verdict:
     @property
     def ok(self) -> bool:
         """경계와 자리표시 검증을 모두 통과했는지 돌려준다."""
-        return self.boundary_ok and self.placeholder_ok
+        return self.fault is None and self.placeholder_ok
 
     @property
     def reason(self) -> str:
@@ -104,29 +114,43 @@ class _Verdict:
         return _REASON_BOUNDARY if self.placeholder_ok else _REASON_PLACEHOLDER
 
 
-def _lines_covered(lines: _PartLines, items: list[BoundaryItem]) -> bool:
-    """빈 줄이 아닌 모든 줄이 어느 범위에든 드는지 본다."""
+def _order_fault(items: list[BoundaryItem]) -> _BoundaryFault | None:
+    """범위가 거꾸로이거나 앞 범위와 겹치는 첫 범위를 찾는다."""
+    for number, item in enumerate(items, start=1):
+        overlaps = number > 1 and item.start_line <= items[number - 2].end_line
+        if item.start_line > item.end_line or overlaps:
+            return _BoundaryFault("order", number, item.start_line)
+    return None
+
+
+def _uncovered_fault(lines: _PartLines, items: list[BoundaryItem]) -> _BoundaryFault | None:
+    """어느 범위에도 들지 않은 빈 줄 아닌 첫 줄을 찾는다."""
     covered = bytearray(len(lines.rows))
     for item in items:
         if item.start_line <= item.end_line:
             width = item.end_line - item.start_line + 1
             covered[item.start_line - 1 : item.end_line] = b"\x01" * width
-    return all(covered[number] or not row.strip() for number, row in enumerate(lines.rows))
+    for number, row in enumerate(lines.rows, start=1):
+        if not covered[number - 1] and row.strip():
+            return _BoundaryFault("uncovered", None, number)
+    return None
 
 
-def _splits_code_block(doc: MarkdownDocument, lines: _PartLines, items: list[BoundaryItem]) -> bool:
-    """여는 펜스 줄이 아닌 코드 블록 안 줄에서 시작하는 범위가 있는지 본다."""
-    for item in items:
+def _code_block_fault(
+    doc: MarkdownDocument, lines: _PartLines, items: list[BoundaryItem]
+) -> _BoundaryFault | None:
+    """여는 펜스 줄이 아닌 코드 블록 안 줄에서 시작하는 첫 범위를 찾는다."""
+    for number, item in enumerate(items, start=1):
         if item.start_line == 1:
             continue
         offset = lines.starts[item.start_line - 1]
         if offset >= lines.end:
             continue
-        number = doc.line_of(offset)
-        block = doc.code_block_of[number]
-        if block is not None and doc.code_blocks[block].open_line != number:
-            return True
-    return False
+        doc_line = doc.line_of(offset)
+        block = doc.code_block_of[doc_line]
+        if block is not None and doc.code_blocks[block].open_line != doc_line:
+            return _BoundaryFault("code_block", number, item.start_line)
+    return None
 
 
 def _validate(
@@ -136,11 +160,10 @@ def _validate(
     expected: list[str],
 ) -> _Verdict:
     """경계 응답이 부분을 빠짐·겹침 없이 차례로 나누는지, 자리표시가 그대로인지 본다."""
-    ordered = all(item.start_line <= item.end_line for item in items) and all(
-        after.start_line > before.end_line for before, after in pairwise(items)
-    )
-    boundary_ok = (
-        ordered and _lines_covered(lines, items) and not _splits_code_block(doc, lines, items)
+    fault = (
+        _order_fault(items)
+        or _uncovered_fault(lines, items)
+        or _code_block_fault(doc, lines, items)
     )
     found = [
         placeholder.raw
@@ -153,7 +176,7 @@ def _validate(
     have, want = Counter(found), Counter(expected)
     missing = sum((want - have).values())
     duplicated = sum((have - want).values())
-    return _Verdict(boundary_ok, found == expected, missing, duplicated)
+    return _Verdict(fault, found == expected, missing, duplicated)
 
 
 def _merge_bodyless(doc: MarkdownDocument, drafts: list[_Draft]) -> list[_Draft]:
@@ -279,21 +302,39 @@ class Chunker:
         attempts = self._settings.chunking_retries + 1
         for attempt in range(1, attempts + 1):
             raw = await self._generate(prompt, BOUNDARY_SCHEMA, location)
-            items = parse_boundary_response(raw, len(lines.rows))
-            if items is None:
-                raise ChunkingFailedError(location=location)
-            verdict = _validate(doc, lines, items, expected)
+            parsed = parse_boundary_response(raw, lines.rows)
+            # ★ 해석할 수 없는 응답도 검증 실패처럼 다시 시도한다 (REQ-RAG-2.3.1)
+            if isinstance(parsed, BoundaryParseError):
+                log.warning(
+                    "chunking.validation_failed",
+                    part=index,
+                    attempt=attempt,
+                    reason=_REASON_UNPARSEABLE,
+                    detail=parsed.detail,
+                    item=parsed.item,
+                    line=parsed.line,
+                    line_count=len(lines.rows),
+                    missing=None,
+                    duplicated=None,
+                )
+                continue
+            verdict = _validate(doc, lines, parsed, expected)
             if verdict.ok:
                 return [
                     _Draft(lines.span_of(item), item.title, item.summary)
-                    for item in items
+                    for item in parsed
                     if lines.has_text(item)
                 ]
+            fault = verdict.fault if verdict.placeholder_ok else None
             log.warning(
                 "chunking.validation_failed",
                 part=index,
                 attempt=attempt,
                 reason=verdict.reason,
+                detail=None if fault is None else fault.detail,
+                item=None if fault is None else fault.item,
+                line=None if fault is None else fault.line,
+                line_count=len(lines.rows),
                 missing=verdict.missing,
                 duplicated=verdict.duplicated,
             )
