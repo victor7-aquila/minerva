@@ -1,6 +1,7 @@
 """minerva RAG Server core 단위."""
 
 from .errors import (
+    BatchIndexingError,
     CaptionFailedError,
     ChunkingFailedError,
     DocumentNotSearchableError,
@@ -56,6 +57,7 @@ __all__ = [
     "ChunkingFailedError",
     "ServerNotReadyError",
     "ShuttingDownError",
+    "BatchIndexingError",
     "JobFailureCode",
     # 공유 타입
     "ChunkKind",

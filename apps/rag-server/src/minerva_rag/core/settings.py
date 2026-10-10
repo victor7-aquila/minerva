@@ -70,7 +70,10 @@ class Settings(BaseSettings):
     latest_edition_weight: float = 0.0  # 최신 판 가중치
 
     # 작업·종료
-    job_concurrency: int = Field(default=1, ge=1)  # 동시에 처리하는 색인 작업 수
+    # 동시에 분할하는 작업 수와 동시에 임베딩·저장하는 작업 수에 각각 적용
+    job_concurrency: int = Field(default=1, ge=1)
+    # 일괄 색인을 끝내기 전에 요약·캡션·색인 요청이 없어야 하는 시간(초)
+    batch_idle_seconds: float = Field(default=300.0, ge=0)
     notify_retries: int = Field(default=5, ge=0)  # Backend 알림 재시도 횟수
     shutdown_timeout_seconds: float = Field(default=30.0, ge=0)  # 종료 때 작업을 기다리는 시간
 

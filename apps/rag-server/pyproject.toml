@@ -76,7 +76,7 @@ typeCheckingMode = "standard"
 reportMissingParameterType = "error"
 reportUnnecessaryTypeIgnoreComment = "error"
 
-# ★ torch는 CPU 인덱스 고정용으로만 직접 선언한다. 코드에서 import하지 않는다
+# ★ torch는 resource가 GPU 판별·캐시 비우기·fp16 지정에 import한다. CPU 인덱스 고정을 위해 직접 선언한다
 [tool.deptry]
 # ★ 단위가 서로의 공개 표면을 절대 경로(minerva_rag.core)로 import하므로 자기 패키지로 알려 준다
 known_first_party = ["minerva_rag"]
@@ -84,7 +84,7 @@ known_first_party = ["minerva_rag"]
 [tool.deptry.per_rule_ignores]
 # ★ uvicorn은 실행 명령(uvicorn minerva_rag.api:create_app --factory)에서만 쓰고 코드에서 import하지 않는다
 # ★ python-multipart는 FastAPI가 multipart를 해석할 때 내부에서 import한다
-DEP002 = ["torch", "uvicorn", "python-multipart"]
+DEP002 = ["uvicorn", "python-multipart"]
 
 # ★ 의존 규칙의 정본은 ARCHITECT.md 「의존 규칙」이다. 규칙을 바꿀 때는 그 문서부터 바꾼다
 [tool.importlinter]
@@ -129,7 +129,7 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Qdrant와 모델(Ollama·sentence-transformers)에는 resource만 접근한다"
+name = "Qdrant와 모델(Ollama·sentence-transformers·torch)에는 resource만 접근한다"
 type = "forbidden"
 allow_indirect_imports = true
 source_modules = [
@@ -141,7 +141,7 @@ source_modules = [
     "minerva_rag.evaluation",
     "minerva_rag.core",
 ]
-forbidden_modules = ["qdrant_client", "ollama", "sentence_transformers"]
+forbidden_modules = ["qdrant_client", "ollama", "sentence_transformers", "torch"]
 
 # 근거: ARCHITECT.md 「의존 규칙」 "Backend로 보내는 HTTP 호출은 service의 작업 상태 알림만 한다"
 #   ★ resource는 Ollama 클라이언트 설정에 httpx를 쓰므로 출발지에서 뺀다
@@ -169,14 +169,14 @@ source_modules = [
 forbidden_modules = ["httpx"]
 
 # 근거: ARCHITECT.md 「의존 규칙」 "service가 resource에 직접 기대는 것은 조립, 기동·종료,
-#   상태 확인, 표 요약·이미지 캡션 생성뿐이다" (조립·기동·종료·상태 확인은 lifecycle_service, 생성은 captioner)
+#   상태 확인, 표 요약·이미지 캡션 생성, 일괄 색인 단계마다 모델 내리기·올리기뿐이다"
+#   (조립·기동·종료·상태 확인은 lifecycle_service, 생성은 captioner, 모델 내리기·올리기는 jobs)
 [[tool.importlinter.contracts]]
-name = "service가 resource를 직접 쓰는 것은 조립·기동·종료·상태 확인(lifecycle_service)과 요약·캡션 생성(captioner)뿐이다 (ARCHITECT.md 「의존 규칙」)"
+name = "service가 resource를 직접 쓰는 것은 조립·기동·종료·상태 확인(lifecycle_service), 요약·캡션 생성(captioner), 일괄 색인 단계마다 모델 내리기·올리기(jobs)뿐이다 (ARCHITECT.md 「의존 규칙」)"
 type = "forbidden"
 allow_indirect_imports = true
 source_modules = [
     "minerva_rag.service._guard",
-    "minerva_rag.service.jobs",
     "minerva_rag.service.caption_service",
     "minerva_rag.service.index_service",
     "minerva_rag.service.search_service",
@@ -187,7 +187,8 @@ source_modules = [
 forbidden_modules = ["minerva_rag.resource"]
 
 # 근거: ARCHITECT.md 「폴더 구조와 배치 규칙」(작업 관리는 서비스 파일들이 쓰는 헬퍼)과
-#   service MODULE.md 「작업 관리 헬퍼」 "작업 큐 — 금지: chunking·indexing과 서비스 파일을 import하지 않는다"
+#   service MODULE.md 「작업 관리 헬퍼」 "작업 큐 — 금지: chunking·indexing과 서비스 파일을 import하지 않는다.
+#   resource는 ModelHub의 내리기·올리기 세 메서드만 부른다" (resource 전체 금지는 풀고, 세 메서드는 리뷰와 테스트로 본다)
 [[tool.importlinter.contracts]]
 name = "작업 큐(jobs)는 기능 단위와 서비스 파일을 import하지 않는다 (service MODULE.md 「작업 관리 헬퍼」)"
 type = "forbidden"
@@ -198,7 +199,6 @@ forbidden_modules = [
     "minerva_rag.indexing",
     "minerva_rag.search",
     "minerva_rag.evaluation",
-    "minerva_rag.resource",
     "minerva_rag.service.captioner",
     "minerva_rag.service.lifecycle_service",
     "minerva_rag.service.caption_service",
@@ -211,6 +211,8 @@ forbidden_modules = [
 
 # ★ 아래 금지 의존은 모듈 import로 표현할 수 없어 계약으로 두지 않는다 — 리뷰와 테스트로 본다
 # - 청크 저장·삭제는 indexing만 resource로 하고, search는 조회만 한다
+# - jobs는 resource의 ModelHub 내리기·올리기 세 메서드(release_ollama_models·release_local_models·
+#   load_local_models)만 부른다
 
 # ── 테스트 ────────────────────────────────────────────────
 

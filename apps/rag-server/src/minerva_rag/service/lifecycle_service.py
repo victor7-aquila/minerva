@@ -140,14 +140,14 @@ def build_services(settings: Settings) -> Services:
     # ★ Indexer는 하나만 만든다. 같은 이름의 최신판 재계산 직렬화가 인스턴스 하나 안에서만 성립한다
     indexer = Indexer(hub, store, settings)
     searcher = Searcher(hub, store, settings)
-    jobs = JobManager(settings)
+    jobs = JobManager(settings, hub)
     lifecycle = LifecycleService(hub, store, searcher, indexer, jobs, settings)
     return Services(
         lifecycle=lifecycle,
-        caption=CaptionService(Captioner(hub), lifecycle),
+        caption=CaptionService(Captioner(hub), jobs, lifecycle),
         index=IndexService(Chunker(hub, settings), indexer, jobs, lifecycle),
-        search=SearchService(searcher, lifecycle),
+        search=SearchService(searcher, jobs, lifecycle),
         delete=DeleteService(indexer, jobs, lifecycle),
         metadata=MetadataService(indexer, jobs, lifecycle),
-        evaluation=EvaluationService(Evaluator(searcher, settings), lifecycle),
+        evaluation=EvaluationService(Evaluator(searcher, settings), jobs, lifecycle),
     )

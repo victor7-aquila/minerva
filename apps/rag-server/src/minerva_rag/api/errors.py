@@ -1,6 +1,6 @@
 """오류 응답 변환: 코드→상태 표, 오류 본문 생성, 전역 예외 처리기 (REQ-RAG-9.1.2, REQ-RAG-11.3)."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -26,6 +26,7 @@ _STATUS_BY_CODE: dict[str, int] = {
     "STORE_UNAVAILABLE": 503,
     "SERVER_NOT_READY": 503,
     "SHUTTING_DOWN": 503,
+    "BATCH_INDEXING": 503,
 }
 
 
@@ -34,17 +35,25 @@ def status_for(code: str) -> int:
     return _STATUS_BY_CODE.get(code, 500)
 
 
-def error_response(code: str, message: str) -> JSONResponse:
-    """API.md 공통 오류 본문 `{"error": {"code", "message"}}` 응답을 만든다."""
+def error_response(
+    code: str, message: str, details: Mapping[str, Any] | None = None
+) -> JSONResponse:
+    """API.md 공통 오류 본문 `{"error": {"code", "message", "details"}}` 응답을 만든다."""
     return JSONResponse(
         status_code=status_for(code),
-        content={"error": {"code": code, "message": message}},
+        content={
+            "error": {
+                "code": code,
+                "message": message,
+                "details": dict(details) if details is not None else None,
+            }
+        },
     )
 
 
 def response_for(exc: MinervaError) -> JSONResponse:
-    """MinervaError를 그 코드와 메시지의 오류 응답으로 바꾼다."""
-    return error_response(exc.code, exc.message)
+    """MinervaError를 그 코드·메시지·추가 정보의 오류 응답으로 바꾼다."""
+    return error_response(exc.code, exc.message, exc.details)
 
 
 def invalid_request_response() -> JSONResponse:
