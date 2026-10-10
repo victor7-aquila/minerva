@@ -7,7 +7,7 @@ Backend의 HTTP 요청을 받아 service로 넘기는 진입점이다. `API.md`�
 **핵심 계약**
 
 - 라우터는 service만 부른다. 기능 단위나 resource를 직접 부르지 않는다 (`ARCHITECT.md` 「의존 규칙」)
-- 모든 실패 응답은 `API.md` 「공통 규약」의 본문이고, 예외는 전역 처리기 한 곳에서 바꾼다. 응답에 스택 트레이스, 쿼리, 파일 경로, 예외 문자열이 나가지 않는다 (`REQ-RAG-11.3`, `AGENTS.md`)
+- 모든 실패 응답은 `API.md` 「공통 규약」의 본문(`code`, `message`, `details`)이고, 예외는 전역 처리기 한 곳에서 바꾼다. 응답에 스택 트레이스, 쿼리, 파일 경로, 예외 문자열이 나가지 않는다 (`REQ-RAG-11.3`, `AGENTS.md`)
 - 형식이 잘못된 요청은 FastAPI 기본값(422)이 아니라 `400 INVALID_REQUEST`다 (`REQ-RAG-9.1.2`)
 - 상태 확인은 준비 전에도, 다른 요청은 준비 뒤에만 처리된다 (`REQ-RAG-10.1.2`)
 - 상태 확인을 뺀 모든 요청은 토큰과 크기 한도를 본문을 읽기 전에 검사한다. 검사에 실패하면 service를 부르지 않는다 (`REQ-RAG-9.3.1`, `REQ-RAG-9.1.3`)
@@ -133,8 +133,11 @@ flowchart TB
 | `UnauthorizedError` | API 토큰이 없거나 다르다 | `UNAUTHORIZED` `401` | 발생·변환: api | `REQ-RAG-9.3.1` |
 | `PayloadTooLargeError` | 크기 한도를 넘는다 | `PAYLOAD_TOO_LARGE` `413` | 발생·변환: api | `REQ-RAG-9.1.3` |
 | 요청 검증 오류 | 본문·경로·질의가 `API.md`의 형식과 다르다 | `INVALID_REQUEST` `400` | 변환: api | `REQ-RAG-9.1.2` |
-| `MinervaError` 하위 클래스 | service가 전파 | 그 클래스의 `code`와 `API.md`의 상태 | 변환: api. 본문 `message`는 예외의 `message` | `REQ-RAG-11.3.1` |
+| `MinervaError` 하위 클래스 | service가 전파 | 그 클래스의 `code`와 `API.md`의 상태 | 변환: api. 본문 `message`는 예외의 `message`, `details`는 예외의 `details`(`None`이면 `null`) | `REQ-RAG-11.3.1` |
+| `BatchIndexingError` | 일괄 색인 중 검색·평가 | `BATCH_INDEXING` `503` | 변환: api. 위 행과 같고, `details`는 `{"remaining_jobs": 정수}` | `REQ-RAG-10.4.3`, `REQ-RAG-10.7.2` |
 | 그 밖의 예외 | 예상하지 못한 오류 | `INTERNAL_ERROR` `500` | 변환: api. 스택은 로그에만 남긴다 | `REQ-RAG-11.3.2` |
+
+`MinervaError`가 아닌 오류(요청 검증 오류, 없는 경로, 그 밖의 예외)의 본문 `details`는 `null`이다(`API.md` 「공통 규약」).
 
 ### 로그
 
@@ -158,7 +161,9 @@ flowchart TB
 | :--- | :--- | :--- | :--- | :--- |
 | `REQ-RAG-9.1.1` | unit | 엔드포인트마다 service 호출과 성공 상태·본문 형식, 색인 결과별 `202`·`200` | service (가짜), FastAPI 테스트 클라이언트 | `tests/unit/api/` |
 | `REQ-RAG-9.1.2` | unit | 검증 오류와 `InvalidRequestError`가 `400 INVALID_REQUEST`, service 미호출 | service (가짜) | `tests/unit/api/` |
-| `REQ-RAG-9.1.2` | unit | `MinervaError`별 상태·코드, 그 밖의 예외는 `500`이고 본문에 예외 문자열 없음 (`REQ-RAG-11.3` 경계) | service (가짜, 예외) | `tests/unit/api/` |
+| `REQ-RAG-9.1.2` | unit | `MinervaError`별 상태·코드, 그 밖의 예외는 `500`이고 본문에 예외 문자열 없음, `details`를 정하지 않은 오류·검증 오류·`500`의 본문 `details`가 `null` (`REQ-RAG-11.3` 경계) | service (가짜, 예외) | `tests/unit/api/` |
+| `REQ-RAG-10.4.3` | unit | `POST /v1/search`에서 service가 `BatchIndexingError`를 내면 `503`, `BATCH_INDEXING`, `details.remaining_jobs`가 그 값 | service (가짜, 예외) | `tests/unit/api/` |
+| `REQ-RAG-10.7.2` | unit | `POST /v1/evaluations`에서 service가 `BatchIndexingError`를 내면 `503`, `BATCH_INDEXING`, `details.remaining_jobs`가 그 값 | service (가짜, 예외) | `tests/unit/api/` |
 | `REQ-RAG-9.1.3` | unit | 한도 초과 `413`, 한도와 같은 크기 처리, service 미호출 | service (가짜) | `tests/unit/api/` |
 | `REQ-RAG-9.2.1` | unit | 연결 상태 표기, 준비 전에도 `200`, 토큰 없이 `200` | service (가짜) | `tests/unit/api/` |
 | `REQ-RAG-9.3.1` | unit | 토큰 없음·틀림 `401`, 맞으면 처리, 준비 전에도 토큰 검사가 먼저 | service (가짜) | `tests/unit/api/` |
