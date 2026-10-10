@@ -60,7 +60,9 @@ _LEGACY_TO_SPDX = {
 _COPYRIGHT_LINE = re.compile(
     r"^\s*(?:(?:portions\s+)?copyright\b"
     r"(?!\s+(?:notice|owner|license|and|holder|holders|statement|statements|law|protection|\[))"
-    r"|\(c\)\s|©)",
+    # ★ "(c)"는 연도 또는 저작권자 이름이 뒤따를 때만 저작권 표시로 본다.
+    #   Apache-2.0 전문 4(c) 조항("(c) You must retain ...")을 거르기 위해 You·If·The 시작은 뺀다
+    r"|\(c\)\s+(?:(?:19|20)\d{2}\b|(?!(?:you|if|the)\b)(?-i:[A-Z]))|©)",
     re.IGNORECASE,
 )
 # ★ 저작권 줄이 자리표시일 뿐인 템플릿형 라이선스만 전문에서 저작권 줄을 뺀다.
