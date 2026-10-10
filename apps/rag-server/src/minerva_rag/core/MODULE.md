@@ -30,7 +30,12 @@ RAG Server의 모든 단위가 기대는 공통 기반이다. 설정, 로깅, �
 
 ```text
 src/minerva_rag/core/
-└── MODULE.md
+├── MODULE.md
+├── settings.py
+├── logs.py
+├── errors.py
+├── shared.py
+└── placeholder.py
 
 tests/unit/core/
 ```

@@ -131,7 +131,7 @@ Qdrant 벡터:
 
 | 실패 | 발생 단위 | 전달 형태 | 받는 단위의 처리 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| 자리표시 보존 검증을 설정한 횟수만큼 실패 | chunking | 대체 분할로 만든 결과와 `fallback_used=True` | indexing은 그대로 색인하고, 작업 결과에 대체 분할 여부를 남긴다(service `MODULE.md`) | `REQ-RAG-2.3` |
+| 자리표시 보존 검증이나 경계 검증을 설정한 횟수만큼 실패 | chunking | 대체 분할로 만든 결과와 `fallback_used=True` | indexing은 그대로 색인하고, 작업 결과에 대체 분할 여부를 남긴다(service `MODULE.md`) | `REQ-RAG-2.3` |
 | 벡터 차원 불일치 | resource | 예외 | 색인·검색 요청에 오류를 알린다 | `REQ-RAG-12.2.2` |
 | Qdrant 연결 실패 | resource | 예외 | 색인·검색 요청에 오류를 알린다 | `REQ-RAG-12.2.1` |
 
