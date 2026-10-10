@@ -17,6 +17,10 @@ _MSG_INPUT_PLUS_RESERVE = (
     "RAG_LLM_CONTEXT_TOKENS 이하여야 합니다"
 )
 _MSG_RESERVE_VS_CONTEXT = "RAG_LLM_OUTPUT_RESERVE_TOKENS는 RAG_LLM_CONTEXT_TOKENS보다 작아야 합니다"
+_MSG_ENV_ENCODING = (
+    "설정을 읽지 못했습니다: .env 파일을 UTF-8로 저장해야 합니다 "
+    "(PowerShell 5.1의 기본 저장 방식인 UTF-16·cp949는 읽을 수 없습니다)"
+)
 _CROSS_MESSAGES = (_MSG_INPUT_VS_CHUNK, _MSG_INPUT_PLUS_RESERVE, _MSG_RESERVE_VS_CONTEXT)
 
 
@@ -135,5 +139,8 @@ def get_settings() -> Settings:
         return Settings()  # pyright: ignore[reportCallIssue] — 필수 값은 환경 변수에서 채운다
     except ValidationError as exc:
         failure = _format_settings_error(exc)
+    except UnicodeDecodeError:
+        # ★ 값·경로·오류 원문을 옮기지 않는다 (PowerShell 5.1이 UTF-16·cp949로 저장한 경우)
+        failure = _MSG_ENV_ENCODING
     # ★ except 밖에서 낸다 — 원래 오류(입력 값 포함 가능)가 __context__로 붙지 않게 한다
     raise RuntimeError(failure)
