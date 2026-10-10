@@ -14,6 +14,7 @@ export const ERROR_STATUS: Readonly<Record<ErrorCode, number>> = Object.freeze({
   EVALUATION_IN_PROGRESS: 409,
   PAYLOAD_TOO_LARGE: 413,
   RAG_UNAVAILABLE: 503,
+  BATCH_INDEXING: 503,
 });
 
 /** 예상하지 못한 서버 오류의 코드·상태·메시지다. ★ DomainError가 아니다 (필터 전용) */

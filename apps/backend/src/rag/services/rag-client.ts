@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PinoLogger } from 'nestjs-pino';
-import { RagUnavailableError } from '../../common';
+import { BatchIndexingError, RagUnavailableError } from '../../common';
 import type { AppConfig } from '../../common';
 import { RagRequestError } from '../interfaces/rag-request-error';
 import type {
@@ -64,17 +64,23 @@ interface RagCall<T> {
 /** getIndexStates 한 번에 보내는 문서 수 한도다 (API.md 1~100개). */
 const INDEX_STATES_BATCH = 100;
 
-/** 오류 응답 본문에서 error.code를 꺼낸다. 읽을 수 없으면 undefined다. */
-function errorCodeOf(text: string): string | undefined {
+/** 오류 응답 본문에서 error.code와 error.details를 꺼낸다. 읽을 수 없는 값은 undefined다. */
+function errorBodyOf(text: string): { code?: string; details?: Record<string, unknown> } {
   try {
     const body: unknown = JSON.parse(text);
-    if (typeof body !== 'object' || body === null) return undefined;
+    if (typeof body !== 'object' || body === null) return {};
     const error = (body as Record<string, unknown>).error;
-    if (typeof error !== 'object' || error === null) return undefined;
-    const code = (error as Record<string, unknown>).code;
-    return typeof code === 'string' && code !== '' ? code : undefined;
+    if (typeof error !== 'object' || error === null) return {};
+    const { code, details } = error as Record<string, unknown>;
+    return {
+      code: typeof code === 'string' && code !== '' ? code : undefined,
+      details:
+        typeof details === 'object' && details !== null && !Array.isArray(details)
+          ? (details as Record<string, unknown>)
+          : undefined,
+    };
   } catch {
-    return undefined;
+    return {};
   }
 }
 
@@ -289,11 +295,22 @@ export class RagClient {
     }
 
     if (status === 503) {
-      this.fail(spec.operation, 503, errorCodeOf(text) ?? 'UNKNOWN', startedAt);
+      const { code, details } = errorBodyOf(text);
+      this.fail(spec.operation, 503, code ?? 'UNKNOWN', startedAt);
+      const remaining = details?.remaining_jobs;
+      // ★ 일괄 색인 중 거부는 RagUnavailableError와 다른 오류다. remaining_jobs가 계약과 다르면 일반 불가로 본다
+      if (
+        code === 'BATCH_INDEXING' &&
+        typeof remaining === 'number' &&
+        Number.isSafeInteger(remaining) &&
+        remaining >= 0
+      ) {
+        throw new BatchIndexingError(remaining);
+      }
       throw new RagUnavailableError();
     }
     if (status < 200 || status >= 300) {
-      const code = errorCodeOf(text) ?? 'UNKNOWN';
+      const code = errorBodyOf(text).code ?? 'UNKNOWN';
       this.fail(spec.operation, status, code, startedAt);
       throw new RagRequestError(status, code);
     }

@@ -6,6 +6,7 @@ export type {
   AssetKind,
   UploadedImage,
   PreparedVersion,
+  HintKind,
   HintRunResult,
   HintContext,
   AssetViewData,

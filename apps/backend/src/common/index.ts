@@ -16,6 +16,7 @@ export {
   AnswerSpanNotFoundError,
   EvaluationInProgressError,
   RagUnavailableError,
+  BatchIndexingError,
 } from './interfaces/domain-errors';
 export type { ErrorCode } from './interfaces/domain-errors';
 export type { ProcessingState, SearchState } from './interfaces/document-state';

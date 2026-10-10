@@ -123,6 +123,15 @@ export class DocumentsCrudService {
       .toArray();
   }
 
+  /** 대기열에 있는 문서 수를 센다. findQueued와 같은 조건이다. */
+  countQueued(): Promise<number> {
+    return this.documents.countDocuments({
+      queuedVersion: { $ne: null },
+      deleted: false,
+      searchState: { $ne: 'replaced' },
+    });
+  }
+
   /** 상태 맞추기 대상(대기열 밖 queued·indexing)을 읽는다. 삭제됨·교체됨은 뺀다. */
   findReconcileTargets(): Promise<DocumentRecord[]> {
     return this.documents
@@ -299,6 +308,15 @@ export class DocumentsCrudService {
         PROJECTION,
       )
       .toArray();
+  }
+
+  /** 처리 상태가 맞는 문서 수를 센다. findInProcessingStates와 같은 조건이다. */
+  countInProcessingStates(states: readonly ProcessingState[]): Promise<number> {
+    return this.documents.countDocuments({
+      deleted: false,
+      searchState: { $ne: 'replaced' },
+      processingState: { $in: [...states] },
+    });
   }
 
   /** 보이는 문서를 ID로 읽는다. */

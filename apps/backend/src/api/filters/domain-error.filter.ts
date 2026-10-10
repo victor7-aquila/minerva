@@ -23,6 +23,7 @@ interface MappedError {
   status: number;
   code: string;
   message: string;
+  details: Readonly<Record<string, unknown>> | null;
 }
 
 const PAYLOAD_TOO_LARGE_MESSAGE = '요청 본문이 너무 큽니다';
@@ -69,32 +70,45 @@ export class DomainErrorFilter implements ExceptionFilter {
     if (res.headersSent) {
       return;
     }
-    const { status, code, message }: MappedError = mapped ?? INTERNAL_ERROR;
-    res.status(status).json({ error: { code, message } });
+    const { status, code, message, details }: MappedError = mapped ?? {
+      ...INTERNAL_ERROR,
+      details: null,
+    };
+    res.status(status).json({ error: { code, message, details } });
   }
 
   /** 예외를 응답 값으로 바꾼다. 500으로 처리할 예외면 undefined다. */
   private map(exception: unknown, path: string): MappedError | undefined {
     if (exception instanceof RequestValidationError) {
       this.logger.warn({ path, fields: [...exception.fields] }, 'api.request_invalid');
-      return { status: 400, code: exception.code, message: exception.message };
+      return { status: 400, code: exception.code, message: exception.message, details: null };
     }
     if (exception instanceof DomainError) {
       const status = ERROR_STATUS[exception.code] as number | undefined;
       return status === undefined
         ? undefined
-        : { status, code: exception.code, message: exception.message };
+        : { status, code: exception.code, message: exception.message, details: exception.details };
     }
     // ★ 프레임워크 오류의 message·getResponse()는 쓰지 않는다 (경로·입력 일부가 들어 있다)
     const clientStatus = frameworkClientStatus(exception);
     if (clientStatus === 404) {
-      return { status: 404, code: NOT_FOUND.code, message: NOT_FOUND.message };
+      return { status: 404, code: NOT_FOUND.code, message: NOT_FOUND.message, details: null };
     }
     if (clientStatus === 413) {
-      return { status: 413, code: 'PAYLOAD_TOO_LARGE', message: PAYLOAD_TOO_LARGE_MESSAGE };
+      return {
+        status: 413,
+        code: 'PAYLOAD_TOO_LARGE',
+        message: PAYLOAD_TOO_LARGE_MESSAGE,
+        details: null,
+      };
     }
     if (clientStatus !== undefined) {
-      return { status: 400, code: 'INVALID_REQUEST', message: new InvalidRequestError().message };
+      return {
+        status: 400,
+        code: 'INVALID_REQUEST',
+        message: new InvalidRequestError().message,
+        details: null,
+      };
     }
     return undefined;
   }

@@ -18,7 +18,7 @@ import type { RagEventNotification } from './indexing.types';
 /** 작업 상태 값 목록이다(IF-2 job_state). */
 const JOB_STATES: RagJobState[] = ['queued', 'running', 'succeeded', 'failed', 'superseded'];
 /** 색인 중 단계 값 목록이다(IF-2 index_state.latest_job_stage). */
-const JOB_STAGES: RagJobStage[] = ['chunking', 'embedding', 'storing'];
+const JOB_STAGES: RagJobStage[] = ['chunking', 'embedding_pending', 'embedding', 'storing'];
 
 /** 알림의 문서 색인 상태다(IF-2 index_state). */
 export class RagIndexStateDto {

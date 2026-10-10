@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { PinoLogger } from 'nestjs-pino';
 import { AssetsService } from '../../assets';
+import type { HintKind } from '../../assets';
 import type { ProcessingState, SearchState } from '../../common';
 import { INDEX_JOB_STATE_CHANGED, IndexingService } from '../../indexing';
 import type { IndexJobStateChangedEvent, IndexRequestOutcome } from '../../indexing';
@@ -54,6 +55,34 @@ function activeKey(docId: string, version: string): string {
   return `${docId}\u0000${version}`;
 }
 
+/** 예약 색인 한 번의 결과다. */
+export interface ScheduledIndexSummary {
+  /** 요약·캡션 생성 중으로 바꾼 문서 수 */
+  captioned: number;
+  /** 색인을 요청한 문서 수 */
+  requested: number;
+  /** 연결 실패로 대기열에 남긴 문서 수 */
+  unreachable: number;
+}
+
+/** 예약 색인 한 번 안에서 문서 하나가 거치는 상태다. */
+interface RunTarget {
+  /** 1단계에서 읽은 문서 */
+  doc: DocumentRecord;
+  /** 1단계의 대기열 버전 */
+  version: string;
+  /** 색인을 요청해도 되는가 */
+  indexable: boolean;
+  /** 이번 실행이 captioning으로 바꿨는가 */
+  captioning: boolean;
+  /** 남은 단계를 건너뛰는가 */
+  stopped: boolean;
+  /** 이번 실행에서 저장한 요약·캡션 수(임시 설명 포함) */
+  generated: number;
+  /** 그중 임시 설명 수 */
+  temporary: number;
+}
+
 /** 문서 처리 수명주기(상태 전이·처리 파이프라인·이벤트 반영·교체·정리)를 맡는다. */
 @Injectable()
 export class DocumentLifecycle {
@@ -65,11 +94,8 @@ export class DocumentLifecycle {
   private readonly deletingDirty = new Set<string>();
   /** 진행 중에 새 요청이 들어와 한 번 더 돌아야 하는 문서다(이름·판 정보). */
   private readonly syncingDirty = new Set<string>();
-  /**
-   * 이 프로세스에서 처리 중인 버전이다. 키는 `${docId}\u0000${version}`이다.
-   * ★ 기동 처리와 요청 처리가 같은 버전을 두 번 돌리지 않게 한다
-   */
-  private readonly active = new Set<string>();
+  /** 이번 프로세스의 예약 색인이 요약·캡션을 만드는 중인 문서다. ★ 기동 처리가 건드리지 않게 한다 */
+  private readonly captionedDocs = new Set<string>();
   /**
    * 이 프로세스에서 선점한 뒤 새 버전 레코드를 쓰는(또는 되돌리는) 중인 버전의 건수다. 키는 active와 같다.
    * ★ 기동 처리가 쓰기 전의 선점을 이전 버전으로 되돌리지 않게 한다. 같은 키를 두 요청이 잡을 수 있어 건수로 센다
@@ -242,107 +268,339 @@ export class DocumentLifecycle {
   }
 
   /**
-   * 버전 처리를 백그라운드로 시작한다. 같은 버전이 이미 처리 중이면 아무것도 하지 않는다.
-   * ★ 중복으로 건너뛴 경우는 로그를 남기지 않는다 — 처리 중인 쪽이 결과를 남긴다
+   * 업로드·내용 다시 올리기가 끝난 버전을 백그라운드로 대기열에 넣는다.
+   * ★ 요약·캡션은 만들지 않는다. 그것은 예약 색인이 한다 (REQ-BE-1.9.2)
    */
-  startProcessing(docId: string, version: string): void {
-    // ★ 종료 중이면 tasks.run이 작업을 받지 않아 키가 풀리지 않는다 — 키를 잡지 않고 끝낸다
-    if (this.tasks.stopping) return;
-    const key = activeKey(docId, version);
-    if (this.active.has(key)) return;
-    // ★ 호출 즉시(동기로) 잡는다 — setImmediate로 작업이 시작되기 전의 틈도 막는다
-    this.active.add(key);
+  startQueueing(docId: string, version: string): void {
+    // ★ 종료 중이면 tasks.run이 작업을 받지 않는다
     this.tasks.run('process', docId, async () => {
-      try {
-        await this.processVersion(docId, version);
-      } finally {
-        this.active.delete(key);
-      }
+      await this.markQueued(docId, version);
     });
   }
 
-  /** 버전 하나를 표·이미지 처리부터 색인 대기열에 넣기까지 처리한다. */
-  async processVersion(docId: string, version: string): Promise<void> {
-    // ★ REQ-BE-1.9.2: 처리 상태는 captioning이 된 뒤에 표·이미지를 처리한다
-    if (!(await this.transition(docId, version, ['uploaded', 'captioning'], 'captioning'))) {
-      await this.logStopped(docId, version);
-      return;
-    }
+  /** uploaded인 마지막 버전을 queued로 바꾸고 같은 갱신에서 대기열에 넣는다. 바꿨으면 참이다. */
+  async markQueued(docId: string, version: string): Promise<boolean> {
     const doc = await this.repo.findDocument(docId);
-    if (doc === null) return;
-    const result = await this.assets.generateHints(docId, version, {
-      name: doc.name,
-      editionLabel: doc.edition?.label ?? null,
-      shouldContinue: async () => (await this.stopReason(docId, version)) === null,
-    });
-    if (result.stopped) {
-      await this.logStopped(docId, version);
-      return;
-    }
-    await this.markReady(docId, version);
-  }
-
-  /** 표·이미지 처리를 마친 버전을 색인 대기로 바꾸고 같은 갱신에서 대기열에 넣는다. */
-  private async markReady(docId: string, version: string): Promise<void> {
-    const doc = await this.repo.findDocument(docId);
-    // ★ RAG Server를 부르지 않는다. 색인 요청은 예약 색인이 한다 (REQ-BE-1.9.3, REQ-BE-1.10.2)
     if (
       doc === null ||
       doc.deleted ||
       doc.searchState === 'replaced' ||
       doc.latestVersion !== version ||
-      doc.processingState !== 'captioning'
+      doc.processingState !== 'uploaded'
     ) {
       await this.logStopped(docId, version);
-      return;
+      return false;
     }
-    // ★ 처리 상태와 대기열을 두 갱신으로 나누지 않는다
+    // ★ 처리 상태와 대기열을 두 갱신으로 나누지 않는다 (REQ-BE-1.10.2)
     const ok = await this.repo.updateDocument(
       {
         docId,
         deleted: false,
         searchState: doc.searchState,
         latestVersion: version,
-        processingState: 'captioning',
+        processingState: 'uploaded',
       },
       { processingState: 'queued', queuedVersion: version },
     );
     if (!ok) {
       await this.logStopped(docId, version);
-      return;
+      return false;
     }
     await this.recordStateChange(doc, 'queued');
+    return true;
   }
 
-  /** 대기열의 버전마다 색인을 요청하고 결과를 반영한다. */
-  async runScheduledIndex(): Promise<{ requested: number; unreachable: number }> {
-    const targets = await this.repo.findQueued();
-    let requested = 0;
-    let unreachable = 0;
-    for (const doc of targets) {
-      // ★ 종료 중이면 남은 문서는 대기열에 남는다
-      if (this.tasks.stopping) break;
+  /** 이번 프로세스의 예약 색인이 요약·캡션을 만드는 중인 문서인가를 돌려준다. */
+  isCaptioningInRun(docId: string): boolean {
+    return this.captionedDocs.has(docId);
+  }
+
+  /**
+   * 기동 때 uploaded 문서의 색인용 MD를 저장된 원본에서 다시 만들어 queued로 바꾼다. 바꿨으면 참이다.
+   * ★ RAG Server를 부르지 않는다 (REQ-BE-1.9.9)
+   */
+  async rebuildUploaded(doc: DocumentRecord): Promise<boolean> {
+    const { docId } = doc;
+    const version = doc.latestVersion;
+    // ★ 이 프로세스의 내용 다시 올리기가 쓰는 중인 버전은 건드리지 않는다
+    if (this.isClaiming(docId, version)) return false;
+    const ver = await this.repo.findVersion(docId, version);
+    if (ver === null) return false;
+    const prepared = await this.assets.rebuildVersion(docId, version, ver.originalMarkdown);
+    await this.repo.updateVersion(docId, version, { indexingMarkdown: prepared.indexingMarkdown });
+    // ★ 그사이 삭제·교체됐으면 대기열에 넣지 않고 다시 지우기를 맡긴다
+    if ((await this.recheckAfterVersionWrite(docId)) !== null) return false;
+    return this.markQueued(docId, version);
+  }
+
+  /** 기동 때 captioning 문서를 queued로 되돌리고 대기열에 넣는다. 바꿨으면 참이다. (REQ-BE-1.9.12) */
+  async requeueCaptioning(doc: DocumentRecord): Promise<boolean> {
+    // ★ 이 프로세스의 예약 색인이 다루는 문서는 건드리지 않는다
+    if (this.isCaptioningInRun(doc.docId)) return false;
+    const ok = await this.repo.updateDocument(
+      {
+        docId: doc.docId,
+        deleted: false,
+        searchState: { $ne: 'replaced' },
+        processingState: 'captioning',
+        latestVersion: doc.latestVersion,
+      },
+      { processingState: 'queued', queuedVersion: doc.latestVersion },
+    );
+    if (ok) await this.recordStateChange(doc, 'queued');
+    return ok;
+  }
+
+  /**
+   * 예약 색인을 한 번 돌린다. 대상 읽기 → 요약·캡션 생성 중으로 바꾸기 → 이미지 캡션 → 표 요약 → 색인 요청
+   * → 못 마친 문서 되돌리기 순이다.
+   */
+  async runScheduledIndex(): Promise<ScheduledIndexSummary> {
+    const summary: ScheduledIndexSummary = { captioned: 0, requested: 0, unreachable: 0 };
+    // 1. 대상 읽기 — ★ 이 뒤에 대기열에 들어온 문서·버전은 이번 실행에서 보지 않는다
+    const targets: RunTarget[] = [];
+    for (const doc of await this.repo.findQueued()) {
+      // 선점 중인 문서는 이번 일정에서 건너뛰고 대기열에 둔다
+      if (this.isClaimingDoc(doc.docId) || (doc.queuedVersion ?? null) === null) continue;
+      targets.push({
+        doc,
+        version: doc.queuedVersion as string,
+        indexable: false,
+        captioning: false,
+        stopped: false,
+        generated: 0,
+        temporary: 0,
+      });
+    }
+    try {
+      // 2. 요약·캡션 생성 중으로 바꾸기 — ★ 모든 대상의 전환을 마친 뒤에 3단계를 시작한다
+      for (const target of targets) {
+        if (this.tasks.stopping) break;
+        await this.guard(target, async () => {
+          if (await this.beginCaptioning(target)) summary.captioned += 1;
+        });
+      }
+      // 3. 이미지 캡션 — ★ 모든 문서의 이미지 캡션이 끝난 뒤에 표 요약을 한다
+      for (const target of targets) {
+        if (this.tasks.stopping) break;
+        if (target.captioning && !target.stopped) {
+          await this.guard(target, () => this.generateKind(target, 'image'));
+        }
+      }
+      // 4. 표 요약
+      for (const target of targets) {
+        if (this.tasks.stopping) break;
+        if (target.captioning && !target.stopped && !target.indexable) {
+          await this.guard(target, () => this.generateKind(target, 'table'));
+        }
+      }
+      // 5. 색인 요청 — ★ 모든 요약·캡션 호출이 끝난 뒤다
+      for (const target of targets) {
+        if (this.tasks.stopping) break;
+        if (!target.indexable) continue;
+        await this.guard(target, async () => {
+          const outcome = await this.requestQueued(target.doc.docId, target.version);
+          if (outcome !== 'skipped') summary.requested += 1;
+          if (outcome === 'unreachable') summary.unreachable += 1;
+        });
+      }
+    } finally {
+      // 6. 못 마친 문서 되돌리기 (REQ-BE-1.9.14)
+      await this.requeueUnfinishedAll(targets);
+      this.captionedDocs.clear();
+    }
+    return summary;
+  }
+
+  /**
+   * 대상 하나의 작업을 돌린다. 던지면 로그만 남기고 그 문서의 남은 단계를 건너뛴다.
+   * ★ 한 문서의 실패가 다른 문서를 막지 않는다. 오류 메시지는 남기지 않는다
+   */
+  private async guard(target: RunTarget, work: () => Promise<void>): Promise<void> {
+    try {
+      await work();
+    } catch (error) {
+      target.stopped = true;
+      target.indexable = false;
+      this.logTaskFailed(target.doc.docId, error);
+    }
+  }
+
+  /** 예약 색인의 문서 작업 실패를 로그로 남긴다. ★ 오류 메시지는 남기지 않는다 */
+  private logTaskFailed(docId: string, error: unknown): void {
+    this.logger.warn(
+      {
+        task: 'scheduled_index',
+        docId,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      },
+      'documents.task_failed',
+    );
+  }
+
+  /** 요약·캡션이 남은 대상을 captioning으로 바꾼다. 남은 것이 없으면 색인 요청 대상으로 표시한다. */
+  private async beginCaptioning(target: RunTarget): Promise<boolean> {
+    const { docId } = target.doc;
+    const { version } = target;
+    const pending = await this.assets.pendingHints(docId, version);
+    if (pending === 0) {
+      target.indexable = true;
+      return false;
+    }
+    // 선점 중이면 이번 실행에서는 요약·캡션도 색인도 하지 않는다
+    if (this.isClaimingDoc(docId)) return false;
+    // ★ 처리 상태와 대기열 비우기를 한 갱신으로 한다. 선점·편집과 겹치면 하나만 성공한다
+    const ok = await this.repo.updateDocument(
+      {
+        docId,
+        deleted: false,
+        searchState: { $ne: 'replaced' },
+        processingState: 'queued',
+        queuedVersion: version,
+        latestVersion: version,
+      },
+      { processingState: 'captioning', queuedVersion: null },
+    );
+    if (!ok) return false;
+    target.captioning = true;
+    this.captionedDocs.add(docId);
+    await this.recordStateChange(target.doc, 'captioning');
+    return true;
+  }
+
+  /** 한 종류의 요약·캡션을 만들고 모두 마쳤으면 queued로 되돌려 색인 요청 대상으로 표시한다. */
+  private async generateKind(target: RunTarget, kind: HintKind): Promise<void> {
+    const { docId } = target.doc;
+    const { version } = target;
+    const result = await this.assets.generateHints(docId, version, kind, {
+      shouldContinue: async () => (await this.captionStopReason(docId, version)) === null,
+    });
+    target.generated += result.generated;
+    target.temporary += result.temporary;
+    if (result.stopped) {
+      target.stopped = true;
+      await this.logStopped(docId, version);
+      return;
+    }
+    if (result.remaining === 0 && (await this.markCaptioned(target))) {
+      target.indexable = true;
+    }
+  }
+
+  /** 요약·캡션 생성을 멈춰야 하면 그 이유를, 아니면 null을 돌려준다. captioning이 아니게 돼도 멈춘다. */
+  private async captionStopReason(
+    docId: string,
+    version: string,
+  ): Promise<'shutdown' | 'deleted' | 'replaced' | 'superseded' | 'state_changed' | null> {
+    if (this.tasks.stopping) return 'shutdown';
+    const doc = await this.repo.findDocument(docId);
+    if (doc === null || doc.deleted) return 'deleted';
+    if (doc.searchState === 'replaced') return 'replaced';
+    if (doc.latestVersion !== version) return 'superseded';
+    if (doc.processingState !== 'captioning') return 'state_changed';
+    return null;
+  }
+
+  /**
+   * 요약·캡션을 마친 captioning 문서를 queued로 바꾸고 같은 갱신에서 대기열에 넣는다. (REQ-BE-1.9.13)
+   * ★ captioning 기록은 갱신이 성공한 뒤에만, processing_state 기록보다 먼저 남긴다
+   */
+  private async markCaptioned(target: RunTarget): Promise<boolean> {
+    const { docId } = target.doc;
+    const { version } = target;
+    const cur = await this.repo.findDocument(docId);
+    if (
+      cur === null ||
+      cur.deleted ||
+      cur.searchState === 'replaced' ||
+      cur.processingState !== 'captioning' ||
+      cur.latestVersion !== version
+    ) {
+      await this.logStopped(docId, version);
+      return false;
+    }
+    if (!(await this.updateCaptioningToQueued(docId, version))) {
+      await this.logStopped(docId, version);
+      return false;
+    }
+    // generated는 임시 설명을 포함하므로 합 ≥ 1과 generated ≥ 1은 같다
+    if (target.generated >= 1) {
+      await this.logs.record({
+        kind: 'captioning',
+        docId,
+        name: cur.name,
+        editionLabel: cur.edition?.label ?? null,
+        outcome: 'success',
+        detail: { count: target.generated, failedCount: target.temporary },
+      });
+    }
+    await this.recordStateChange(cur, 'queued');
+    return true;
+  }
+
+  /** captioning인 마지막 버전을 queued로 바꾸고 같은 갱신에서 대기열에 넣는다. */
+  private updateCaptioningToQueued(docId: string, version: string): Promise<boolean> {
+    return this.repo.updateDocument(
+      {
+        docId,
+        deleted: false,
+        searchState: { $ne: 'replaced' },
+        processingState: 'captioning',
+        latestVersion: version,
+      },
+      { processingState: 'queued', queuedVersion: version },
+    );
+  }
+
+  /**
+   * 실행이 끝날 때 요약·캡션을 못 마친 문서를 queued로 되돌린다. (REQ-BE-1.9.14)
+   * ★ 종료 중이면 하지 않는다 — 다음 기동이 되돌린다 (REQ-BE-1.9.12)
+   */
+  private async requeueUnfinishedAll(targets: readonly RunTarget[]): Promise<void> {
+    if (this.tasks.stopping) return;
+    for (const target of targets) {
+      if (!target.captioning || target.indexable) continue;
       try {
-        const outcome = await this.requestQueued(doc.docId);
-        if (outcome !== 'skipped') requested += 1;
-        if (outcome === 'unreachable') unreachable += 1;
+        await this.requeueUnfinished(target);
       } catch (error) {
-        // ★ 한 문서의 실패가 다른 문서를 막지 않는다. 오류 메시지는 남기지 않는다
-        this.logger.warn(
-          {
-            task: 'scheduled_index',
-            docId: doc.docId,
-            errorName: error instanceof Error ? error.name : 'UnknownError',
-          },
-          'documents.task_failed',
-        );
+        this.logTaskFailed(target.doc.docId, error);
       }
     }
-    return { requested, unreachable };
+  }
+
+  /** 못 마친 문서 하나를 조건부로 queued+대기열에 되돌리고 실패 기록을 남긴다. */
+  private async requeueUnfinished(target: RunTarget): Promise<boolean> {
+    const { docId } = target.doc;
+    const { version } = target;
+    const cur = await this.repo.findDocument(docId);
+    if (
+      cur === null ||
+      cur.deleted ||
+      cur.searchState === 'replaced' ||
+      cur.processingState !== 'captioning' ||
+      cur.latestVersion !== version
+    ) {
+      return false;
+    }
+    // ★ 삭제·교체·버전 변경과 겹쳐 조건이 어긋나면 바꾸지 않고 기록도 남기지 않는다
+    if (!(await this.updateCaptioningToQueued(docId, version))) return false;
+    await this.logs.record({
+      kind: 'captioning',
+      docId,
+      name: cur.name,
+      editionLabel: cur.edition?.label ?? null,
+      outcome: 'failure',
+      detail: { count: target.generated, failedCount: target.temporary },
+    });
+    await this.recordStateChange(cur, 'queued');
+    return true;
   }
 
   /** 대기열의 문서 하나를 색인 요청하고 결과를 반영한다. */
-  private async requestQueued(docId: string): Promise<'skipped' | 'requested' | 'unreachable'> {
+  private async requestQueued(
+    docId: string,
+    expectedVersion: string,
+  ): Promise<'skipped' | 'requested' | 'unreachable'> {
     // 선점 중인 문서는 이번 일정에서 건너뛰고 대기열에 둔다
     if (this.isClaimingDoc(docId)) return 'skipped';
     // ★ 요청 직전에 문서를 다시 읽는다
@@ -353,6 +611,8 @@ export class DocumentLifecycle {
       cur.searchState === 'replaced' ||
       cur.queuedVersion === null ||
       cur.queuedVersion === undefined ||
+      // ★ 1단계에서 읽은 버전이 아니면(그사이 새 버전이 대기열에 들었다) 이번 실행에서 요청하지 않는다
+      cur.queuedVersion !== expectedVersion ||
       cur.queuedVersion !== cur.latestVersion ||
       cur.processingState !== 'queued'
     ) {
