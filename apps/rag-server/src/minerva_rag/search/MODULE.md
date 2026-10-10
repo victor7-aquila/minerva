@@ -39,7 +39,10 @@
 ```text
 src/minerva_rag/search/
 ├── MODULE.md
-├── searcher.py             # 검색 (REQ-RAG-4). Searcher
+├── models.py               # 공개 데이터 타입 (REQ-RAG-4.3, REQ-RAG-4.5, REQ-RAG-4.7)
+├── ranking.py              # 순위 합치기, 재정렬 점수와 최신판 가중치, 분할 조각 묶기 (REQ-RAG-4.1.2, REQ-RAG-4.2, REQ-RAG-4.4.2, REQ-RAG-4.4.3, REQ-RAG-4.5.5)
+├── neighbors.py            # 앞뒤 청크 (REQ-RAG-4.4.4, REQ-RAG-4.4.5)
+├── searcher.py             # 검색과 문서 청크 조회 (REQ-RAG-4). Searcher
 └── glossary.py             # 용어집 헬퍼 (REQ-RAG-4.8, REQ-RAG-4.9)
 
 config/glossary.yaml        # 관리자가 고치는 용어집 (위치는 RAG_GLOSSARY_PATH)
@@ -130,6 +133,8 @@ classDiagram
 | `edition` | `EditionRef \| None` | 조건부 | `edition_scope`가 `SPECIFIC`이면 필수, 아니면 쓰지 않는다 |
 | `expand_neighbors` | `bool` | 필수 | 기본 `False` |
 
+- 만들 때 `top_n`이 1 미만이거나, `edition_scope`가 `SPECIFIC`인데 `edition`이 없으면 `ValueError`를 낸다. api가 먼저 검증하며 이것은 다른 생산자를 위한 방어다. `SPECIFIC`이 아니면 `edition`은 쓰지 않는다
+
 **`SearchHit`** — 정의: search, 값 생산: search (`REQ-RAG-4.3.3`)
 
 | 필드 | 타입 | 필수 | 불변 조건 |
@@ -174,10 +179,11 @@ terms:
 | :--- | :--- | :--- | :--- |
 | `terms` | 목록 | 필수 | 비어 있어도 된다 |
 | `terms[].canonical` | 문자열 | 필수 | 비어 있지 않다 |
-| `terms[].synonyms` | 문자열 목록 | 필수 | 비어 있어도 된다. 한글·영문을 섞어 쓸 수 있다 |
+| `terms[].synonyms` | 문자열 목록 | 필수 | 비어 있어도 된다. 항목은 비어 있지 않은 문자열이다. 한글·영문을 섞어 쓸 수 있다 |
 
 - 대표어와 동의어를 통틀어 같은 말은 파일 전체에서 한 번만 나온다. 영문은 대소문자를 가리지 않고 같은 말로 본다 (`REQ-RAG-4.8.2`)
 - 파일이 없으면 빈 용어집이다
+- 대표어와 동의어는 모두 문자열이다(YAML이 숫자로 읽는 값은 따옴표로 감싼다). 앞뒤 공백은 떼고 읽으며, 떼고 나서 비면 형식 오류다. 최상위가 매핑이 아니거나 `terms`가 목록이 아니면(`null` 포함) 형식 오류다. 정해지지 않은 키는 무시한다. 파일은 UTF-8이다
 
 **`Expansion`** — 정의: search 용어집 헬퍼, 값 생산: 용어집 헬퍼 (`REQ-RAG-4.9.1`)
 
@@ -237,7 +243,7 @@ resource의 `StoreUnavailableError`·`VectorDimensionMismatchError`는 그대로
 
 **`REQ-RAG-4.2.1`** 재정렬 모델 점수로 다시 정렬
 
-- 처리 계약: 합친 후보의 원문으로 `rerank`를 불러, 그 점수 내림차순으로 다시 정렬한다
+- 처리 계약: 합친 후보의 원문으로 `rerank`를 불러, 그 점수 내림차순으로 다시 정렬한다. 재정렬의 질의도 확장한 질의(「핵심 흐름」 1)다
 - 충족 기준: 재정렬 점수가 합친 순위와 다르면 결과가 재정렬 점수 순이다
 
 **`REQ-RAG-4.2.2`** 재정렬 실패 시 합친 순위
@@ -273,7 +279,7 @@ resource의 `StoreUnavailableError`·`VectorDimensionMismatchError`는 그대로
 
 **`REQ-RAG-4.4.1`** 분할 조각 전부를 원문 순서로
 
-- 처리 계약: 검색된 청크에 `split_group`이 있으면 같은 문서·같은 `split_group`의 active 조각을 모두 가져와 `split_index` 순으로 `chunks`에 넣는다
+- 처리 계약: 검색된 청크에 `split_group`이 있으면 같은 문서·같은 버전·같은 `split_group`의 active 조각을 모두 가져와 `split_index` 순으로 `chunks`에 넣는다
 - 충족 기준: 3개로 나뉜 청크의 2번 조각만 검색돼도 결과의 `chunks`가 1·2·3번 조각이다
 
 **`REQ-RAG-4.4.2`** 여러 조각이 검색되면 결과 하나
@@ -286,13 +292,13 @@ resource의 `StoreUnavailableError`·`VectorDimensionMismatchError`는 그대로
 
 **`REQ-RAG-4.4.4`** 앞뒤 청크
 
-- 처리 계약: `expand_neighbors`가 참이면 결과마다 같은 문서의 앞뒤 본문 청크를 `before`·`after`에 원문 순서대로 넣는다. 앞뒤는 그 문서의 본문 청크를 (`order`, `split_index`) 순으로 늘어놓은 차례로 정한다. 표·이미지 청크는 앞뒤 청크로 넣지 않으며, `ASSET` 결과는 그것을 담은 본문 청크부터 앞 청크로 센다. 결과의 `chunks`에 이미 든 청크는 넣지 않는다
+- 처리 계약: `expand_neighbors`가 참이면 결과마다 같은 문서의 앞뒤 본문 청크를 `before`·`after`에 원문 순서대로 넣는다. 앞뒤 청크는 결과와 같은 버전의 active 레코드에서만 찾는다(두 버전이 함께 active일 때 섞이지 않게 한다, `IF-RAG-1` `active`). 앞뒤는 그 문서의 본문 청크를 (`order`, `split_index`) 순으로 늘어놓은 차례로 정한다. 표·이미지 청크는 앞뒤 청크로 넣지 않으며, `ASSET` 결과는 그것을 담은 본문 청크부터 앞 청크로 센다. 결과의 `chunks`에 이미 든 청크는 넣지 않는다
 - 충족 기준: 3·4·5번째 본문 청크 중 4번이 검색되면 `before`가 3번, `after`가 5번이고, `expand_neighbors`가 거짓이면 둘 다 비어 있다
 
 **`REQ-RAG-4.4.5`** 크기 상한 안에서 가까운 것부터
 
-- 처리 계약: 앞뒤 청크를 거리 1의 앞, 거리 1의 뒤, 거리 2의 앞 순으로 하나씩 넣되, 넣은 청크의 토큰 수 합이 `RAG_NEIGHBOR_MAX_TOKENS`를 넘게 되면 거기서 멈춘다. 넣은 청크는 결과에서 빈틈 없이 이어진다
-- 충족 기준: 상한이 앞뒤 한 청크씩만 허용하면 거리 1의 앞·뒤만 들어가고, 거리 1의 앞 청크 하나가 상한보다 크면 아무것도 넣지 않는다
+- 처리 계약: 앞뒤 청크를 거리 1의 앞, 거리 1의 뒤, 거리 2의 앞 순으로 하나씩 넣되, 넣은 청크의 토큰 수 합이 `RAG_NEIGHBOR_MAX_TOKENS`를 넘게 되면 거기서 멈춘다. 넣은 청크는 결과에서 빈틈 없이 이어진다. 한쪽에 더 넣을 청크가 없으면 다른 쪽만 이어서 넣는다. 청크의 토큰 수는 `count_tokens`로 그 청크 원문(`chunk.text`)을 센다
+- 충족 기준: 상한이 앞뒤 한 청크씩만 허용하면 거리 1의 앞·뒤만 들어가고, 거리 1의 앞 청크 하나가 상한보다 크면 아무것도 넣지 않는다. 앞 청크가 없는 결과는 뒤 청크만 가까운 것부터 들어간다
 
 ### 판 처리 — `REQ-RAG-4.5`
 
@@ -328,8 +334,8 @@ resource의 `StoreUnavailableError`·`VectorDimensionMismatchError`는 그대로
 
 **`REQ-RAG-4.7.1`** 지금 검색되는 버전과 청크를 문서 순서로
 
-- 처리 계약: `active_records(doc_id)`로 가져와, (`order`, 본문 조각을 `split_index` 순으로 먼저, 표·이미지 청크는 그 자리표시가 본문에 나오는 차례로 뒤에) 순서로 늘어놓는다. `version`은 그 레코드들의 버전이다
-- 충족 기준: 순서가 뒤섞여 저장된 레코드가 위 순서로 나오고, `version`이 active 레코드의 버전이다
+- 처리 계약: `active_records(doc_id)`로 가져와, (`order`, 본문 조각을 `split_index` 순으로 먼저, 표·이미지 청크는 그 자리표시가 본문에 나오는 차례로 뒤에) 순서로 늘어놓는다. `version`은 그 레코드들의 버전이다. active 레코드에 버전이 둘 이상이면(활성화 뒤 정리 실패, `IF-RAG-1` `active`) 버전 문자열을 정렬해 마지막 버전과 그 버전의 레코드만 돌려주고 `search.multiple_active_versions` 경고를 남긴다(사용자 결정)
+- 충족 기준: 순서가 뒤섞여 저장된 레코드가 위 순서로 나오고, `version`이 active 레코드의 버전이다. `v1`·`v2` 두 버전이 함께 active면 `version`이 `v2`이고 `v2`의 청크만 나온다
 
 **`REQ-RAG-4.7.2`** 청크 필드
 
@@ -355,7 +361,7 @@ class Glossary:
 
 - 처리 계약: 「데이터 계약」의 형식대로 묶음마다 대표어 하나와 동의어 여러 개를 읽는다
 - 실패: 형식에 맞지 않으면 `Glossary.load`가 `GlossaryError`를 내고, `Searcher.load_glossary`는 그것을 그대로 낸다. 기동 때 읽기가 실패하면 service가 기동을 멈춘다(service `MODULE.md`)
-- 충족 기준: 예시 파일을 읽은 뒤 `인증서`, `certificate`, `cert`, `인증 문서`가 한 묶음으로 확장되고, 필수 필드가 없는 파일은 `GlossaryError`를 낸다
+- 충족 기준: 예시 파일을 읽은 뒤 `인증서`, `certificate`, `cert`, `인증 문서`가 한 묶음으로 확장되고, 필수 필드가 없는 파일은 `GlossaryError`를 낸다. 빈 동의어(`""`)가 든 파일도 `GlossaryError`를 낸다
 
 **`REQ-RAG-4.8.2`** 동의어는 대표어 하나에만 속함
 
@@ -383,8 +389,8 @@ class Glossary:
 
 **`REQ-RAG-4.9.1`** 묶음의 대표어와 동의어까지 확장
 
-- 처리 계약: 질의에 대표어나 동의어가 나오면 그 묶음의 대표어와 동의어 전부를 `terms`에 담는다. 영문은 대소문자를 가리지 않는다. 용어집의 말이 없으면 `matched`와 `terms`가 비어 있다
-- 충족 기준: 동의어 하나가 든 질의가 그 묶음의 대표어와 다른 동의어로 확장되고, 용어집의 말이 없는 질의는 빈 확장이 된다
+- 처리 계약: 질의에 대표어나 동의어가 나오면 그 묶음의 대표어와 동의어 전부를 `terms`에 담는다. 영문은 대소문자를 가리지 않는다. 용어집의 말이 없으면 `matched`와 `terms`가 비어 있다. 질의와 용어집의 말은 NFKC 정규화와 소문자 변환을 하고 연속 공백을 하나로 줄인 뒤 비교한다. 말이 질의 안에 부분 문자열로 나오면 찾은 것으로 본다. 다만 말이 영문·숫자로 시작하면 바로 앞 글자가, 영문·숫자로 끝나면 바로 뒤 글자가 영문·숫자가 아니어야 한다(한글 조사는 붙어도 된다). 「질의에 이미 있는 말」도 같은 규칙으로 판정한다
+- 충족 기준: 동의어 하나가 든 질의가 그 묶음의 대표어와 다른 동의어로 확장되고, 용어집의 말이 없는 질의는 빈 확장이 된다. `cert`는 `cert를`에서는 찾고 `concert`에서는 찾지 않는다
 
 **`REQ-RAG-4.9.2`** 용어집 변경 시 재색인 없음
 
@@ -426,6 +432,7 @@ flowchart TB
 | :--- | :--- | :--- | :--- | :--- |
 | `search.rerank_failed` | 재정렬 실패로 합친 순위를 쓸 때 | warning | `candidates`, `error_type` | `REQ-RAG-4.2.2` |
 | `search.done` | `search` 끝 | info | `query_chars`, `expanded_terms`, `candidates`, `results`, `reranked`, `elapsed_ms` | `REQ-RAG-4.3` |
+| `search.multiple_active_versions` | 문서 청크 조회에서 active 버전이 둘 이상일 때 | warning | `doc_id`, `versions` (개수) | `REQ-RAG-4.7.1` |
 | `search.glossary_loaded` | 용어집 읽기 성공 | info | `groups`, `terms` (개수) | `REQ-RAG-4.8.3` |
 | `search.glossary_reload_failed` | 다시 읽기 실패로 직전 용어집을 계속 쓸 때 | warning | `reason` | `REQ-RAG-4.8.3` |
 
@@ -457,7 +464,7 @@ flowchart TB
 | `REQ-RAG-4.4.2` | unit | 여러 조각이 결과 하나 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.4.3` | unit | 합친 결과 점수가 최고 조각 점수 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.4.4` | unit | 앞뒤 청크, `ASSET` 결과의 앞 청크, 표·이미지 제외, 거짓이면 빈 값 | resource (가짜) | `tests/unit/search/` |
-| `REQ-RAG-4.4.5` | unit | 가까운 것부터, 상한에서 멈춤, 큰 첫 청크 | resource (가짜, 토큰 수 고정) | `tests/unit/search/` |
+| `REQ-RAG-4.4.5` | unit | 가까운 것부터, 상한에서 멈춤, 큰 첫 청크, 한쪽이 없으면 다른 쪽만, 같은 버전에서만 | resource (가짜, 토큰 수 고정) | `tests/unit/search/` |
 | `REQ-RAG-4.5.1` | unit | 결과의 이름·판 정보, 판 정보 없음 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.5.2` | unit | 다른 판 표시 참·거짓 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.5.3` | unit | 판 지정 필터 | resource (가짜) | `tests/unit/search/` |
@@ -465,11 +472,11 @@ flowchart TB
 | `REQ-RAG-4.5.4` | unit | 최신판 필터 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.5.5` | unit | 가중치 0과 양수 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.5.6` | unit | 판 정보 없는 문서의 범위별 포함 | resource (가짜) | `tests/unit/search/` |
-| `REQ-RAG-4.7.1` | unit | 문서 순서 정렬과 버전 | resource (가짜) | `tests/unit/search/` |
+| `REQ-RAG-4.7.1` | unit | 문서 순서 정렬과 버전, 두 버전이 함께 active면 마지막 버전 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.7.2` | unit | 청크 필드 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.7.3` | unit | 검색되는 버전 없음 | resource (가짜) | `tests/unit/search/` |
-| `REQ-RAG-4.8.1` | unit | 묶음 읽기, 형식 오류 시 `GlossaryError`(`Searcher.load_glossary` 포함), 파일 없음은 빈 용어집 | 임시 용어집 파일 | `tests/unit/search/` |
+| `REQ-RAG-4.8.1` | unit | 묶음 읽기, 형식 오류(빈 문자열·문자열 아닌 말·구조 오류 포함) 시 `GlossaryError`(`Searcher.load_glossary` 포함), 파일 없음은 빈 용어집 | 임시 용어집 파일 | `tests/unit/search/` |
 | `REQ-RAG-4.8.2` | unit | 두 묶음의 같은 말(대소문자 차이 포함) 거부 | 임시 용어집 파일 | `tests/unit/search/` |
 | `REQ-RAG-4.8.3` | unit | 파일 변경 후 다음 확장에 반영, 잘못된 변경 시 직전 유지와 경고 | 임시 용어집 파일 | `tests/unit/search/` |
-| `REQ-RAG-4.9.1` | unit | 동의어·대표어로 묶음 전체 확장, 대소문자 무시, 없는 말은 빈 확장 | 임시 용어집 파일 | `tests/unit/search/` |
+| `REQ-RAG-4.9.1` | unit | 동의어·대표어로 묶음 전체 확장, 대소문자 무시, 영문·숫자 경계 판정, 없는 말은 빈 확장 | 임시 용어집 파일 | `tests/unit/search/` |
 | `REQ-RAG-4.9.2` | unit | 용어집 변경 시 저장소 쓰기 없음 | 임시 용어집 파일, resource (가짜) | `tests/unit/search/` |

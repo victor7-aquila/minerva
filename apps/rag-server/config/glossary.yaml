@@ -1,0 +1,11 @@
+# minerva RAG Server 용어집 (REQ-RAG-4.8)
+# 질의에 대표어나 동의어가 나오면 같은 묶음의 말을 모두 넣어 검색한다.
+# 고치면 서버를 다시 시작하지 않아도 다음 검색부터 반영된다. 잘못 고치면 직전 내용을 계속 쓴다.
+# 규칙: 같은 말(영문 대소문자 무시)은 파일 전체에서 한 번만 나온다. 숫자로 읽히는 말은 따옴표로 감싼다.
+# 예:
+# terms:
+#   - canonical: 인증서
+#     synonyms: [certificate, cert, 인증 문서]
+#   - canonical: 폐기 목록
+#     synonyms: [CRL, certificate revocation list]
+terms: []
