@@ -30,7 +30,12 @@ RAG Server의 모든 단위가 기대는 공통 기반이다. 설정, 로깅, �
 
 ```text
 src/minerva_rag/core/
-└── MODULE.md
+├── MODULE.md
+├── settings.py
+├── logs.py
+├── errors.py
+├── shared.py
+└── placeholder.py
 
 tests/unit/core/
 ```
@@ -74,9 +79,9 @@ def get_settings() -> Settings:
 
 **`REQ-RAG-11.1.1`** 설정한 값의 환경 변수
 
-- 입력·선행 조건: 「설정」 표의 키 이름이 곧 환경 변수 이름이다. 환경 변수가 없으면 기본값을 쓰고, 기본값이 없는 필수 키가 없으면 `get_settings()`가 실패한다
-- 처리 계약: 상대 경로 값은 RAG Server 앱 폴더(`apps/rag-server`) 기준으로 푼다. `get_settings()`는 두 번째 호출부터 같은 객체를 돌려준다
-- 실패: 필수 키가 없거나 타입이 맞지 않으면 기동하지 않는다. 이유는 키 이름만 담고 값은 담지 않는다
+- 입력·선행 조건: 「설정」 표의 키 이름이 곧 환경 변수 이름이다. 값은 환경 변수와 `apps/rag-server/.env`에서 읽고, 둘 다 있으면 환경 변수가 이긴다. 빈 값은 지정하지 않은 것으로 본다. 어디에도 없으면 기본값을 쓰고, 기본값이 없는 필수 키가 없으면 `get_settings()`가 실패한다
+- 처리 계약: `Settings`의 필드 이름은 키에서 `RAG_`를 뗀 소문자다(예: `RAG_QDRANT_URL` → `qdrant_url`). 상대 경로 값은 RAG Server 앱 폴더(`apps/rag-server`) 기준으로 푼다. `get_settings()`는 두 번째 호출부터 같은 객체를 돌려준다
+- 실패: 필수 키가 없거나 타입·검증이 맞지 않으면 `get_settings()`가 `RuntimeError`를 내고 기동하지 않는다. 메시지는 실패한 키 이름만 담고 값은 담지 않으며, 원래 검증 오류를 연쇄(`__cause__`·`__context__`)로 달지 않는다
 - 충족 기준: 「설정」 표의 각 키를 환경 변수로 주면 그 값이 `Settings`에 들어가고, 주지 않으면 표의 기본값이 들어간다
 
 ### 로그 — `REQ-RAG-11.2`
@@ -113,6 +118,12 @@ class JobFailureCode(StrEnum):
     DOCUMENT_DELETED = "DOCUMENT_DELETED"
     SERVER_RESTARTED = "SERVER_RESTARTED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+
+class ChunkingFailedError(MinervaError):
+    """청킹을 끝내지 못했다. 실패 위치를 가질 수 있다."""
+    def __init__(self, message: str | None = None, *, location: FailureLocation | None = None) -> None: ...
+    @property
+    def location(self) -> FailureLocation | None: ...
 ```
 
 하위 클래스와 코드는 「예외」 표가 소유한다. `JobFailureCode`는 service `MODULE.md`의 `JobFailure.code`와 API의 `JobFailure.code`에 들어가는 값의 전체 목록이며, 뜻은 `apps/rag-server/API.md`의 `JobFailure`가 소유한다.
@@ -120,7 +131,7 @@ class JobFailureCode(StrEnum):
 **`REQ-RAG-11.3.1`** 오류 코드와 한국어 메시지
 
 - 처리 계약: 모든 하위 클래스는 `code`와 한국어 `default_message`를 갖는다. `message`를 넘기지 않으면 `default_message`를 쓴다
-- 충족 기준: 「예외」 표의 모든 클래스가 비지 않은 `code`와 한글이 든 `default_message`를 갖고, `code` 값은 `API.md` 「오류 코드」 표에 있다
+- 충족 기준: 「예외」 표의 모든 클래스가 비지 않은 `code`와 한글이 든 `default_message`를 갖고, `code` 값은 `API.md` 「오류 코드」 표 또는 `JobFailureCode`에 있다
 
 **`REQ-RAG-11.3.2`** 내부 정보 비노출
 
@@ -225,9 +236,9 @@ class SparseVector:
 | `DocumentNotSearchableError` | 정답 문서가 검색되지 않는다 | `DOCUMENT_NOT_SEARCHABLE` | 발생: evaluation. 변환: api | `REQ-RAG-6.3.2` |
 | `CaptionFailedError` | 요약·캡션을 만들지 못했다 | `CAPTION_FAILED` | 발생: service. 변환: api | `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.3` |
 | `ModelUnavailableError` | 모델 서버에 연결할 수 없다 | `MODEL_UNAVAILABLE` | 발생: resource. 변환: api, 작업에서는 service | `REQ-RAG-12.1.2` |
-| `PromptTooLongError` | 생성 입력이 컨텍스트에서 출력 몫을 뺀 크기를 넘는다 | 경계 밖으로 나가지 않는다 | 발생: resource. 처리: service(요약·캡션)는 `CaptionFailedError`로, chunking은 `ChunkingFailedError`로 바꾼다 | `REQ-RAG-2.5.2.2` |
-| `GlossaryError` | 용어집 파일이 형식에 맞지 않는다 | 경계 밖으로 나가지 않는다 | 발생: search. 처리: 기동 때는 service가 기동을 멈추고, 다시 읽을 때는 search가 직전 용어집을 계속 쓴다 | `REQ-RAG-4.8.1`, `REQ-RAG-4.8.2`, `REQ-RAG-4.8.3` |
-| `ModelLoadError` | 설정한 모델을 불러오지 못했다 | 경계 밖으로 나가지 않는다 | 발생: resource. 처리: service가 기동을 멈춘다 | `REQ-RAG-12.1.1` |
+| `PromptTooLongError` | 생성 입력이 컨텍스트에서 출력 몫을 뺀 크기를 넘는다 | `INTERNAL_ERROR`. 경계 밖으로 나가지 않는다 | 발생: resource. 처리: service(요약·캡션)는 `CaptionFailedError`로, chunking은 `ChunkingFailedError`로 바꾼다 | `REQ-RAG-2.5.2.2` |
+| `GlossaryError` | 용어집 파일이 형식에 맞지 않는다 | `INTERNAL_ERROR`. 경계 밖으로 나가지 않는다 | 발생: search. 처리: 기동 때는 service가 기동을 멈추고, 다시 읽을 때는 search가 직전 용어집을 계속 쓴다 | `REQ-RAG-4.8.1`, `REQ-RAG-4.8.2`, `REQ-RAG-4.8.3` |
+| `ModelLoadError` | 설정한 모델을 불러오지 못했다 | `INTERNAL_ERROR`. 경계 밖으로 나가지 않는다 | 발생: resource. 처리: service가 기동을 멈춘다 | `REQ-RAG-12.1.1` |
 | `StoreUnavailableError` | Qdrant에 연결할 수 없다 | `STORE_UNAVAILABLE` | 발생: resource. 변환: api, 작업에서는 service | `REQ-RAG-12.2.1` |
 | `VectorDimensionMismatchError` | 저장된 벡터 차원이 임베딩 모델과 다르다 | `VECTOR_DIMENSION_MISMATCH` | 발생: resource. 변환: api, 작업에서는 service | `REQ-RAG-12.2.2` |
 | `ChunkingFailedError` | 청킹을 끝내지 못했다. 위치(`FailureLocation`)를 가질 수 있다 | 작업 실패 사유 `CHUNKING_FAILED` | 발생: chunking. 변환: service가 `JobFailure`로 | `REQ-RAG-10.3.3` |
@@ -240,9 +251,9 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-11.1.1` | unit | 키마다 환경 변수 반영과 기본값, 필수 키 누락 시 실패와 실패 이유에 값 없음, 캐시 | 환경 변수 (monkeypatch) | `tests/unit/core/` |
+| `REQ-RAG-11.1.1` | unit | 키마다 환경 변수 반영과 기본값, 필드 이름, 빈 값은 미지정, 환경 변수가 `.env`보다 우선, 필수 키 누락·검증 실패 시 `RuntimeError`와 메시지·연쇄에 값 없음, 캐시 | 환경 변수 (monkeypatch) | `tests/unit/core/` |
 | `REQ-RAG-11.2.1` | unit | 금지 키 값 제거, 허용 키 유지 | 로그 출력 캡처 | `tests/unit/core/` |
-| `REQ-RAG-11.3.1` | unit | 모든 하위 클래스의 코드·한국어 메시지, 코드가 `API.md` 목록에 있음 | | `tests/unit/core/` |
+| `REQ-RAG-11.3.1` | unit | 모든 하위 클래스의 코드·한국어 메시지, 코드가 `API.md` 목록 또는 `JobFailureCode`에 있음, `ChunkingFailedError`의 `location` 보존 | | `tests/unit/core/` |
 | `REQ-RAG-11.3.2` | unit | 기본 메시지에 내부 표현 없음, 감싼 예외 문자열 비노출 | | `tests/unit/core/` |
 | `REQ-RAG-2.2.1` | unit | `find_placeholders`의 차례·위치·원문 일치, 형식에 맞지 않는 `[[...]]` 무시 (자리표시 읽기) | | `tests/unit/core/` |
 | `REQ-RAG-3.2.2` | unit | `SparseVector`의 길이·중복 검증 (키워드 벡터 타입) | | `tests/unit/core/` |
