@@ -8,13 +8,13 @@ from datetime import date
 from typing import Any
 
 import httpx
-import minerva_rag.resource.chunk_store as chunk_store_module
-import minerva_rag.resource.model_hub as model_hub_module
 import ollama
 import pytest
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http.exceptions import ResponseHandlingException
 
+import minerva_rag.resource.chunk_store as chunk_store_module
+import minerva_rag.resource.model_hub as model_hub_module
 from minerva_rag.core import (
     Chunk,
     ChunkKind,

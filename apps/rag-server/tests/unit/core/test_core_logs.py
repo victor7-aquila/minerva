@@ -5,7 +5,8 @@
 """
 
 import json
-from typing import Any
+from typing import Any, NamedTuple
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -108,3 +109,31 @@ def test_exception_log_redacted(capsys: pytest.CaptureFixture[str]) -> None:
     out, records = _records(capsys)
     assert "SECRET-EXC-7" not in out
     assert records[-1]["text"] == REMOVED
+
+
+class _Pair(NamedTuple):
+    """tuple 하위 타입 값을 만들기 위한 테스트용 namedtuple."""
+
+    name: str
+    data: dict[str, str]
+
+
+@pytest.mark.req("REQ-RAG-11.2.1")
+def test_tuple_subtype_value_does_not_break_redaction(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """[REQ-RAG-11.2.1] namedtuple·SplitResult 값이 들어 있어도 예외 없이 금지 값이 지워진다."""
+    configure_logging()
+    get_logger("tests.core").info(
+        "core.test",
+        pair=_Pair("n", {"text": "SECRET-NT-1"}),
+        url=urlsplit("http://h/p?q=1"),
+        text="SECRET-TOP-2",
+    )
+    captured = capsys.readouterr()
+    out = captured.out + captured.err
+    assert "SECRET-NT-1" not in out
+    assert "SECRET-TOP-2" not in out
+    record = json.loads(out.strip().splitlines()[-1])
+    assert record["text"] == REMOVED
+    assert record["pair"][1]["text"] == REMOVED
