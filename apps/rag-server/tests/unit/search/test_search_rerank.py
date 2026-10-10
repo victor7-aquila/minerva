@@ -1,5 +1,6 @@
 """재정렬(REQ-RAG-4.2) 테스트."""
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -122,3 +123,37 @@ def test_rerank_failure_warns(settings: Settings) -> None:
     assert len(events_named(logs, "search.rerank_failed")) >= 1
     # ★ 질의 원문과 청크 본문은 로그에 남기지 않는다
     assert_logs_exclude(logs, ["비밀 질의", *(r.chunk.text for r in records)])
+
+
+class _BadScoresHub(FakeSearchHub):
+    """rerank가 정해 둔 점수 목록을 그대로(개수와 상관없이) 돌려준다."""
+
+    def __init__(self, scores: list[float]) -> None:
+        super().__init__()
+        self._bad_scores = scores
+
+    async def rerank(self, query: str, passages: Sequence[str]) -> list[float]:
+        """호출을 기록하고 정해 둔 점수 목록을 돌려준다."""
+        self.rerank_calls.append((query, list(passages)))
+        return list(self._bad_scores)
+
+
+@pytest.mark.parametrize(
+    "bad_scores",
+    [[0.9, 0.1], [0.9, 0.5, 0.1, 0.0], [], [0.9, float("nan"), 0.1], [0.9, float("inf"), 0.1]],
+)
+@pytest.mark.req("REQ-RAG-4.2.2")
+def test_rerank_invalid_scores_fall_back(settings: Settings, bad_scores: list[float]) -> None:
+    """[REQ-RAG-4.2.2] 점수 개수 불일치·NaN·inf면 합친 순위·점수로 대신하고 경고한다."""
+    a, b, c = rec("A"), rec("B"), rec("C")
+    store = scripted_store([a, b, c], dense=["A", "B", "C"], sparse=["A", "C"])
+    searcher = make_searcher(store, _BadScoresHub(bad_scores), settings)
+
+    with capture_logs() as logs:
+        hits = run(searcher.search(SearchQuery("q", top_n=5)))
+
+    assert [hit.chunks[0].chunk_id for hit in hits] == ["A", "C", "B"]
+    assert [hit.score for hit in hits] == sorted((hit.score for hit in hits), reverse=True)
+    assert all(hit.score not in {0.9, 0.5, 0.1} for hit in hits)
+    assert_log(logs, "search.rerank_failed", "warning", {"candidates", "error_type"})
+    assert len(events_named(logs, "search.rerank_failed")) == 1
