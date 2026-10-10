@@ -81,7 +81,7 @@ def get_settings() -> Settings:
 
 - 입력·선행 조건: 「설정」 표의 키 이름이 곧 환경 변수 이름이다. 값은 환경 변수와 `apps/rag-server/.env`에서 읽고, 둘 다 있으면 환경 변수가 이긴다. 빈 값은 지정하지 않은 것으로 본다. 어디에도 없으면 기본값을 쓰고, 기본값이 없는 필수 키가 없으면 `get_settings()`가 실패한다
 - 처리 계약: `Settings`의 필드 이름은 키에서 `RAG_`를 뗀 소문자다(예: `RAG_QDRANT_URL` → `qdrant_url`). 상대 경로 값은 RAG Server 앱 폴더(`apps/rag-server`) 기준으로 푼다. `get_settings()`는 두 번째 호출부터 같은 객체를 돌려준다
-- 실패: 필수 키가 없거나 타입·검증이 맞지 않으면 `get_settings()`가 `RuntimeError`를 내고 기동하지 않는다. 메시지는 실패한 키 이름만 담고 값은 담지 않으며, 원래 검증 오류를 연쇄(`__cause__`·`__context__`)로 달지 않는다
+- 실패: 필수 키가 없거나 타입·검증이 맞지 않으면 `get_settings()`가 `RuntimeError`를 내고 기동하지 않는다. 메시지는 실패한 키 이름만 담고 값은 담지 않으며, 원래 검증 오류를 연쇄(`__cause__`·`__context__`)로 달지 않는다. `.env`가 UTF-8이 아니어서 읽지 못할 때도 같은 형태의 `RuntimeError`를 내고, 메시지에 `.env`를 UTF-8로 저장하라는 안내를 담는다
 - 충족 기준: 「설정」 표의 각 키를 환경 변수로 주면 그 값이 `Settings`에 들어가고, 주지 않으면 표의 기본값이 들어간다
 
 ### 로그 — `REQ-RAG-11.2`
@@ -97,7 +97,8 @@ def get_logger(name: str) -> structlog.stdlib.BoundLogger:
 **`REQ-RAG-11.2.1`** 금지 데이터 비기록
 
 - 처리 계약: 이벤트의 키가 금지 키(`markdown`, `text`, `query`, `answer_span`, `table_markdown`, `summary`, `caption`, `title`, `token`, `authorization`)면 그 값을 지우고 `"[removed]"`로 바꾼 뒤 내보낸다. 이벤트명은 `모듈.동작` 형식이다(`AGENTS.md`)
-- 충족 기준: 금지 키에 문자열을 담아 로그를 남기면 출력에 그 문자열이 없고, `doc_id`·글자 수 같은 허용 키의 값은 그대로 나온다
+- 처리 계약: 출력 인코딩(예: 한국어 Windows에서 리디렉션한 출력의 cp949)이 표현하지 못하는 문자가 있어도 이벤트를 버리지 않고 이스케이프해 내보낸다. 출력 처리 중 예외가 나도 금지 키를 지우기 전의 이벤트를 어디에도 내보내지 않는다
+- 충족 기준: 금지 키에 문자열을 담아 로그를 남기면 출력에 그 문자열이 없고, `doc_id`·글자 수 같은 허용 키의 값은 그대로 나온다. cp949 출력에 이모지가 든 허용 키 값을 남겨도 이벤트가 출력되고, stdout·stderr 어디에도 금지 키 원문이 없다
 
 ### 오류 응답 — `REQ-RAG-11.3`
 
@@ -251,8 +252,8 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-11.1.1` | unit | 키마다 환경 변수 반영과 기본값, 필드 이름, 빈 값은 미지정, 환경 변수가 `.env`보다 우선, 필수 키 누락·검증 실패 시 `RuntimeError`와 메시지·연쇄에 값 없음, 캐시 | 환경 변수 (monkeypatch) | `tests/unit/core/` |
-| `REQ-RAG-11.2.1` | unit | 금지 키 값 제거, 허용 키 유지 | 로그 출력 캡처 | `tests/unit/core/` |
+| `REQ-RAG-11.1.1` | unit | 키마다 환경 변수 반영과 기본값, 필드 이름, 빈 값은 미지정, 환경 변수가 `.env`보다 우선, 필수 키 누락·검증 실패·UTF-8이 아닌 `.env` 시 `RuntimeError`와 메시지·연쇄에 값 없음, 캐시 | 환경 변수 (monkeypatch) | `tests/unit/core/` |
+| `REQ-RAG-11.2.1` | unit | 금지 키 값 제거, 허용 키 유지, cp949 출력의 표현 불가 문자와 출력 실패 시 원문 비노출 | 로그 출력 캡처, cp949 스트림 | `tests/unit/core/` |
 | `REQ-RAG-11.3.1` | unit | 모든 하위 클래스의 코드·한국어 메시지, 코드가 `API.md` 목록 또는 `JobFailureCode`에 있음, `ChunkingFailedError`의 `location` 보존 | | `tests/unit/core/` |
 | `REQ-RAG-11.3.2` | unit | 기본 메시지에 내부 표현 없음, 감싼 예외 문자열 비노출 | | `tests/unit/core/` |
 | `REQ-RAG-2.2.1` | unit | `find_placeholders`의 차례·위치·원문 일치, 형식에 맞지 않는 `[[...]]` 무시 (자리표시 읽기) | | `tests/unit/core/` |
