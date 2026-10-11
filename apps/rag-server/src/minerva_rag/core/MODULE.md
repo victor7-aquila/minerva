@@ -215,7 +215,7 @@ class SparseVector:
 | `RAG_CHUNKING_LLM` | `str` | `qwen3:14b` | Ollama 모델 이름 | `REQ-RAG-2.1.1` |
 | `RAG_TABLE_LLM` | `str` | `qwen3:14b` | Ollama 모델 이름 | `REQ-RAG-10.2.2.1` |
 | `RAG_CAPTION_VLM` | `str` | `qwen3-vl:8b` | Ollama 모델 이름 | `REQ-RAG-10.2.3.1` |
-| `RAG_EMBEDDING_MODEL` | `str` | `Qwen/Qwen3-Embedding-4B` | sentence-transformers 모델 이름 | `REQ-RAG-3.2.1` |
+| `RAG_EMBEDDING_MODEL` | `str` | `Qwen/Qwen3-Embedding-0.6B` | sentence-transformers 모델 이름 | `REQ-RAG-3.2.1` |
 | `RAG_RERANKER_MODEL` | `str` | `BAAI/bge-reranker-v2-m3` | sentence-transformers 모델 이름 | `REQ-RAG-4.2.1` |
 | `RAG_CHUNK_MAX_TOKENS` | `int` | `512` | 1 이상 | `REQ-RAG-2.5.1.1` |
 | `RAG_CHUNKING_LLM_MAX_INPUT_TOKENS` | `int` | `8000` | `RAG_CHUNK_MAX_TOKENS`보다 크고, `RAG_LLM_OUTPUT_RESERVE_TOKENS`와 합해 `RAG_LLM_CONTEXT_TOKENS` 이하 | `REQ-RAG-2.5.2.1` |
