@@ -13,10 +13,37 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 
 ## 명령어
 
+모든 명령은 `apps/rag-server`에서 실행한다. `uv run`은 bash와 Windows PowerShell에서 같게 쓴다.
+
 | 목적 | 명령 | 비고 |
 | :--- | :--- | :--- |
-| 설치 | `uv sync` | `apps/rag-server`에서 실행한다. torch는 CPU 휠이다. `--no-default-groups`나 `--no-group cpu`만 쓰면 torch가 PyPI(CUDA)에서 오므로 쓰지 않는다 |
+| 설치 | `uv sync` | `uv.lock` 기준. torch는 CPU 휠이다. `--no-default-groups`나 `--no-group cpu`만 쓰면 torch가 PyPI(CUDA)에서 오므로 쓰지 않는다 |
 | GPU 배포용 설치 | `uv sync --group gpu --no-group cpu` | torch를 CUDA 휠(cu130)로 바꾼다. `--no-group cpu`를 빼면 그룹 충돌로 실패한다. 배포에서는 `--no-dev`를 더한다 |
+| 포맷 검사 | `uv run ruff format --check .` | |
+| 린트 | `uv run ruff check .` | |
+| 타입 검사 | `uv run basedpyright` | |
+| 의존 방향 | `uv run lint-imports` | 계약은 `pyproject.toml` `[tool.importlinter]` |
+| 미사용 의존성 | `uv run deptry .` | |
+| 단위 테스트 | `uv run pytest tests/unit` | 외부 자원 없이 돈다 |
+| 통합 테스트 | `uv run pytest tests/integration` | Qdrant·설정이 없으면 skip. 실제 모델 테스트는 `MINERVA_IT_MODELS=1`과 Ollama가 있어야 돈다 |
+| 서버 실행 | `uv run uvicorn minerva_rag.api:create_app --factory` | Qdrant·Ollama가 먼저 떠 있어야 하고 설정 모델이 준비돼 있어야 한다. 설정은 `.env` 또는 환경 변수(`.env.example` 참고) |
+
+인프라는 저장소 루트에서 띄운다.
+
+| 목적 | 명령 | 비고 |
+| :--- | :--- | :--- |
+| Qdrant | `docker compose up -d qdrant` | |
+| Ollama (compose) | `docker compose --profile ollama up -d ollama` | 호스트에 Ollama를 설치했으면 띄우지 않는다(같은 포트). Windows는 GPU를 쓰는 호스트 설치를 권장한다 |
+
+환경 변수로 설정할 때의 문법만 셸마다 다르다: bash는 `RAG_QDRANT_URL=http://127.0.0.1:6333 uv run …`, PowerShell은 `$env:RAG_QDRANT_URL="http://127.0.0.1:6333"; uv run …`.
+
+**Windows에서 주의할 점**
+
+- 주소는 `localhost` 대신 `127.0.0.1`을 쓴다. `localhost`는 IPv6(`::1`)를 먼저 시도해 Qdrant 호출마다 수백 ms 늦어진다
+- `.env`는 UTF-8로 저장한다(BOM이 있어도 된다). PowerShell 5.1의 `>`·`Set-Content` 기본값(UTF-16, cp949)으로 저장하면 기동하지 못하고, 그 사실을 알리는 오류로 끝난다
+- 서버 출력을 파일·파이프로 리디렉션할 때는 `$env:PYTHONUTF8="1"`을 주는 것을 권장한다. 주지 않아도 로그 줄은 빠지지 않지만, 한국어 Windows의 리디렉션 출력은 cp949라 일부 문자가 `\uXXXX` 이스케이프로 기록된다
+- pytest 출력의 `Windows fatal exception: access violation` 스택 덤프는 네이티브 라이브러리 안에서 이미 처리된 예외를 faulthandler가 찍은 것이다. 테스트 결과(passed·failed)로 판정한다
+- 서버는 Ctrl+C로 정상 종료하고 종료 코드 0을 낸다. Ctrl+Break도 종료 처리는 같지만 종료 코드가 0이 아니다
 
 ## 코딩 규칙
 
