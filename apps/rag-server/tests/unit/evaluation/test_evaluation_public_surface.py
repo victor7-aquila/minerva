@@ -70,3 +70,13 @@ def test_evaluator_signature() -> None:
     assert evaluate.parameters["case"].annotation is EvaluationCase
     assert evaluate.return_annotation is EvaluationResult
     assert inspect.iscoroutinefunction(Evaluator.evaluate)
+
+
+@pytest.mark.req("REQ-RAG-6.1.1")
+def test_validate_signature() -> None:
+    """[REQ-RAG-6.1.1] Evaluator.validate는 (self, case: EvaluationCase) -> None인 동기 함수다."""
+    validate = inspect.signature(Evaluator.validate, eval_str=True)
+    assert list(validate.parameters) == ["self", "case"]
+    assert validate.parameters["case"].annotation is EvaluationCase
+    assert validate.return_annotation is None
+    assert not inspect.iscoroutinefunction(Evaluator.validate)

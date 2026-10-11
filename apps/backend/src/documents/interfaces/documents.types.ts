@@ -1,5 +1,6 @@
 import type { ProcessingState, SearchState } from '../../common';
 import type { IndexRejectionCode } from '../../indexing';
+import type { RagJobStage } from '../../rag';
 
 /** 문서 컬렉션 이름이다. */
 export const DOCUMENTS_COLLECTION = 'documents';
@@ -119,7 +120,7 @@ export interface DocumentSummaryView {
   sibling_editions: EditionView[];
   search_state: SearchState;
   processing_state: ProcessingState;
-  stage: 'chunking' | 'embedding' | 'storing' | null;
+  stage: RagJobStage | null;
   failure_message: string | null;
   in_index_queue: boolean | null;
   next_index_at: string | null;
@@ -144,7 +145,8 @@ export interface AssetView {
   kind: 'table' | 'image';
   table_markdown: string | null;
   image_url: string | null;
-  text: string;
+  /** ★ 요약·캡션이 아직 만들어지지 않았으면 null이다 */
+  text: string | null;
   is_fallback: boolean;
 }
 /** 문서 하나의 자세한 정보다. */

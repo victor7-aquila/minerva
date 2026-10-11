@@ -7,7 +7,7 @@ from structlog.testing import capture_logs
 
 from minerva_rag.core import FailureLocation, Settings, StoreUnavailableError
 from minerva_rag.service import IndexOutcome, JobState
-from minerva_rag.service.jobs import JobFailure, JobManager
+from minerva_rag.service.jobs import JobFailure
 
 from .fakes import (
     WAIT,
@@ -17,6 +17,7 @@ from .fakes import (
     assert_service_log,
     go,
     install_write_failure,
+    make_manager,
     new_manager,
     notified,
     running_manager,
@@ -31,7 +32,8 @@ from .fakes import (
 async def seed_leftovers(settings: Settings, receiver: FakeReceiver) -> tuple[str, str]:
     """색인 중인 작업 R(doc-a)과 대기 중인 작업 Q(doc-b)를 남기고 관리자를 멈춘다.
 
-    R은 prepared 결과를 알린 뒤 멈춰 있다. 두 작업의 상태 알림이 도착한 뒤에 멈춘다.
+    R은 prepared 결과를 알린 뒤 임베딩 단계에서 멈춰 있다. Q는 임베딩 단계 중이라 QUEUED로 기다린다
+    (REQ-RAG-10.8.8.3). 두 작업의 상태 알림이 도착한 뒤에 멈춘다.
     """
     first = await new_manager(settings)  # 동시 실행 상한 1
     try:
@@ -151,7 +153,7 @@ def test_no_new_job_before_start_finishes(settings: Settings, receiver: FakeRece
             await gate.wait()
             return False
 
-        second = JobManager(settings)
+        second = make_manager(settings)
         starting = asyncio.create_task(second.start(slow_recover))
         try:
             await wait_event(entered)  # start가 남은 작업을 끝맺는 중이다
@@ -205,7 +207,7 @@ def test_recover_error_propagates(settings: Settings, receiver: FakeReceiver) ->
 
     async def scenario() -> None:
         r_id, _ = await seed_leftovers(settings, receiver)
-        broken = JobManager(settings)
+        broken = make_manager(settings)
         error = StoreUnavailableError()
         try:
             with pytest.raises(StoreUnavailableError) as caught:
@@ -305,7 +307,8 @@ def test_stop_during_assignment_leaves_running(
 ) -> None:
     """[REQ-RAG-10.1.3] 배정 커밋을 기다리는 중 stop이 불리면 러너를 띄우지 않고 RUNNING으로 남긴다.
 
-    ★ 배정 쓰기(skip=1)를 작업 스레드에서 멈춘 채 stop을 부른다. 쓰기가 끝난 뒤 새 실행 태스크가
+    ★ 배정 쓰기(skip=1)를 작업 스레드에서 멈춘 채 stop을 부른다. submit은 배정을 기다리지 않으므로
+    호출자는 이미 돌아와 있다. 쓰기가 끝난 뒤 새 실행 태스크가
     stop의 대기·취소 대상 밖에서 만들어지면 안 된다. 남긴 작업은 다음 start가 끝맺는다.
     """
     failure = install_write_failure(monkeypatch)
@@ -317,12 +320,12 @@ def test_stop_during_assignment_leaves_running(
         caller = asyncio.create_task(submit(first, "doc-a", runner))
         stopper: asyncio.Task[None] | None = None
         try:
-            await until(pause.entered.is_set)  # 배정 쓰기가 멈춘 채 접수 호출은 기다린다
+            await until(pause.entered.is_set)  # 배정 쓰기가 멈췄다. submit은 이미 돌아와 있다
+            job_id = await asyncio.wait_for(caller, 5)
             stopper = asyncio.create_task(first.stop(5))
             await settle()  # stop이 새 접수·배정을 막은 뒤 쓰기를 푼다
         finally:
             pause.release.set()
-        job_id = await caller
         assert stopper is not None
         await stopper
 

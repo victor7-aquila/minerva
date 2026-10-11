@@ -58,6 +58,8 @@ let baseUrl: string;
 let chunksBody: unknown = { version: null, items: [] };
 /** 가짜 DELETE 응답 지연이다 */
 let deleteDelayMs: number | undefined;
+/** 가짜 문서 색인 상태 조회(index-states) 응답 항목이다. 테스트가 바꾼다 */
+let indexStateItems: unknown[] = [];
 
 /** 기본 가짜 RAG 라우터다. */
 function router(req: RecordedRequest): FakeReply {
@@ -104,7 +106,7 @@ function router(req: RecordedRequest): FakeReply {
     return { status: 204 };
   }
   if (req.method === 'POST' && p === '/v1/documents/index-states') {
-    return { status: 200, json: { items: [] } };
+    return { status: 200, json: { items: indexStateItems } };
   }
   if (req.method === 'GET' && /^\/v1\/documents\/[^/]+\/chunks$/.test(p)) {
     return { status: 200, json: chunksBody };
@@ -140,6 +142,7 @@ beforeEach(() => {
   fake.setHandler(router);
   chunksBody = { version: null, items: [] };
   deleteDelayMs = undefined;
+  indexStateItems = [];
 });
 
 afterEach(async () => {
@@ -254,6 +257,11 @@ async function waitIndexRequest(docId: string): Promise<void> {
         (JSON.parse(r.body.toString('utf8')) as { doc_id: string }).doc_id === docId,
     ),
   );
+}
+
+/** 가짜 RAG에 간 요약·캡션 요청(/v1/captions/*)을 순서대로 모은다. */
+function captionRequests(): RecordedRequest[] {
+  return fake.requests.filter((r) => r.method === 'POST' && r.url.startsWith('/v1/captions/'));
 }
 
 /** 그 문서가 색인 대기열에 들어갈 때까지 기다린다(queued + in_index_queue). */
@@ -573,11 +581,29 @@ describe('REQ-BE-1.1.8', () => {
 });
 
 describe('REQ-BE-1.1.9', () => {
-  it('T-E2E-UP-7 표가 있으면 응답 뒤 표 요약을 요청하고 업로드 기록이 하나다', async () => {
-    const docId = await uploadOne(uniq('up7'), `# T\n\n${TABLE_MD}`);
-    await waitFor(() =>
-      fake.requests.some((r) => r.method === 'POST' && r.url === '/v1/captions/table'),
+  it('T-E2E-UP-7 표가 있는 MD를 올리면 응답 뒤 대기열에 들어가고 가짜 RAG에 요약·색인 요청이 없으며 표 text가 null이고 업로드 기록이 하나다', async () => {
+    // ★ 다른 테스트의 요청과 섞이지 않게 올리기 전 요청 수를 기억한다
+    const before = fake.requests.length;
+    const docId = await uploadOne(
+      uniq('up7'),
+      `# T
+
+${TABLE_MD}`,
     );
+    // 응답 뒤 처리 상태는 queued, 색인 대기열 안이다
+    await waitInQueue(docId);
+    const sent = fake.requests
+      .slice(before)
+      .filter((r) => r.url.startsWith('/v1/captions/') || r.url === '/v1/index-jobs');
+    expect(sent).toEqual([]);
+
+    // 요약을 아직 만들지 않았으므로 상세의 표 text가 null이다
+    const detail = (await getDoc(docId)).body as {
+      assets: Array<{ kind: string; text: string | null; is_fallback: boolean }>;
+    };
+    const table = detail.assets.find((asset) => asset.kind === 'table');
+    expect(table?.text).toBeNull();
+    expect(table?.is_fallback).toBe(false);
     const logs = await request(baseUrl).get('/v1/logs').query({ doc_id: docId, kind: 'upload' });
     expect((logs.body as { total: number }).total).toBe(1);
   });
@@ -1207,10 +1233,23 @@ describe('REQ-BE-2.5.4', () => {
 describe('REQ-BE-1.9.7', () => {
   it('T-E2E-FLOW-1 표가 있는 문서가 업로드부터 완료·청크 복원까지 흐른다', async () => {
     const docId = await uploadOne(uniq('flow1'), `# 문서\n\n앞\n\n${TABLE_MD}\n\n뒤`);
-    // ★ 업로드 뒤 표 요약까지 만들면 대기열에 들어가고, 색인 요청은 예약 색인이 보낸다
+    // ★ 업로드 뒤에는 대기열에 넣기까지만 한다. 표 요약과 색인 요청은 예약 색인이 보낸다
     await waitInQueue(docId);
     expect(indexRequestsOf(docId)).toHaveLength(0);
+    expect(captionRequests()).toHaveLength(0);
     await requestIndexNow(docId);
+    // ★ 같은 예약 색인 안에서 표 요약 요청이 그 문서의 색인 요청보다 먼저 간다
+    const tableAt = fake.requests.findIndex(
+      (r) => r.method === 'POST' && r.url === '/v1/captions/table',
+    );
+    const indexAt = fake.requests.findIndex(
+      (r) =>
+        r.method === 'POST' &&
+        r.url === '/v1/index-jobs' &&
+        (JSON.parse(r.body.toString('utf8')) as { doc_id: string }).doc_id === docId,
+    );
+    expect(tableAt).toBeGreaterThanOrEqual(0);
+    expect(tableAt).toBeLessThan(indexAt);
     const request1 = fake.requests.find(
       (r) =>
         r.url === '/v1/index-jobs' &&
@@ -1291,6 +1330,8 @@ describe('REQ-BE-1.7.1', () => {
     await runScheduledIndex(harness);
     await waitFor(() => indexRequestsOf(docId).some((req) => req.version === '2'));
     expect(indexRequestsOf(docId).find((req) => req.version === '2')?.force).toBe(true);
+    // ★ 임시 설명이 없는 문서라 재색인에서 요약·캡션 요청은 가지 않는다
+    expect(captionRequests()).toHaveLength(0);
     await notify(docId, '2', 'succeeded', '2', 2);
     await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
     expect((await getDoc(docId)).body.search_state).toBe('searchable');
@@ -1327,6 +1368,65 @@ ${TABLE_MD}`,
     expect(sent?.assets).toContainEqual({ placeholder_id: placeholder, text: '직접 고친 요약' });
     await notify(docId, '2', 'succeeded', '2', 2);
     await waitFor(async () => (await getDoc(docId)).body.processing_state === 'completed');
+  });
+});
+
+describe('REQ-BE-1.5.4', () => {
+  it('T-E2E-EDIT-2 예약 색인 전(표 text가 null)에도 편집 대상 placeholder_id를 얻어 문장을 고치면 그 표는 요약을 다시 만들지 않는다', async () => {
+    const docId = await uploadOne(
+      uniq('edit2'),
+      `# 문서
+
+${TABLE_MD}`,
+    );
+    await waitInQueue(docId);
+    // ★ 아직 요약을 만들지 않았다 — text는 null이지만 placeholder_id는 얻을 수 있다
+    const detail = (await getDoc(docId)).body as {
+      assets: Array<{ placeholder_id: string; text: string | null }>;
+    };
+    expect(detail.assets[0].text).toBeNull();
+    const placeholder = detail.assets[0].placeholder_id;
+    const res = await request(baseUrl)
+      .patch(`/v1/documents/${docId}`)
+      .send({ assets: [{ placeholder_id: placeholder, text: '미리 고친 요약' }] });
+    expect(res.status).toBe(200);
+    expect(res.body.processing_state).toBe('queued');
+    expect(res.body.in_index_queue).toBe(true);
+
+    await runScheduledIndex(harness);
+    await waitFor(() => indexRequestsOf(docId).some((req) => req.version === '2'));
+    // ★ 직접 고친 문장이 요청에 담기고, 그 표의 요약은 만들지 않았다
+    const sent = indexRequestsOf(docId).find((req) => req.version === '2');
+    expect(sent?.assets).toContainEqual({ placeholder_id: placeholder, text: '미리 고친 요약' });
+    expect(captionRequests()).toHaveLength(0);
+  });
+});
+
+describe('REQ-BE-1.3.6', () => {
+  it('T-E2E-STAGE-1 index-states가 latest_job_stage로 embedding_pending을 주면 목록과 상세의 stage가 그대로다', async () => {
+    const name = uniq('stage1');
+    const doc = await seedDocument({ name, processingState: 'indexing' });
+    indexStateItems = [
+      {
+        doc_id: doc.docId,
+        searchable_version: null,
+        latest_job_id: 'job-stage',
+        latest_job_state: 'running',
+        latest_job_stage: 'embedding_pending',
+      },
+    ];
+    try {
+      const list = await listDocs({ name });
+      expect(list.items).toHaveLength(1);
+      expect(list.items[0].stage).toBe('embedding_pending');
+      const detail = (await getDoc(doc.docId)).body as { stage: string | null };
+      expect(detail.stage).toBe('embedding_pending');
+    } finally {
+      // ★ 다른 테스트의 건수에 섞이지 않게 정리한다
+      await harness.db
+        .collection('documents')
+        .updateOne({ docId: doc.docId }, { $set: { deleted: true } });
+    }
   });
 });
 

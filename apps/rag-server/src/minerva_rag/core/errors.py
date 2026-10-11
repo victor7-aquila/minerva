@@ -1,7 +1,8 @@
 """경계 밖으로 나가는 오류와 작업 실패 사유 코드를 정의한다 (REQ-RAG-11.3)."""
 
+from collections.abc import Mapping
 from enum import StrEnum
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from .shared import FailureLocation
 
@@ -23,6 +24,11 @@ class MinervaError(Exception):
     def message(self) -> str:
         """오류 메시지를 돌려준다."""
         return self._message
+
+    @property
+    def details(self) -> Mapping[str, Any] | None:
+        """API.md가 그 코드에 정한 추가 정보를 돌려준다. 정하지 않은 코드는 None이다."""
+        return None
 
 
 class InvalidRequestError(MinervaError):
@@ -142,6 +148,28 @@ class ShuttingDownError(MinervaError):
 
     code: ClassVar[str] = "SHUTTING_DOWN"
     default_message: ClassVar[str] = "서버가 종료 중이라 새 작업을 받지 않습니다"
+
+
+class BatchIndexingError(MinervaError):
+    """일괄 색인 중이라 검색·평가를 하지 않을 때 낸다. 남은 작업 수를 갖는다."""
+
+    code: ClassVar[str] = "BATCH_INDEXING"
+    default_message: ClassVar[str] = "일괄 색인 중이라 검색·평가를 하지 않습니다"
+
+    def __init__(self, remaining_jobs: int, message: str | None = None) -> None:
+        """남은 작업 수와 메시지를 정한다."""
+        super().__init__(message)
+        self._remaining_jobs = remaining_jobs
+
+    @property
+    def remaining_jobs(self) -> int:
+        """남은 작업 수를 돌려준다."""
+        return self._remaining_jobs
+
+    @property
+    def details(self) -> Mapping[str, Any] | None:
+        """남은 작업 수를 담은 새 dict를 돌려준다."""
+        return {"remaining_jobs": self._remaining_jobs}
 
 
 class JobFailureCode(StrEnum):

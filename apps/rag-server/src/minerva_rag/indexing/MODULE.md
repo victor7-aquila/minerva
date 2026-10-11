@@ -1,12 +1,12 @@
 # indexing 모듈 명세 (REQ-RAG-3)
 
-chunking이 만든 청크를 검색할 수 있게 저장하고, 버전·판·삭제·중복 방지를 정한다. 자리표시를 요약·캡션으로 바꾼 색인 텍스트로 dense·키워드 벡터를 만들어 `ChunkRecord`(`IF-RAG-1`)와 함께 resource로 저장하며, Qdrant의 청크를 바꾸는 유일한 단위다. 폴더는 `apps/rag-server/src/minerva_rag/indexing`다.
+chunking이 만든 청크를 검색할 수 있게 저장하고, 버전·판·삭제·중복 방지를 정한다. 자리표시를 요약·캡션으로 바꾸고 본문 청크 앞에 헤딩 경로·제목을 붙인 색인 텍스트로 dense·키워드 벡터를 만들어 `ChunkRecord`(`IF-RAG-1`)와 함께 resource로 저장하며, Qdrant의 청크를 바꾸는 유일한 단위다. 폴더는 `apps/rag-server/src/minerva_rag/indexing`다.
 
 ## 요약
 
 **핵심 계약**
 
-- 저장하는 청크 원문(`chunk.text`)은 자리표시를 그대로 두고, 벡터만 색인 텍스트로 만든다. 색인 텍스트는 저장하지 않는다 (`REQ-RAG-3.1`, `IF-RAG-1`)
+- 저장하는 청크 원문(`chunk.text`)은 자리표시를 그대로 두고, 벡터만 색인 텍스트(머리글 포함)로 만든다. 색인 텍스트는 저장하지 않는다 (`REQ-RAG-3.1`, `IF-RAG-1`)
 - 새 버전 레코드는 모두 저장한 뒤에만 활성화하고, 그다음에 이전 레코드를 지운다. 저장이 실패하면 이전 버전은 그대로 검색된다 (`REQ-RAG-3.3`, `REQ-RAG-10.3.4`)
 - 다른 문서의 레코드는 그 문서가 삭제를 요청받았을 때만 지운다. 이름·판이 같아도 지우지 않는다 (`REQ-RAG-3.6.6`)
 - 최신판 표시는 레코드를 바꾸는 모든 쓰기(활성화, 삭제, 이름·판 변경) 뒤에 관련 이름마다 다시 맞춘다 (`REQ-RAG-3.6.3`)
@@ -15,7 +15,7 @@ chunking이 만든 청크를 검색할 수 있게 저장하고, 버전·판·삭
 
 | REQ | 기능 그룹 | 책임 |
 | :--- | :--- | :--- |
-| `REQ-RAG-3.1` | 색인 텍스트 | 자리표시를 요약·캡션 문장으로 바꾼 색인 텍스트를 만들고, 원문은 그대로 둔다 |
+| `REQ-RAG-3.1` | 색인 텍스트 | 자리표시를 요약·캡션 문장으로 바꾸고 본문 청크 앞에 헤딩 경로·제목을 붙인 색인 텍스트를 만들고, 원문은 그대로 둔다 |
 | `REQ-RAG-3.2` | 벡터·키워드 색인 | 색인 텍스트로 dense·키워드 벡터를 만든다 |
 | `REQ-RAG-3.3` | 버전 교체 | 새 버전을 다 저장한 뒤 활성화하고 이전 버전을 지운다 |
 | `REQ-RAG-3.4` | 문서 삭제 | 문서의 모든 버전 레코드를 지운다 |
@@ -180,6 +180,11 @@ resource의 예외(`StoreUnavailableError`, `VectorDimensionMismatchError`, `Mod
 
 - 충족 기준: `EmbeddedChunks.records`의 `chunk.text`가 입력 `Chunk.text`와 같다
 
+**`REQ-RAG-3.1.3`** 본문 청크 앞에 헤딩 경로와 제목
+
+- 처리 계약: `TEXT` 청크의 색인 텍스트는 머리글, 빈 줄, `REQ-RAG-3.1.1`로 치환한 본문 순서다. 머리글은 `heading_path`를 ` > `로 이은 한 줄과 `title` 한 줄이며, 비어 있는 쪽은 줄을 넣지 않는다. 둘 다 비면 머리글과 빈 줄 없이 본문만이다. `summary`는 넣지 않는다. `ASSET` 청크는 머리글을 붙이지 않는다. 머리글은 벡터에만 쓰고 저장하는 `chunk.text`에는 넣지 않는다(`REQ-RAG-3.1.2`). ★ 재정렬은 이 색인 텍스트가 아니라 저장한 원문으로 한다(search 「재정렬」). 청크 크기 상한(`RAG_CHUNK_MAX_TOKENS`)은 본문 기준이라 머리글을 붙인 색인 텍스트는 상한보다 길 수 있다
+- 충족 기준: `heading_path`와 `title`이 있는 `TEXT` 청크의 색인 텍스트가 `"1. 서론 > 1.1 용어\n용어 정의\n\n본문"` 형태이고, 둘 다 없는 청크는 치환한 본문 그대로이며, `ASSET` 청크는 요약·캡션 문장 그대로다
+
 ### 벡터·키워드 색인 — `REQ-RAG-3.2`
 
 **`REQ-RAG-3.2.1`** dense 벡터
@@ -343,6 +348,7 @@ flowchart TB
 | :--- | :--- | :--- | :--- | :--- |
 | `REQ-RAG-3.1.1` | unit | 색인 텍스트의 자리표시 치환, `ASSET` 청크는 요약·캡션 문장 | resource (mock) | `tests/unit/indexing/` |
 | `REQ-RAG-3.1.2` | unit | 레코드 원문 보존 | resource (mock) | `tests/unit/indexing/` |
+| `REQ-RAG-3.1.3` | unit | 머리글(경로·제목) 형식, 빈 쪽 생략, 요약 제외, `ASSET` 머리글 없음 | resource (mock) | `tests/unit/indexing/` |
 | `REQ-RAG-3.2.1` | unit | 청크마다 dense 벡터, 색인 텍스트로 생성 | resource (mock) | `tests/unit/indexing/` |
 | `REQ-RAG-3.2.2` | unit | 청크마다 키워드 벡터, 색인 텍스트로 생성 | resource (mock) | `tests/unit/indexing/` |
 | `REQ-RAG-3.3.1` | unit | 저장 → 활성화 순서 | resource (가짜) | `tests/unit/indexing/` |

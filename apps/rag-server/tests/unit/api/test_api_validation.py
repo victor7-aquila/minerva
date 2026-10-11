@@ -152,7 +152,8 @@ def _assert_invalid(response: Response, fakes: FakeServices) -> None:
     assert response.status_code == 400
     body = response.json()
     assert set(body) == {"error"}
-    assert set(body["error"]) == {"code", "message"}
+    assert set(body["error"]) == {"code", "message", "details"}
+    assert body["error"]["details"] is None
     assert body["error"]["code"] == "INVALID_REQUEST"
     assert _HANGUL.search(body["error"]["message"])
     assert fakes.total_calls(include_lifecycle=True) == 0
@@ -211,7 +212,9 @@ def test_service_invalid_request_maps_to_400(client: TestClient, fakes: FakeServ
     response = send(client, "POST", "/v1/index-jobs", json=index_body())
 
     assert response.status_code == 400
-    assert response.json() == {"error": {"code": "INVALID_REQUEST", "message": message}}
+    assert response.json() == {
+        "error": {"code": "INVALID_REQUEST", "message": message, "details": None}
+    }
 
 
 @pytest.mark.req("REQ-RAG-9.1.2", "REQ-RAG-11.3.2")

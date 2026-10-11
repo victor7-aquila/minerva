@@ -28,10 +28,13 @@ class _InvalidGlossaryError(GlossaryError):
 
 @dataclass(frozen=True)
 class Expansion:
-    """질의에서 찾은 말과 넣을 말이다."""
+    """질의에서 찾은 말, 넣을 말, 대표어로 바꾼 질의다."""
 
     matched: tuple[str, ...]
     terms: tuple[str, ...]
+    # 질의 안의 용어집 말을 그 묶음의 대표어로 바꾼 질의(정규화한 형태).
+    # 찾은 말이 없으면 질의 그대로다
+    rewritten: str
 
 
 @dataclass(frozen=True)
@@ -63,16 +66,42 @@ def _bounded(word: str, query: str, start: int) -> bool:
     return not (_is_ascii_alnum(word[-1]) and end < len(query) and _is_ascii_alnum(query[end]))
 
 
-def _occurs(word: str, query: str) -> bool:
-    """정규화한 말이 정규화한 질의에 경계 규칙을 지키며 나오는지 본다."""
-    if not word:
-        return False
-    start = query.find(word)
+def _spans(word: str, query: str) -> list[tuple[int, int]]:
+    """정규화한 말이 정규화한 질의에 경계 규칙을 지키며 나오는 (시작, 끝) 위치를 모두 돌려준다."""
+    spans: list[tuple[int, int]] = []
+    start = query.find(word) if word else -1
     while start != -1:
         if _bounded(word, query, start):
-            return True
+            spans.append((start, start + len(word)))
         start = query.find(word, start + 1)
-    return False
+    return spans
+
+
+def _rewrite(snapshot: "_Snapshot", query: str) -> str:
+    """정규화한 질의 안의 용어집 말을 그 묶음의 대표어로 바꾼다. 겹치면 긴 말을 먼저 쓴다."""
+    found = [
+        (end - start, start, end, number)
+        for normalized, number, _original in snapshot.index
+        for start, end in _spans(normalized, query)
+    ]
+    # ★ 긴 말부터 고르고, 이미 고른 자리와 겹치는 말은 버린다
+    chosen: list[tuple[int, int, int]] = []
+    for _length, start, end, number in sorted(found, key=lambda f: (-f[0], f[1])):
+        if all(end <= s or start >= e for s, e, _n in chosen):
+            chosen.append((start, end, number))
+    pieces: list[str] = []
+    cursor = 0
+    for start, end, number in sorted(chosen):
+        pieces += [query[cursor:start], snapshot.groups[number][0]]
+        cursor = end
+    pieces.append(query[cursor:])
+    return "".join(pieces)
+
+
+def _occurs(word: str, query: str) -> bool:
+    """정규화한 말이 정규화한 질의에 경계 규칙을 지키며 나오는지 본다."""
+    # ★ 대표어 치환(_rewrite)과 같은 경계 판정을 쓰도록 _spans 하나로 판정한다
+    return bool(_spans(word, query))
 
 
 def _invalid(where: str) -> _InvalidGlossaryError:
@@ -164,7 +193,11 @@ def _expand(snapshot: _Snapshot, query: str) -> Expansion:
         for word in snapshot.groups[number]:
             if not _occurs(_normalize(word), normalized_query):
                 terms[word] = None
-    return Expansion(matched=tuple(matched), terms=tuple(terms))
+    return Expansion(
+        matched=tuple(matched),
+        terms=tuple(terms),
+        rewritten=_rewrite(snapshot, normalized_query) if matched else query,
+    )
 
 
 class Glossary:

@@ -4,8 +4,9 @@ import asyncio
 import json
 import threading
 from collections.abc import Awaitable, Callable, Coroutine
+from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
+from typing import Any, Self
 
 import httpx
 import ollama
@@ -49,6 +50,8 @@ class FakeOllama:
         self.mode = mode  # "ok" | "refuse" | "connect_timeout" | "error"
         self.response_text = response_text
         self.requests: list[tuple[str, dict[str, Any]]] = []
+        self.loaded: set[str] = set()  # 메모리에 올라간 모델 (/api/ps가 보여 준다)
+        self.stuck_loaded = False  # 참이면 내리기 요청을 받고도 모델이 내려가지 않는다
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         """요청 하나에 응답한다."""
@@ -69,9 +72,22 @@ class FakeOllama:
             return httpx.Response(200, json={"models": listed})
         if path == "/api/pull":
             return httpx.Response(200, json={"status": "success"})
+        if path == "/api/ps":
+            running = [{"model": n, "name": n} for n in sorted(self.loaded)]
+            return httpx.Response(200, json={"models": running})
         if path == "/api/generate":
             if self.mode == "error":
                 return httpx.Response(500, json={"error": "boom"})
+            name = str(body.get("model"))
+            if not body.get("prompt") and body.get("keep_alive") == 0:
+                # 빈 프롬프트 + keep_alive 0 = 모델 내리기. 올리지 않는다
+                if not self.stuck_loaded:
+                    self.loaded.discard(name)
+                return httpx.Response(
+                    200,
+                    json={"model": name, "response": "", "done": True, "done_reason": "unload"},
+                )
+            self.loaded.add(name)
             return httpx.Response(
                 200,
                 json={"model": body.get("model"), "response": self.response_text, "done": True},
@@ -120,6 +136,32 @@ class FakeEmbedder:
         self.threads: list[int] = []
         self.calls: list[tuple[str, list[str]]] = []
         self.tokenizer = FakeTokenizer()
+        self.device = "cpu"
+        self.dtype = "torch.float32"
+        self.moves: list[str] = []  # to()로 옮긴 장치들
+        self.half_calls = 0
+        self.devices_seen: list[str] = []  # 계산하던 순간의 장치
+        self.entered = threading.Event()  # 계산에 들어서면 선다
+        self.block: threading.Event | None = None  # 지정하면 풀릴 때까지 계산 중에 멈춘다
+
+    def to(self, device: str) -> Self:
+        """장치를 옮긴 것으로 기록한다."""
+        self.moves.append(device)
+        self.device = device
+        return self
+
+    def half(self) -> Self:
+        """fp16으로 바꾼 것으로 기록한다."""
+        self.half_calls += 1
+        self.dtype = "torch.float16"
+        return self
+
+    def _compute_hook(self) -> None:
+        """계산 중의 장치를 남기고, 막아 둔 경우 풀릴 때까지 기다린다."""
+        self.devices_seen.append(self.device)
+        self.entered.set()
+        if self.block is not None:
+            assert self.block.wait(10), "block이 풀리지 않았다"
 
     def get_embedding_dimension(self) -> int | None:
         """임베딩 차원을 돌려준다."""
@@ -135,6 +177,7 @@ class FakeEmbedder:
     def encode_document(self, inputs: Any, **kwargs: Any) -> _Array:
         """문서용 입력 형식으로 인코딩한다."""
         self.threads.append(threading.get_ident())
+        self._compute_hook()
         texts = [inputs] if isinstance(inputs, str) else list(inputs)
         self.calls.append(("document", texts))
         return _Array(self._vector(t) for t in texts)
@@ -142,6 +185,7 @@ class FakeEmbedder:
     def encode_query(self, inputs: Any, **kwargs: Any) -> _Array:
         """질의용 입력 형식으로 인코딩한다."""
         self.threads.append(threading.get_ident())
+        self._compute_hook()
         texts = [inputs] if isinstance(inputs, str) else list(inputs)
         self.calls.append(("query", texts))
         if isinstance(inputs, str):
@@ -154,34 +198,103 @@ class FakeReranker:
 
     def __init__(self) -> None:
         self.threads: list[int] = []
+        self.device = "cpu"
+        self.dtype = "torch.float32"
+        self.moves: list[str] = []
+        self.half_calls = 0
+        self.devices_seen: list[str] = []
+        self.entered = threading.Event()
+        self.block: threading.Event | None = None
+
+    def to(self, device: str) -> Self:
+        """장치를 옮긴 것으로 기록한다."""
+        self.moves.append(device)
+        self.device = device
+        return self
+
+    def half(self) -> Self:
+        """fp16으로 바꾼 것으로 기록한다. ★ 재정렬 모델은 fp16으로 바꾸지 않아야 한다."""
+        self.half_calls += 1
+        self.dtype = "torch.float16"
+        return self
 
     def predict(self, pairs: Any, **kwargs: Any) -> _Array:
         """(질의, 지문) 쌍마다 점수를 돌려준다."""
         self.threads.append(threading.get_ident())
+        self.devices_seen.append(self.device)
+        self.entered.set()
+        if self.block is not None:
+            assert self.block.wait(10), "block이 풀리지 않았다"
         return _Array(float(len(pair[1])) for pair in pairs)
 
 
 class FakeModels:
-    """임베딩·재정렬 가짜 한 쌍이다."""
+    """임베딩·재정렬 가짜 한 쌍이다. 로더가 받은 인자도 기록한다."""
 
     def __init__(self) -> None:
         self.embedder = FakeEmbedder()
         self.reranker = FakeReranker()
+        self.embedder_loads: list[tuple[str, bool]] = []  # (device, half)
+        self.reranker_loads: list[tuple[str]] = []  # (device,)
+        # 거짓이면 로더가 half를 무시하고 fp32를 돌려준다 — prepare의 fp16 보장 경로를 본다
+        self.loader_honors_half = True
 
 
 def install_fake_models(monkeypatch: pytest.MonkeyPatch, models: FakeModels) -> None:
-    """sentence-transformers 로더를 가짜로 바꾼다."""
-    monkeypatch.setattr(model_hub_module, "_load_embedding_model", lambda s: models.embedder)
-    monkeypatch.setattr(model_hub_module, "_load_reranker_model", lambda s: models.reranker)
+    """sentence-transformers 로더를 가짜로 바꾼다.
+
+    ★ 로더는 half가 참이면 fp16 모델을 돌려준다. `loader_honors_half`를 거짓으로 두면 half를
+    무시하고 fp32를 돌려준다.
+    """
+
+    def _load_embedder(settings: Settings, device: str, half: bool) -> FakeEmbedder:
+        models.embedder_loads.append((device, half))
+        models.embedder.device = device
+        if half and models.loader_honors_half:
+            models.embedder.dtype = "torch.float16"
+        return models.embedder
+
+    def _load_reranker(settings: Settings, device: str) -> FakeReranker:
+        models.reranker_loads.append((device,))
+        models.reranker.device = device
+        return models.reranker
+
+    monkeypatch.setattr(model_hub_module, "_load_embedding_model", _load_embedder)
+    monkeypatch.setattr(model_hub_module, "_load_reranker_model", _load_reranker)
 
 
 def install_failing_loader(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     """지정한 로더(`_load_embedding_model` 또는 `_load_reranker_model`)가 실패하게 한다."""
 
-    def _fail(settings: Settings) -> object:
+    def _fail(*args: Any, **kwargs: Any) -> object:
         raise OSError("not found")
 
     monkeypatch.setattr(model_hub_module, name, _fail)
+
+
+@dataclass
+class CudaSpy:
+    """가짜 CUDA의 사용 가능 여부와 캐시 비우기 호출 수다."""
+
+    available: bool
+    empty_cache_calls: int = field(default=0)
+
+
+def install_cuda(
+    monkeypatch: pytest.MonkeyPatch, available: bool, *, strict: bool = True
+) -> CudaSpy:
+    """GPU 사용 가능 여부 판별과 캐시 비우기를 가짜로 바꾼다.
+
+    strict가 거짓이면 대체 경계가 아직 없어도 오류 없이 넘어간다(모든 테스트에 깔리는 autouse용).
+    """
+    spy = CudaSpy(available)
+
+    def _empty() -> None:
+        spy.empty_cache_calls += 1
+
+    monkeypatch.setattr(model_hub_module, "_cuda_available", lambda: available, raising=strict)
+    monkeypatch.setattr(model_hub_module, "_empty_cuda_cache", _empty, raising=strict)
+    return spy
 
 
 def install_fake_ollama(monkeypatch: pytest.MonkeyPatch, fake: FakeOllama) -> None:

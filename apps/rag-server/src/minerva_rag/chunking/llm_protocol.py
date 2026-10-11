@@ -1,7 +1,7 @@
 """분할 LLM에 보내는 경계·제목·요약 요청과 응답 해석 (REQ-RAG-2.1.1, 2.1.2, 2.5.2.2)."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, cast
 
@@ -53,6 +53,15 @@ class BoundaryItem:
     summary: str
 
 
+@dataclass(frozen=True)
+class BoundaryParseError:
+    """경계 응답을 해석하지 못한 사유다. ★ 본문·제목·요약은 담지 않는다 (MODULE.md 「로그」)."""
+
+    detail: str  # not_json, no_chunks, bad_item, line_out_of_range, empty_title, empty_summary
+    item: int | None = None  # 걸린 범위의 차례(1부터)
+    line: int | None = None  # 걸린 줄 번호
+
+
 def _boundary_instruction(chunk_max_tokens: int) -> str:
     """경계 요청의 지시문을 만든다."""
     return (
@@ -93,35 +102,49 @@ def _clean_text(value: object) -> str | None:
     return value.strip()
 
 
-def _parse_item(entry: object, line_count: int) -> BoundaryItem | None:
-    """경계 응답의 청크 하나를 읽는다. 해석할 수 없으면 None이다."""
+def _parse_item(
+    entry: object, number: int, rows: Sequence[str]
+) -> BoundaryItem | BoundaryParseError:
+    """경계 응답의 범위 하나를 읽는다. 해석할 수 없으면 사유를 돌려준다."""
     if not isinstance(entry, dict):
-        return None
+        return BoundaryParseError("bad_item", number)
     fields = {str(key): value for key, value in cast(dict[object, object], entry).items()}
     start, end = fields.get("start_line"), fields.get("end_line")
     # ★ bool은 정수로 받지 않는다
     if type(start) is not int or type(end) is not int:
-        return None
-    if not (1 <= start <= line_count and 1 <= end <= line_count):
-        return None
+        return BoundaryParseError("bad_item", number)
+    line_count = len(rows)
+    for line in (start, end):
+        if not 1 <= line <= line_count:
+            return BoundaryParseError("line_out_of_range", number, line)
     title, summary = _clean_text(fields.get("title")), _clean_text(fields.get("summary"))
-    if title is None or summary is None:
-        return None
+    # ★ 빈 줄만 덮는 범위는 결과 청크가 되지 않으므로 제목·요약이 비어도 받는다 (REQ-RAG-2.1.1)
+    if not any(row.strip() for row in rows[start - 1 : end]):
+        return BoundaryItem(start, end, title or "", summary or "")
+    if title is None:
+        return BoundaryParseError("empty_title", number, start)
+    if summary is None:
+        return BoundaryParseError("empty_summary", number, start)
     return BoundaryItem(start, end, title, summary)
 
 
-def parse_boundary_response(raw: str, line_count: int) -> list[BoundaryItem] | None:
-    """경계 응답을 읽는다. 해석할 수 없는 응답이면 None이다."""
+def parse_boundary_response(
+    raw: str, rows: Sequence[str]
+) -> list[BoundaryItem] | BoundaryParseError:
+    """경계 응답을 읽는다. 해석할 수 없는 응답이면 처음 걸린 사유를 돌려준다."""
     data = _load_object(raw)
     if data is None:
-        return None
+        return BoundaryParseError("not_json")
     entries = data.get("chunks")
     if not isinstance(entries, list) or not entries:
-        return None
-    items = [_parse_item(entry, line_count) for entry in cast(list[object], entries)]
-    if any(item is None for item in items):
-        return None
-    return [item for item in items if item is not None]
+        return BoundaryParseError("no_chunks")
+    items: list[BoundaryItem] = []
+    for number, entry in enumerate(cast(list[object], entries), start=1):
+        parsed = _parse_item(entry, number, rows)
+        if isinstance(parsed, BoundaryParseError):
+            return parsed
+        items.append(parsed)
+    return items
 
 
 def _title_prompt(heading_path: tuple[str, ...], body: str, note: str) -> str:

@@ -17,7 +17,8 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 
 | 목적 | 명령 | 비고 |
 | :--- | :--- | :--- |
-| 설치 | `uv sync` | `uv.lock` 기준. torch는 CPU 휠 인덱스에서 받는다 |
+| 설치 | `uv sync` | `uv.lock` 기준. torch는 CPU 휠이다. `--no-default-groups`나 `--no-group cpu`만 쓰면 torch가 PyPI(CUDA)에서 오므로 쓰지 않는다 |
+| GPU 배포용 설치 | `uv sync --group gpu --no-group cpu` | torch를 CUDA 휠(cu130)로 바꾼다. `--no-group cpu`를 빼면 그룹 충돌로 실패한다. 배포에서는 `--no-dev`를 더한다 |
 | 포맷 검사 | `uv run ruff format --check .` | |
 | 린트 | `uv run ruff check .` | |
 | 타입 검사 | `uv run basedpyright` | |

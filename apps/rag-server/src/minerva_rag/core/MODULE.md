@@ -110,6 +110,8 @@ class MinervaError(Exception):
     def __init__(self, message: str | None = None) -> None: ...
     @property
     def message(self) -> str: ...
+    @property
+    def details(self) -> Mapping[str, Any] | None: ...
 
 class JobFailureCode(StrEnum):
     CHUNKING_FAILED = "CHUNKING_FAILED"
@@ -125,14 +127,20 @@ class ChunkingFailedError(MinervaError):
     def __init__(self, message: str | None = None, *, location: FailureLocation | None = None) -> None: ...
     @property
     def location(self) -> FailureLocation | None: ...
+
+class BatchIndexingError(MinervaError):
+    """일괄 색인 중이라 검색·평가를 하지 않는다. 남은 작업 수를 갖는다."""
+    def __init__(self, remaining_jobs: int, message: str | None = None) -> None: ...
+    @property
+    def remaining_jobs(self) -> int: ...
 ```
 
 하위 클래스와 코드는 「예외」 표가 소유한다. `JobFailureCode`는 service `MODULE.md`의 `JobFailure.code`와 API의 `JobFailure.code`에 들어가는 값의 전체 목록이며, 뜻은 `apps/rag-server/API.md`의 `JobFailure`가 소유한다.
 
 **`REQ-RAG-11.3.1`** 오류 코드와 한국어 메시지
 
-- 처리 계약: 모든 하위 클래스는 `code`와 한국어 `default_message`를 갖는다. `message`를 넘기지 않으면 `default_message`를 쓴다
-- 충족 기준: 「예외」 표의 모든 클래스가 비지 않은 `code`와 한글이 든 `default_message`를 갖고, `code` 값은 `API.md` 「오류 코드」 표 또는 `JobFailureCode`에 있다
+- 처리 계약: 모든 하위 클래스는 `code`와 한국어 `default_message`를 갖는다. `message`를 넘기지 않으면 `default_message`를 쓴다. `details`는 `API.md` 「오류 코드」 표가 그 코드에 정한 추가 정보이고, 정하지 않은 코드는 `None`이다. `BatchIndexingError`의 `details`는 `{"remaining_jobs": remaining_jobs}`다(`REQ-RAG-10.4.3`, `REQ-RAG-10.7.2`)
+- 충족 기준: 「예외」 표의 모든 클래스가 비지 않은 `code`와 한글이 든 `default_message`를 갖고, `code` 값은 `API.md` 「오류 코드」 표 또는 `JobFailureCode`에 있다. `BatchIndexingError(3)`의 `details`가 `{"remaining_jobs": 3}`이고, 그 밖의 클래스는 `details`가 `None`이다
 
 **`REQ-RAG-11.3.2`** 내부 정보 비노출
 
@@ -208,7 +216,7 @@ class SparseVector:
 | `RAG_CHUNKING_LLM` | `str` | `qwen3:14b` | Ollama 모델 이름 | `REQ-RAG-2.1.1` |
 | `RAG_TABLE_LLM` | `str` | `qwen3:14b` | Ollama 모델 이름 | `REQ-RAG-10.2.2.1` |
 | `RAG_CAPTION_VLM` | `str` | `qwen3-vl:8b` | Ollama 모델 이름 | `REQ-RAG-10.2.3.1` |
-| `RAG_EMBEDDING_MODEL` | `str` | `Qwen/Qwen3-Embedding-4B` | sentence-transformers 모델 이름 | `REQ-RAG-3.2.1` |
+| `RAG_EMBEDDING_MODEL` | `str` | `Qwen/Qwen3-Embedding-0.6B` | sentence-transformers 모델 이름 | `REQ-RAG-3.2.1` |
 | `RAG_RERANKER_MODEL` | `str` | `BAAI/bge-reranker-v2-m3` | sentence-transformers 모델 이름 | `REQ-RAG-4.2.1` |
 | `RAG_CHUNK_MAX_TOKENS` | `int` | `512` | 1 이상 | `REQ-RAG-2.5.1.1` |
 | `RAG_CHUNKING_LLM_MAX_INPUT_TOKENS` | `int` | `8000` | `RAG_CHUNK_MAX_TOKENS`보다 크고, `RAG_LLM_OUTPUT_RESERVE_TOKENS`와 합해 `RAG_LLM_CONTEXT_TOKENS` 이하 | `REQ-RAG-2.5.2.1` |
@@ -218,9 +226,10 @@ class SparseVector:
 | `RAG_SEARCH_DEFAULT_TOP_N` | `int` | `10` | 1 이상 | `REQ-RAG-4.3.2` |
 | `RAG_NEIGHBOR_MAX_TOKENS` | `int` | `1024` | 0 이상. 결과 하나의 앞뒤 청크 합계 | `REQ-RAG-4.4.5` |
 | `RAG_LATEST_EDITION_WEIGHT` | `float` | `0` | | `REQ-RAG-4.5.5` |
-| `RAG_JOB_CONCURRENCY` | `int` | `1` | 1 이상 | `REQ-RAG-10.8.3.1` |
+| `RAG_JOB_CONCURRENCY` | `int` | `1` | 1 이상. 동시에 분할하는 작업 수와 동시에 임베딩·저장하는 작업 수에 각각 적용한다 | `REQ-RAG-10.8.3.1` |
 | `RAG_NOTIFY_RETRIES` | `int` | `5` | 0 이상 | `REQ-RAG-10.8.7.3` |
 | `RAG_SHUTDOWN_TIMEOUT_SECONDS` | `float` | `30` | 0 이상 | `REQ-RAG-10.1.3` |
+| `RAG_BATCH_IDLE_SECONDS` | `float` | `300` | 0 이상. 일괄 색인을 끝내기 전에 요약·캡션 요청과 색인 요청이 없어야 하는 시간(초) (`REQUIREMENTS.md` 「용어」 일괄 색인) | `REQ-RAG-10.4.3`, `REQ-RAG-10.7.2`, `REQ-RAG-10.8.8.6` |
 
 - 토큰 수는 모두 `RAG_EMBEDDING_MODEL`의 토크나이저로 센다
 - `SecretStr` 키는 값이 로그·오류 메시지·`repr`에 나오지 않는다
@@ -245,6 +254,7 @@ class SparseVector:
 | `ChunkingFailedError` | 청킹을 끝내지 못했다. 위치(`FailureLocation`)를 가질 수 있다 | 작업 실패 사유 `CHUNKING_FAILED` | 발생: chunking. 변환: service가 `JobFailure`로 | `REQ-RAG-10.3.3` |
 | `ServerNotReadyError` | 준비가 끝나기 전에 요청이 왔다 | `SERVER_NOT_READY` | 발생: service. 변환: api | `REQ-RAG-10.1.2` |
 | `ShuttingDownError` | 종료 중에 색인 요청이 왔다 | `SHUTTING_DOWN` | 발생: service. 변환: api | `REQ-RAG-10.1.3` |
+| `BatchIndexingError` | 일괄 색인 중에 검색·평가 요청이 왔다. 남은 작업 수를 `details`에 담는다 | `BATCH_INDEXING` | 발생: service. 변환: api | `REQ-RAG-10.4.3`, `REQ-RAG-10.7.2` |
 
 HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 
@@ -254,7 +264,7 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 | :--- | :--- | :--- | :--- | :--- |
 | `REQ-RAG-11.1.1` | unit | 키마다 환경 변수 반영과 기본값, 필드 이름, 빈 값은 미지정, 환경 변수가 `.env`보다 우선, 필수 키 누락·검증 실패·UTF-8이 아닌 `.env` 시 `RuntimeError`와 메시지·연쇄에 값 없음, 캐시 | 환경 변수 (monkeypatch) | `tests/unit/core/` |
 | `REQ-RAG-11.2.1` | unit | 금지 키 값 제거, 허용 키 유지, cp949 출력의 표현 불가 문자와 출력 실패 시 원문 비노출 | 로그 출력 캡처, cp949 스트림 | `tests/unit/core/` |
-| `REQ-RAG-11.3.1` | unit | 모든 하위 클래스의 코드·한국어 메시지, 코드가 `API.md` 목록 또는 `JobFailureCode`에 있음, `ChunkingFailedError`의 `location` 보존 | | `tests/unit/core/` |
+| `REQ-RAG-11.3.1` | unit | 모든 하위 클래스의 코드·한국어 메시지, 코드가 `API.md` 목록 또는 `JobFailureCode`에 있음, `ChunkingFailedError`의 `location` 보존, `BatchIndexingError`의 `details`와 그 밖의 클래스의 `details`가 `None` | | `tests/unit/core/` |
 | `REQ-RAG-11.3.2` | unit | 기본 메시지에 내부 표현 없음, 감싼 예외 문자열 비노출 | | `tests/unit/core/` |
 | `REQ-RAG-2.2.1` | unit | `find_placeholders`의 차례·위치·원문 일치, 형식에 맞지 않는 `[[...]]` 무시 (자리표시 읽기) | | `tests/unit/core/` |
 | `REQ-RAG-3.2.2` | unit | `SparseVector`의 길이·중복 검증 (키워드 벡터 타입) | | `tests/unit/core/` |

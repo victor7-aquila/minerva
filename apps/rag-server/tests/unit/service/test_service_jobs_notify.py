@@ -233,7 +233,8 @@ def test_per_document_order(settings: Settings, receiver: FakeReceiver) -> None:
 
 @pytest.mark.req("REQ-RAG-10.8.7.2")
 def test_stage_changes_not_notified(settings: Settings, receiver: FakeReceiver) -> None:
-    """[REQ-RAG-10.8.7.2] 러너가 단계를 세 번 알려도 알림 수가 늘지 않는다."""
+    """[REQ-RAG-10.8.7.2] 러너가 단계를 세 번 알리고 작업 큐가 EMBEDDING_PENDING을 기록해도 알림
+    수가 늘지 않는다."""
 
     async def scenario() -> str:
         async with running_manager(settings) as manager:

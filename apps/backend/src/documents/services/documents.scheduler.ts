@@ -28,12 +28,6 @@ const RETRY_CONCURRENCY = 4;
 /** 처리 중인 처리 상태들이다. */
 const IN_PROGRESS: readonly ProcessingState[] = [...IN_PROGRESS_STATES];
 
-/** 기동 처리가 이어 갈 버전 하나다. */
-interface ResumeTarget {
-  docId: string;
-  version: string;
-}
-
 /** 기동 처리와 주기 작업을 돌린다. */
 @Injectable()
 export class DocumentsScheduler implements OnApplicationBootstrap {
@@ -61,13 +55,23 @@ export class DocumentsScheduler implements OnApplicationBootstrap {
     this.indexCron = config.get('INDEX_SCHEDULE_CRON', { infer: true });
   }
 
-  /** 예약 색인을 한 번 돌린다. 앞 실행이 끝나지 않았으면 바로 끝난다. */
+  /** 예약 색인을 한 번 돌린다. 앞 실행이 끝나지 않았으면 건너뛰고 경고를 남긴다. */
   async runScheduledIndex(): Promise<void> {
-    if (this.scheduledIndexing) return;
+    // ★ 검사와 설정 사이에 await를 두지 않는다
+    if (this.scheduledIndexing) {
+      const queued = await this.repo.countQueued();
+      const captioning = await this.repo.countInProcessingStates(['captioning']);
+      this.logger.warn({ queued, captioning }, 'documents.index_schedule_skipped');
+      return;
+    }
     this.scheduledIndexing = true;
     try {
-      const { requested, unreachable } = await this.lifecycle.runScheduledIndex();
-      this.logger.info({ requested, unreachable }, 'documents.index_scheduled');
+      const { requeued, captioned, requested, unreachable } =
+        await this.lifecycle.runScheduledIndex();
+      this.logger.info(
+        { requeued, captioned, requested, unreachable },
+        'documents.index_scheduled',
+      );
     } finally {
       this.scheduledIndexing = false;
     }
@@ -145,27 +149,29 @@ export class DocumentsScheduler implements OnApplicationBootstrap {
     // 1. 처리 중인데 마지막 버전 레코드가 없는 문서를 이전 버전으로 되돌린다 (D4)
     const recovered = await this.recoverMissingVersions();
 
-    // 2. 되돌린 결과를 반영해 표·이미지 처리를 이을 문서를 모은다
-    // ★ 대기열을 비우거나 색인을 요청하지 않는다 (REQ-BE-1.10.8)
-    const captioningDocs = await this.collectCaptioning();
+    // 2. uploaded 문서의 색인용 MD를 다시 만들어 대기열에 넣는다 (REQ-BE-1.9.9)
+    // ★ 요약·캡션을 만들지 않고 RAG Server를 부르지 않는다 (REQ-BE-1.10.8)
+    let uploaded = 0;
+    for (const doc of await this.repo.findInProcessingStates(['uploaded'])) {
+      await this.isolate(doc.docId, async () => {
+        if (await this.lifecycle.rebuildUploaded(doc)) uploaded += 1;
+      });
+    }
 
-    // 3. 상태 맞추기 (REQ-BE-3.3.1)
+    // 3. 요약·캡션 생성 중이던 문서를 대기열로 되돌린다 (REQ-BE-1.9.12)
+    let captioning = 0;
+    for (const doc of await this.repo.findInProcessingStates(['captioning'])) {
+      await this.isolate(doc.docId, async () => {
+        if (await this.lifecycle.requeueCaptioning(doc)) captioning += 1;
+      });
+    }
+
+    // 4. 상태 맞추기 (REQ-BE-3.3.1)
     let reconciled = 0;
     await this.isolate(null, async () => {
       reconciled = await this.runReconcile();
     });
-    this.logger.info(
-      {
-        captioning: captioningDocs.length,
-        reconciled,
-        recovered,
-      },
-      'documents.resume',
-    );
-    // 4. 표·이미지 처리를 잇는다 — assets가 pending만 요청한다 (REQ-BE-1.9.9)
-    for (const item of captioningDocs) {
-      this.lifecycle.startProcessing(item.docId, item.version);
-    }
+    this.logger.info({ uploaded, captioning, reconciled, recovered }, 'documents.resume');
   }
 
   /** 마지막 버전 레코드가 없는 처리 중 문서를 이전 버전으로 되돌리고 되돌린 문서 수를 돌려준다. */
@@ -225,18 +231,6 @@ export class DocumentsScheduler implements OnApplicationBootstrap {
       to === 'failed' ? (prevRecord.failure?.code ?? 'UNKNOWN') : undefined,
     );
     return true;
-  }
-
-  /** 처리 중인 문서에서 표·이미지 처리를 이을 버전을 모은다. */
-  private async collectCaptioning(): Promise<ResumeTarget[]> {
-    const targets: ResumeTarget[] = [];
-    for (const doc of await this.repo.findInProcessingStates(['uploaded', 'captioning'])) {
-      await this.isolate(doc.docId, async () => {
-        if ((await this.repo.findVersion(doc.docId, doc.latestVersion)) === null) return;
-        targets.push({ docId: doc.docId, version: doc.latestVersion });
-      });
-    }
-    return targets;
   }
 
   /** 처리 중인 문서의 상태를 맞추고 넘긴 문서 수를 돌려준다. 실행 중이면 바로 0을 돌려준다. */

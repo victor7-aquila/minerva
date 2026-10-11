@@ -2,7 +2,6 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { OnModuleInit } from '@nestjs/common';
 import { PinoLogger } from 'nestjs-pino';
 import { AssetNotFoundError, InvalidRequestError, RagUnavailableError } from '../../common';
-import { LogsService } from '../../logs';
 import { RagClient, RagRequestError } from '../../rag';
 import { FILE_STORE } from '../../storage';
 import type { FileStore } from '../../storage';
@@ -12,6 +11,7 @@ import type {
   AssetRecord,
   AssetViewData,
   HintContext,
+  HintKind,
   HintRunResult,
   PreparedVersion,
   UploadedImage,
@@ -35,9 +35,13 @@ interface ProducedHint {
 }
 
 /** 짝을 맞춘 이미지 파일 정보다. */
-interface MatchedFile {
+interface FileMatch {
   fileKey: string;
   contentType: string;
+}
+
+/** 업로드 바이트까지 든, 짝을 맞춘 이미지 파일 정보다. */
+interface MatchedFile extends FileMatch {
   upload: UploadedImage;
 }
 
@@ -92,7 +96,6 @@ export class AssetsService implements OnModuleInit {
     @Inject(AssetsCrudService) private readonly repo: AssetsCrudService,
     @Inject(FILE_STORE) private readonly files: FileStore,
     @Inject(RagClient) private readonly rag: RagClient,
-    @Inject(LogsService) private readonly logs: LogsService,
     @Inject(PinoLogger) private readonly logger: PinoLogger,
   ) {
     this.logger.setContext('AssetsService');
@@ -149,9 +152,63 @@ export class AssetsService implements OnModuleInit {
     };
   }
 
-  /** 요약·캡션을 만든다. */
-  async generateHints(docId: string, version: string, ctx: HintContext): Promise<HintRunResult> {
-    const pending = await this.repo.findPending(docId, version);
+  /**
+   * 저장된 원본 MD로 버전의 표·이미지 레코드를 다시 만든다. 파일은 지우지도 쓰지도 않는다.
+   * 이미지 짝은 같은 자리표시·같은 경로의 기존 레코드가 가진 파일로 정한다.
+   */
+  async rebuildVersion(docId: string, version: string, markdown: string): Promise<PreparedVersion> {
+    const existing = new Map(
+      (await this.repo.findByVersion(docId, version)).map((record) => [
+        record.placeholderId,
+        record,
+      ]),
+    );
+    const { assets, indexingMarkdown } = extractAssets(markdown);
+
+    const unmatched = new Set<string>();
+    const matched = new Map<string, FileMatch>();
+    for (const asset of assets) {
+      if (asset.kind !== 'image') continue;
+      const old = existing.get(asset.placeholderId);
+      // ★ 같은 자리표시여도 경로가 다르면 다른 이미지다
+      if (
+        old !== undefined &&
+        old.kind === 'image' &&
+        old.imagePath === asset.imagePath &&
+        old.fileKey !== null
+      ) {
+        matched.set(asset.placeholderId, {
+          fileKey: old.fileKey,
+          contentType: old.contentType ?? 'application/octet-stream',
+        });
+      } else {
+        unmatched.add(asset.imagePath ?? '');
+      }
+    }
+
+    const records = assets.map((asset) => toRecord(docId, version, asset, matched));
+    // ★ RAG 서버와 파일 저장소는 건드리지 않는다. 레코드만 바꾼다
+    await this.repo.replaceVersion(docId, version, records);
+    return {
+      indexingMarkdown,
+      unmatchedImages: [...unmatched],
+      assetCount: records.filter(isTopLevel).length,
+    };
+  }
+
+  /** 버전에 요약·캡션이 아직 대기 중인 표·이미지가 몇 개인지 센다. RAG Server를 부르지 않는다. */
+  pendingHints(docId: string, version: string): Promise<number> {
+    return this.repo.countPending(docId, version);
+  }
+
+  /** 한 종류의 요약·캡션을 만든다. */
+  async generateHints(
+    docId: string,
+    version: string,
+    kind: HintKind,
+    ctx: HintContext,
+  ): Promise<HintRunResult> {
+    const pending = await this.repo.findPending(docId, version, kind);
     let generated = 0;
     let temporary = 0;
     let stopped = false;
@@ -166,18 +223,12 @@ export class AssetsService implements OnModuleInit {
       generated += 1;
       if (isTemporary) temporary += 1;
     }
-    this.logger.info({ docId, version, generated, temporary, stopped }, 'assets.hints_done');
-    if (!stopped && generated > 0) {
-      await this.logs.record({
-        kind: 'captioning',
-        docId,
-        name: ctx.name,
-        editionLabel: ctx.editionLabel,
-        outcome: 'success',
-        detail: { count: generated, failedCount: temporary },
-      });
-    }
-    return { generated, temporary, stopped };
+    const remaining = await this.repo.countPending(docId, version);
+    this.logger.info(
+      { docId, version, kind, generated, temporary, stopped, remaining },
+      'assets.hints_done',
+    );
+    return { generated, temporary, stopped, remaining };
   }
 
   /** 이전 버전의 표·이미지를 이어받는다. */
@@ -219,15 +270,8 @@ export class AssetsService implements OnModuleInit {
           pathInTable: null,
         };
       }
-      return {
-        ...record,
-        version: toVersion,
-        hint: record.hint ?? record.description,
-        isTemporary: record.hint === null ? true : record.isTemporary,
-        hintStatus: 'done',
-        tableId: null,
-        pathInTable: null,
-      };
+      // ★ 바꾸지 않은 항목은 요약·캡션·임시 여부·대기 상태를 이전 값 그대로 잇는다 (pending이면 pending)
+      return { ...record, version: toVersion, tableId: null, pathInTable: null };
     });
     // ★ 파일은 복사하지 않고 fileKey를 그대로 이어받는다
     await this.repo.replaceVersion(docId, toVersion, records);
@@ -267,8 +311,9 @@ export class AssetsService implements OnModuleInit {
             )
           : null,
       imageUrl: imageUrlFor(docId, version, record),
-      text: record.hint ?? record.description,
-      isTemporary: record.isTemporary,
+      // ★ 대기 중이면 문장이 아직 없다
+      text: record.hintStatus === 'pending' ? null : (record.hint ?? record.description),
+      isTemporary: record.hintStatus === 'pending' ? false : record.isTemporary,
     }));
   }
 
@@ -442,7 +487,7 @@ function toRecord(
   docId: string,
   version: string,
   asset: ExtractedAsset,
-  matched: ReadonlyMap<string, MatchedFile>,
+  matched: ReadonlyMap<string, FileMatch>,
 ): AssetRecord {
   const file = matched.get(asset.placeholderId);
   return {

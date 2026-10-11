@@ -131,7 +131,7 @@ def test_empty_terms_ok(settings: Settings, glossary_path: Path) -> None:
     """[REQ-RAG-4.8.1] terms가 비어 있어도 되고 그러면 어떤 질의도 빈 확장이다."""
     glossary = _loaded(settings, glossary_path, "terms: []\n")
 
-    assert glossary.expand("무엇이든") == Expansion((), ())
+    assert glossary.expand("무엇이든") == Expansion((), (), "무엇이든")
 
 
 @pytest.mark.req("REQ-RAG-4.8.1")
@@ -142,7 +142,7 @@ def test_missing_file_is_empty(settings: Settings, glossary_path: Path) -> None:
 
     glossary.load()
 
-    assert glossary.expand("인증서") == Expansion((), ())
+    assert glossary.expand("인증서") == Expansion((), (), "인증서")
 
 
 @pytest.mark.req("REQ-RAG-4.8.1")
@@ -307,5 +307,7 @@ def test_search_survives_invalid_date_reload(settings: Settings, glossary_path: 
     with capture_logs() as logs:
         run(searcher.search(SearchQuery("인증서")))
 
-    assert "cert" in hub.embed_inputs[-1]
+    # ★ 동의어는 키워드 질의에만 붙고 dense 질의는 대표어로 바꾼 질의다
+    assert "cert" in hub.sparse_inputs[-1]
+    assert hub.embed_inputs[-1] == "인증서"
     assert len([e for e in logs if e["event"] == "search.glossary_reload_failed"]) == 1

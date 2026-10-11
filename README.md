@@ -56,7 +56,7 @@ Markdown 문서를 **Agentic Chunking**으로 의미 단위로 나누고, **Hybr
 | Database | MongoDB, Qdrant, SQLite (RAG Server 작업 목록) |
 | 청킹·표 요약 LLM | Qwen3-14B (4bit) |
 | 이미지 캡션 VLM | Qwen3-VL-8B (4bit) |
-| Embedding | Qwen3-Embedding-4B |
+| Embedding | Qwen3-Embedding-0.6B |
 | Sparse Retrieval | BM25 |
 | Fusion | RRF (Reciprocal Rank Fusion) |
 | Reranker | bge-reranker-v2-m3 |

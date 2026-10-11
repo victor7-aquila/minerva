@@ -9,6 +9,7 @@ from fastapi.routing import APIRoute
 
 import minerva_rag.api as api
 from minerva_rag.api import create_app
+from minerva_rag.api.errors import error_response, status_for
 from minerva_rag.core import get_settings
 from minerva_rag.service import Services
 
@@ -89,3 +90,18 @@ def test_create_app_builds_services_from_settings(
     create_app()
     assert len(calls) == 1
     assert calls[0] is get_settings()
+
+
+@pytest.mark.req("REQ-RAG-9.1.2")
+def test_error_response_surface() -> None:
+    """[REQ-RAG-9.1.2] error_response는 code·message·details를 받고 details 기본값은 None이다."""
+    params = inspect.signature(error_response).parameters
+
+    assert list(params) == ["code", "message", "details"]
+    assert params["details"].default is None
+
+
+@pytest.mark.req("REQ-RAG-9.1.2")
+def test_batch_indexing_status() -> None:
+    """[REQ-RAG-9.1.2] BATCH_INDEXING은 503이다."""
+    assert status_for("BATCH_INDEXING") == 503

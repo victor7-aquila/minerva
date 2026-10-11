@@ -133,9 +133,15 @@ function search(body: unknown): request.Test {
 }
 
 /** 오류 응답의 모양과 코드를 확인한다. */
-function errorOf(res: request.Response): { code: string; message: string } {
+function errorOf(res: request.Response): {
+  code: string;
+  message: string;
+  details: unknown;
+} {
   expect(Object.keys(res.body as object)).toEqual(['error']);
-  return (res.body as { error: { code: string; message: string } }).error;
+  const error = (res.body as { error: { code: string; message: string; details: unknown } }).error;
+  expect(Object.keys(error).sort()).toEqual(['code', 'details', 'message']);
+  return error;
 }
 
 describe('REQ-BE-4.1.1', () => {
@@ -312,7 +318,25 @@ describe('REQ-BE-10.1.2', () => {
       const res = await search({ query: 'q' });
       expect(res.status).toBe(503);
       expect(errorOf(res).code).toBe('RAG_UNAVAILABLE');
+      expect(errorOf(res).details).toBeNull();
     }
+  });
+});
+
+describe('REQ-BE-10.1.5', () => {
+  it('T-E2E-ERR-2 RAG Server가 일괄 색인으로 거부하면 503 BATCH_INDEXING과 remaining_jobs를 준다', async () => {
+    fake.setHandler(() => ({
+      status: 503,
+      json: { error: { code: 'BATCH_INDEXING', message: 'm', details: { remaining_jobs: 7 } } },
+    }));
+    const res = await search({ query: 'q' });
+    expect(res.status).toBe(503);
+    const error = errorOf(res);
+    expect(error.code).toBe('BATCH_INDEXING');
+    expect(error.details).toEqual({ remaining_jobs: 7 });
+    expect(error.message).toMatch(/[가-힣]/);
+    // ★ 다시 시도하지 않는다
+    expect(searchRequests()).toHaveLength(1);
   });
 });
 

@@ -1,14 +1,15 @@
 # assets 모듈 명세 (REQ-BE-2)
 
-문서 버전의 원본 MD에서 표·이미지를 찾아 자리표시(루트 `IF-1`)로 바꾼 색인용 MD를 만들고, 표·이미지마다 RAG Server로 요약·캡션을 받아 저장하며, 이미지 파일을 제공하고, 청크 본문의 자리표시를 원래 표·이미지로 복원한다. 문서 상태는 바꾸지 않고 결과만 documents에 돌려준다. 폴더는 `apps/backend/src/assets`다.
+문서 버전의 원본 MD에서 표·이미지를 찾아 자리표시(루트 `IF-1`)로 바꾼 색인용 MD를 만들고, 예약 색인에서 documents가 부르면 표·이미지마다 RAG Server로 요약·캡션을 받아 저장하며, 이미지 파일을 제공하고, 청크 본문의 자리표시를 원래 표·이미지로 복원한다. 문서 상태는 바꾸지 않고 결과만 documents에 돌려준다. 폴더는 `apps/backend/src/assets`다.
 
 ## 요약
 
 **핵심 계약**
 
-- 색인용 MD의 모든 자리표시 ID에는 요약·캡션이 있다. 만들지 못한 것은 임시 설명으로 채운다. RAG Server의 색인이 이 보장에 기댄다 (루트 `IF-1`, `REQ-BE-2.3.2`)
+- `pending`이 남지 않은 버전에서는 색인용 MD의 모든 자리표시 ID에 요약·캡션이 있다. 만들지 못한 것은 임시 설명으로 채운다. RAG Server의 색인이 이 보장에 기대며, documents는 `pending`이 남지 않은 버전만 색인을 요청한다 (루트 `IF-1`, `REQ-BE-2.3.2`, `REQ-BE-1.10.1`)
+- RAG Server에 요약·캡션을 요청하는 공개 메서드는 `generateHints` 하나다. 추출·다시 추출·이어받기·재색인 표시는 RAG Server를 부르지 않는다 (`REQ-BE-2.3.7`, 루트 `IF-3`)
 - 원본 본문에 자리표시와 같은 모양의 문자열이 있으면 색인용 MD에서 깨뜨려 넣고, 복원할 때 되돌린다. 그래야 RAG Server가 가짜 자리표시를 읽지 않는다 (`REQ-BE-2.2.2`)
-- 요약·캡션은 표·이미지마다 만드는 대로 저장한다. 중간에 멈춰도 저장된 것은 다시 만들지 않는다 (`REQ-BE-2.3.6`, `REQ-BE-1.9.9`)
+- 요약·캡션은 표·이미지마다 만드는 대로 저장한다. 중간에 멈춰도 저장된 것은 다시 만들지 않는다 (`REQ-BE-2.3.6`, `REQ-BE-1.9.12`)
 - 문서 상태(처리 상태·검색 상태)를 쓰지 않는다. 진행 여부는 documents가 넘긴 확인 함수로 묻는다 (`ARCHITECT.md` 「의존 규칙」)
 
 **기능 그룹**
@@ -17,13 +18,14 @@
 | :--- | :--- | :--- |
 | `REQ-BE-2.1` | 추출 | 버전의 원본 MD에서 표·이미지를 찾아 등록하고 자리표시 ID를 정한다 |
 | `REQ-BE-2.2` | 색인용 MD | 표·이미지 자리를 자리표시로 바꾼 색인용 MD를 만든다 |
-| `REQ-BE-2.3` | 요약·캡션 생성 | 표·이미지마다 요약·캡션을 받아 저장하고, 못 받으면 임시 설명을 쓴다 |
+| `REQ-BE-2.3` | 요약·캡션 생성 | 예약 색인에서 표·이미지마다 요약·캡션을 받아 저장하고, 못 받으면 임시 설명을 쓴다 |
 | `REQ-BE-2.4` | 이미지 제공 | 문서 버전과 자리표시 ID로 이미지 파일을 돌려준다 |
 | `REQ-BE-2.5` | 복원 | 청크 본문의 자리표시를 원래 표·이미지로 바꾸고, 표 안 이미지 경로를 이미지 주소로 바꾼다 |
 
 **비범위**
 
-- 처리 상태를 요약·캡션 생성 중·색인 대기로 바꾸는 일, 색인 대기열과 예약 색인, 색인 요청 — documents, indexing (`REQ-BE-1.9`, `REQ-BE-1.10`, `REQ-BE-3.1`)
+- 처리 상태를 요약·캡션 생성 중·색인 대기로 바꾸는 일, 색인 대기열과 예약 색인, 예약 색인의 요청 순서(이미지 캡션 → 표 요약 → 색인), 색인 요청 — documents, indexing (`REQ-BE-1.9`, `REQ-BE-1.10`, `REQ-BE-1.10.9`, `REQ-BE-3.1`, 루트 `IF-3`)
+- 요약·캡션 생성 결과의 기록(`captioning`) — documents (`REQ-BE-6.1.1`)
 - 문서·버전 레코드와 색인용 MD 보관 — documents (`ARCHITECT.md` 「데이터·상태 소유」)
 
 ## 구조
@@ -65,7 +67,6 @@ flowchart LR
     end
     Assets --> Coll
     Assets --> Rag["rag"]
-    Assets --> Logs["logs"]
     Assets --> Files[/"FileStore"/]
 ```
 
@@ -78,7 +79,6 @@ common 의존은 생략했다.
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | rag | DI | `RagClient.summarizeTable`, `captionImage`, `RagUnavailableError`, `RagRequestError` | rag `MODULE.md` | `REQ-BE-2.3` |
-| logs | DI | `LogsService.record`(`captioning`) | logs `MODULE.md` | `REQ-BE-6.1.1` |
 | storage | DI | `MONGO_DB`(컬렉션 `assets`), `FILE_STORE` | storage `MODULE.md` | `REQ-BE-2`, `REQ-BE-9.1.2` |
 | common | DI·import | `AssetNotFoundError`, `InvalidRequestError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-2.4.1`, `REQ-BE-8.2.1` |
 
@@ -88,8 +88,8 @@ common 의존은 생략했다.
 
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
-| 추출, 색인용 MD | `AssetsService.prepareVersion`, `UploadedImage`, `PreparedVersion` | 「추출 — REQ-BE-2.1」 | `REQ-BE-2.1`, `REQ-BE-2.2`, `REQ-BE-1.1.3`, `REQ-BE-1.1.4` |
-| 요약·캡션 생성 | `AssetsService.generateHints`, `inheritVersion`, `markTemporaryForRegeneration`, `hintsFor` | 「요약·캡션 생성 — REQ-BE-2.3」 | `REQ-BE-2.3`, `REQ-BE-1.6.3`, `REQ-BE-1.7.1` |
+| 추출, 색인용 MD | `AssetsService.prepareVersion`, `rebuildVersion`, `UploadedImage`, `PreparedVersion` | 「추출 — REQ-BE-2.1」 | `REQ-BE-2.1`, `REQ-BE-2.2`, `REQ-BE-1.1.3`, `REQ-BE-1.1.4`, `REQ-BE-1.9.9` |
+| 요약·캡션 생성 | `AssetsService.generateHints`, `pendingHints`, `inheritVersion`, `markTemporaryForRegeneration`, `hintsFor`, `HintKind`, `HintRunResult`, `HintContext` | 「요약·캡션 생성 — REQ-BE-2.3」 | `REQ-BE-2.3`, `REQ-BE-1.6.3`, `REQ-BE-1.7.1`, `REQ-BE-1.10.9` |
 | 이미지 제공 | `GET /v1/documents/{doc_id}/versions/{version}/assets/{placeholder_id}`, `AssetsService.imageUrls` | `API.md`, 「이미지 제공 — REQ-BE-2.4」 | `REQ-BE-2.4.1`, `REQ-BE-1.4.3` |
 | 복원 | `AssetsService.restore` | 「복원 — REQ-BE-2.5」 | `REQ-BE-2.5` |
 | 조회·삭제 | `AssetsService.listViews`, `deleteDocument` | 「조회와 삭제」 | `REQ-BE-1.4.4`, `REQ-BE-1.8.5` |
@@ -113,7 +113,7 @@ common 의존은 생략했다.
 | `contentType` | `string \| null` | 조건부 | `fileKey`가 있으면 필수 |
 | `description` | `string` | 필수 | 자리표시 설명. 줄바꿈과 `]]`가 없다(루트 `IF-1`) |
 | `hint` | `string \| null` | 조건부 | 요약·캡션. `hintStatus`가 `done`이고 `tableId`가 `null`이면 필수. 표 안 이미지는 늘 `null` |
-| `hintStatus` | `'pending' \| 'done'` | 필수 | |
+| `hintStatus` | `'pending' \| 'done'` | 필수 | `pending`은 요약·캡션을 아직 만들지 않았거나(추출 직후), 재색인으로 다시 만들 것이다(`REQ-BE-1.7.1`). 추출한 표·이미지는 `pending`으로 시작한다 |
 | `isTemporary` | `boolean` | 필수 | `hint`가 임시 설명이면 참 |
 | `tableId` | `string \| null` | 필수 | 표 안 이미지면 그 표의 `placeholderId`, 아니면 `null`. 값이 있으면 자리표시·요약·캡션이 없다(`hint` `null`, `hintStatus` `done`, `isTemporary` 거짓). 이 필드가 없는 레코드는 `null`로 읽는다 |
 | `pathInTable` | `{ start: number; end: number } \| null` | 조건부 | 표 안 이미지의 경로가 그 표 `tableMarkdown` 안에 적힌 위치(UTF-16 오프셋, `end`는 제외). 경로가 표 밖(참조형 정의)에 있으면 `null`. `tableId`가 `null`이면 `null` |
@@ -140,18 +140,24 @@ export interface PreparedVersion {
   assetCount: number;
 }
 
+/** 요약·캡션을 만들 표·이미지의 종류다. */
+export type HintKind = 'table' | 'image';
+
 /** 요약·캡션 생성 결과다. */
 export interface HintRunResult {
   generated: number;
   temporary: number;
   stopped: boolean;
+  remaining: number;
 }
 
 /** 표·이미지를 다룬다. */
 @Injectable()
 export class AssetsService {
   prepareVersion(docId: string, version: string, markdown: string, images: readonly UploadedImage[]): Promise<PreparedVersion>;
-  generateHints(docId: string, version: string, ctx: HintContext): Promise<HintRunResult>;
+  rebuildVersion(docId: string, version: string, markdown: string): Promise<PreparedVersion>;
+  pendingHints(docId: string, version: string): Promise<number>;
+  generateHints(docId: string, version: string, kind: HintKind, ctx: HintContext): Promise<HintRunResult>;
   inheritVersion(docId: string, fromVersion: string, toVersion: string, changedHints: ReadonlyMap<string, string>): Promise<void>;
   markTemporaryForRegeneration(docId: string, version: string): Promise<number>;
   hintsFor(docId: string, version: string): Promise<Array<{ placeholderId: string; text: string }>>;
@@ -162,10 +168,8 @@ export class AssetsService {
   deleteDocument(docId: string): Promise<void>;
 }
 
-/** 요약·캡션 생성 중 진행 여부와 기록에 쓰는 문서 정보다. */
+/** 요약·캡션 생성 중 진행 여부를 묻는다. */
 export interface HintContext {
-  name: string;
-  editionLabel: string | null;
   shouldContinue(): Promise<boolean>;
 }
 
@@ -175,7 +179,7 @@ export interface AssetViewData {
   kind: 'table' | 'image';
   tableMarkdown: string | null;
   imageUrl: string | null;
-  text: string;
+  text: string | null;
   isTemporary: boolean;
 }
 ```
@@ -198,6 +202,8 @@ export interface AssetViewData {
 - 처리 계약: 표는 `t1`, `t2`…, 이미지는 `i1`, `i2`…처럼 종류 글자와 원본에 나오는 차례로 정한다
 - 충족 기준: 한 버전의 모든 `placeholderId`가 서로 다르고 루트 `IF-1`의 형식(영문 소문자·숫자)이다
 
+`rebuildVersion`은 기동 때 업로드됨 문서의 표·이미지 추출과 색인용 MD를 다시 하는 데 쓴다(`REQ-BE-1.9.9`). 받은 원본 MD로 `prepareVersion`과 같은 규칙(`REQ-BE-2.1`, `REQ-BE-2.2`)으로 그 버전의 표·이미지 레코드와 색인용 MD를 다시 만들고, 모든 표·이미지를 `pending`으로 둔다. 업로드 이미지는 요청이 끝나면 남지 않으므로, 이미지의 짝은 그 버전에 이미 저장된 이미지 파일로 정하고 그 파일을 지우지 않는다. RAG Server를 부르지 않는다. documents가 처리 상태를 바꾸므로 충족 기준은 documents가 `REQ-BE-1.9.9`로 소유하고, 아래 테스트 표가 assets 쪽 결과를 함께 본다.
+
 ### 색인용 MD — `REQ-BE-2.2`
 
 **`REQ-BE-2.2.1`** 자리표시로 바꾼 색인용 MD
@@ -218,8 +224,8 @@ export interface AssetViewData {
 
 **`REQ-BE-2.3.1`** 표·이미지마다 한 건씩 요청
 
-- 처리 계약: `generateHints`는 `hintStatus`가 `pending`인 표·이미지를 `order` 순으로 하나씩 `summarizeTable`·`captionImage`로 요청한다. 표는 둘째 줄부터의 블록 접두를 뗀 모양으로 보낸다. 다음 것을 요청하기 전에 `ctx.shouldContinue()`를 묻고, 거짓이면 `stopped: true`로 멈춘다(`REQ-BE-1.8.3`, `REQ-BE-1.2.8`)
-- 충족 기준: 표·이미지가 셋이면 RAG Server 호출이 세 번 차례로 일어나고, 두 번째 뒤 `shouldContinue`가 거짓이면 세 번째 호출이 없다
+- 처리 계약: `generateHints`는 그 버전에서 `kind`가 받은 종류이고 `hintStatus`가 `pending`인 표·이미지만 `order` 순으로 하나씩 요청한다 — 표는 `summarizeTable`, 이미지는 `captionImage`. 다른 종류는 건드리지 않는다. 표는 둘째 줄부터의 블록 접두를 뗀 모양으로 보낸다. 다음 것을 요청하기 전에 `ctx.shouldContinue()`를 묻고, 거짓이면 `stopped: true`로 멈춘다(`REQ-BE-1.8.3`, `REQ-BE-1.2.8`). 종류를 나눠 받는 것은 documents가 예약 색인에서 모든 문서의 이미지 캡션을 먼저, 표 요약을 그다음에 요청하게 하려는 것이다(`REQ-BE-1.10.9`)
+- 충족 기준: 이미지 둘·표 하나가 `pending`인 버전에 `image`로 부르면 `captionImage`만 두 번 차례로 일어나고 표는 `pending` 그대로이며, 첫 번째 뒤 `shouldContinue`가 거짓이면 두 번째 호출이 없다
 
 **`REQ-BE-2.3.2`** 못 만든 것은 임시 설명
 
@@ -234,17 +240,22 @@ export interface AssetViewData {
 
 - 충족 기준: 셋 중 하나가 실패해도 나머지 둘을 요청하고, `generateHints`가 예외 없이 `temporary: 1`로 끝난다
 
-**`REQ-BE-2.3.5`** 모두 마치면 색인 준비를 넘김
+**`REQ-BE-2.3.5`** 모두 마치면 그 사실을 넘김
 
-- 처리 계약: `generateHints`가 `stopped: false`로 끝나면 모든 표·이미지의 `hintStatus`가 `done`이다. 이 반환값이 그 버전이 색인할 준비가 됐다는 알림이며, documents가 받아 처리 상태를 색인 대기로 바꾸고 색인 대기열에 넣는다(`REQ-BE-1.9.3`, `REQ-BE-1.10.2`). assets는 색인을 요청하지 않는다
-- 충족 기준: `stopped: false` 뒤 `hintsFor`가 모든 자리표시 ID의 문장을 돌려준다
+- 처리 계약: `generateHints`의 `remaining`은 호출이 끝난 때 그 버전에 남은 `pending` 표·이미지의 수(종류와 상관없이)다. `stopped: false`이고 `remaining`이 0이면 그 버전의 요약·캡션을 모두 마친 것이며, documents가 받아 처리 상태를 색인 대기로 되돌리고 색인 대기열에 넣는다(`REQ-BE-1.9.13`, `REQ-BE-1.10.2`). assets는 색인을 요청하지 않는다
+- 충족 기준: 이미지만 `pending`인 버전에 `image`로 부르면 `stopped: false`·`remaining: 0`이고 그 뒤 `hintsFor`가 모든 자리표시 ID의 문장을 돌려주며, 표도 `pending`인 버전이면 `image` 호출의 `remaining`이 남은 표의 수다
 
 **`REQ-BE-2.3.6`** 만드는 대로 저장, 이어받은 것은 다시 만들지 않음
 
-- 처리 계약: 표·이미지 하나의 결과를 받을 때마다 저장한다. `inheritVersion`은 이전 버전의 레코드를 새 버전으로 복사하되 `changedHints`의 것만 새 값(`isTemporary` 거짓)으로 바꾸고, 모두 `done`으로 둔다. `markTemporaryForRegeneration`은 `isTemporary`가 참이고 `fileKey`가 있거나 표인 것만 `pending`으로 바꾸고 그 수를 돌려준다(`REQ-BE-1.7.1`)
-- 충족 기준: 둘째 호출 뒤 멈춘 버전으로 다시 `generateHints`하면 셋째부터만 요청하고, 이어받은 버전은 `changedHints`의 것만 바뀌며, 재색인 표시는 짝 없는 이미지를 빼고 임시 설명만 `pending`으로 만든다
+- 처리 계약: 표·이미지 하나의 결과를 받을 때마다 저장한다. `inheritVersion`은 이전 버전의 레코드를 새 버전으로 복사하되 `changedHints`의 것만 새 값(`done`, `isTemporary` 거짓)으로 바꾸고, 나머지는 이전 버전의 `hintStatus`를 그대로 둔다 — 아직 만들지 않은(`pending`) 것은 새 버전에서도 `pending`이라 다음 예약 색인이 만든다(`REQ-BE-1.10.1`). `markTemporaryForRegeneration`은 `isTemporary`가 참이고 `fileKey`가 있거나 표인 것만 `pending`으로 바꾸고 그 수를 돌려준다(`REQ-BE-1.7.1`). `pendingHints`는 그 버전의 `pending` 표·이미지 수를 돌려준다
+- 충족 기준: 둘째 호출 뒤 멈춘 버전으로 다시 `generateHints`하면 셋째부터만 요청하고, 이어받은 버전은 `changedHints`의 것만 바뀌고 이전 버전에서 `pending`이던 것은 `pending`이며, 재색인 표시는 짝 없는 이미지를 빼고 임시 설명만 `pending`으로 만든다
 
-`generateHints`가 `stopped: false`로 끝나고 이번 실행에서 하나 이상 저장했으면 `captioning` 기록을 남긴다(`count`는 이번에 저장한 수 `generated`, `failedCount`는 그중 임시 설명 수 `temporary`, `REQ-BE-6.1.1`). `shouldContinue`는 `pending` 항목마다 처리 전에 묻는다. 요청 실패 외에 저장소에 이미지 파일이 없거나 응답이 비어도 임시 설명으로 저장한다.
+**`REQ-BE-2.3.7`** 요약·캡션은 예약 색인에서만 요청
+
+- 처리 계약: `generateHints` 밖의 공개 메서드(`prepareVersion`, `rebuildVersion`, `inheritVersion`, `markTemporaryForRegeneration`, `pendingHints`, `hintsFor`)는 RAG Server를 부르지 않는다. documents는 `generateHints`를 예약 색인에서만 부른다(documents `MODULE.md` `REQ-BE-1.10.1`, 루트 `IF-3`)
+- 충족 기준: `prepareVersion`·`rebuildVersion`·`inheritVersion`·`markTemporaryForRegeneration`을 불러도 RAG Server 가짜에 요약·캡션 요청이 없고, 추출한 표·이미지가 모두 `pending`이다
+
+`shouldContinue`는 `pending` 항목마다 처리 전에 묻는다. 요청 실패 외에 저장소에 이미지 파일이 없거나 응답이 비어도 임시 설명으로 저장한다. 짝이 없는 이미지는 `image`로 부를 때 처리한다(`REQ-BE-2.3.3`). 요약·캡션 생성 결과의 기록(`captioning`)은 documents가 문서의 요약·캡션을 모두 마친 때 남긴다(documents `MODULE.md` `REQ-BE-1.9.13`).
 
 ### 이미지 제공 — `REQ-BE-2.4`
 
@@ -276,7 +287,7 @@ export interface AssetViewData {
 
 ### 조회와 삭제
 
-`listViews`는 `API.md`의 `AssetView`를 만드는 원천(원래 모양, 요약·캡션, 임시 여부)이고(`REQ-BE-1.4.4`), 표 안 이미지는 넣지 않는다. 표의 원래 모양은 인용문·목록 안 표의 둘째 줄부터 붙은 블록 접두(`>`·들여쓰기)를 떼고 표 안 짝 있는 이미지의 경로를 이미지 주소로 바꾼 것이다. `deleteDocument`는 그 문서의 모든 레코드와 `{docId}/` 아래 파일을 지운다(`REQ-BE-1.8.5`). 두 함수의 충족 기준과 테스트는 documents가 그 REQ로 소유한다.
+`listViews`는 `API.md`의 `AssetView`를 만드는 원천(원래 모양, 요약·캡션, 임시 여부)이고(`REQ-BE-1.4.4`), 표 안 이미지는 넣지 않는다. `hintStatus`가 `pending`인 것은 `text`가 `null`, `isTemporary`가 거짓이다 — 재색인으로 `pending`이 된 임시 설명도 같다. 표의 원래 모양은 인용문·목록 안 표의 둘째 줄부터 붙은 블록 접두(`>`·들여쓰기)를 떼고 표 안 짝 있는 이미지의 경로를 이미지 주소로 바꾼 것이다. `deleteDocument`는 그 문서의 모든 레코드와 `{docId}/` 아래 파일을 지운다(`REQ-BE-1.8.5`). 두 함수의 충족 기준과 테스트는 documents가 그 REQ로 소유한다.
 
 ## 실행 계약
 
@@ -295,7 +306,7 @@ export interface AssetViewData {
 | :--- | :--- | :--- | :--- | :--- |
 | `assets.prepared` | `prepareVersion` 끝 | info | `docId`, `version`, `tables`, `images`, `unmatched` | `REQ-BE-2.1` |
 | `assets.hint_failed` | 요약·캡션 요청 실패 | warning | `docId`, `version`, `placeholderId`, `code` | `REQ-BE-2.3.2` |
-| `assets.hints_done` | `generateHints` 끝 | info | `docId`, `version`, `generated`, `temporary`, `stopped` | `REQ-BE-2.3` |
+| `assets.hints_done` | `generateHints` 끝 | info | `docId`, `version`, `kind`, `generated`, `temporary`, `stopped`, `remaining` | `REQ-BE-2.3` |
 
 표 Markdown, 대체 텍스트, 요약·캡션은 로그에 넣지 않는다.
 
@@ -309,12 +320,15 @@ export interface AssetViewData {
 | `REQ-BE-2.2.1` | unit | 자리표시 치환과 나머지 보존 | | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.2.2` | unit | 자리표시 모양 문자열 깨뜨리기와 복원 왕복 | | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.2.3` | unit | 표·이미지 설명, 줄바꿈·`]]` 제거 | | `src/assets/**/*.spec.ts` |
-| `REQ-BE-2.3.1` | unit | 한 건씩 차례로 요청, `shouldContinue` 거짓에서 멈춤 | rag (가짜) | `src/assets/**/*.spec.ts` |
+| `REQ-BE-2.3.1` | unit | 받은 종류만 한 건씩 차례로 요청, 다른 종류는 `pending` 그대로, `shouldContinue` 거짓에서 멈춤 | rag (가짜) | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.3.2` | unit | 실패 시 임시 설명 | rag (가짜, 실패) | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.3.3` | unit | 짝 없는 이미지는 호출 없이 임시 설명 | rag (가짜) | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.3.4` | unit | 일부 실패에도 계속 | rag (가짜, 실패) | `src/assets/**/*.spec.ts` |
-| `REQ-BE-2.3.5` | unit | 끝나면 모든 자리표시의 문장 | rag (가짜) | `src/assets/**/*.spec.ts` |
-| `REQ-BE-2.3.6` | unit | 이어서 하기, 이어받기, 재색인 표시 | rag (가짜), `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |
+| `REQ-BE-2.3.5` | unit | `remaining`이 남은 `pending` 수, 0이면 모든 자리표시의 문장 | rag (가짜) | `src/assets/**/*.spec.ts` |
+| `REQ-BE-2.3.6` | unit | 이어서 하기, 이어받기에서 `pending` 유지, 재색인 표시, `pendingHints` | rag (가짜), `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |
+| `REQ-BE-2.3.7` | unit | `generateHints` 밖의 공개 메서드가 RAG Server를 부르지 않음, 추출 직후 모두 `pending` | rag (가짜) | `src/assets/**/*.spec.ts` |
+| `REQ-BE-1.9.9` (assets 쪽) | unit | `rebuildVersion`이 같은 원본 MD의 `prepareVersion`과 같은 색인용 MD·레코드를 만들고, 저장된 파일로 짝을 정하며 파일을 지우지 않음, 모두 `pending` | `MONGO_DB`, `FILE_STORE` (가짜) | `src/assets/**/*.spec.ts` |
+| `REQ-BE-1.4.4` (assets 쪽) | unit | `listViews`에서 `pending`은 `text` `null`·임시 아님 | `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.4.1` | e2e | 이미지 응답과 형식, 이어받은 버전 주소, 없는 ID `404` | | `test/` |
 | `REQ-BE-2.5.1` | unit | 표 복원 | `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |
 | `REQ-BE-2.5.2` | unit | 이미지·짝 없는 이미지 복원 | `MONGO_DB` (가짜) | `src/assets/**/*.spec.ts` |

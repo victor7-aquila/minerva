@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { RagUnavailableError } from '../../common';
+import { BatchIndexingError, RagUnavailableError } from '../../common';
 import { RagRequestError } from '../../rag';
 import type { RagSearchRequest, RagSearchResult } from '../../rag';
 import { createLogCapture } from '../../../test/support/log-capture';
@@ -489,6 +489,28 @@ describe('REQ-BE-10.1.2', () => {
     const err = new Error('boom');
     t.rag.search.mockRejectedValue(err);
     await expect(run({ query: 'q' })).rejects.toBe(err);
+  });
+});
+
+describe('REQ-BE-10.1.5', () => {
+  it('T-BATCH-1 BatchIndexingError는 같은 객체로 전파하고 RagUnavailableError로 바꾸지 않는다', async () => {
+    const err = new BatchIndexingError(7);
+    t.rag.search.mockRejectedValue(err);
+    const caught: unknown = await run({ query: 'q' }).catch((e: unknown) => e);
+    expect(caught).toBe(err);
+    expect(caught).toBeInstanceOf(BatchIndexingError);
+    expect((caught as BatchIndexingError).remainingJobs).toBe(7);
+    expect(caught).not.toBeInstanceOf(RagUnavailableError);
+    expect(doneLines()).toHaveLength(0);
+  });
+
+  it('T-BATCH-2 이름 범위가 비어 RAG Server를 부르지 않는 요청은 빈 결과 그대로다', async () => {
+    // ★ 일괄 색인 중이어도 RAG를 부르지 않는 경로는 거부와 무관하다
+    t.rag.search.mockRejectedValue(new BatchIndexingError(7));
+    t.documents.resolveNames.mockResolvedValue([]);
+    expect(await run({ query: 'q', names: ['없는 이름'] })).toEqual({ results: [] });
+    expect(await run({ query: 'q', names: [] })).toEqual({ results: [] });
+    expect(t.rag.search).not.toHaveBeenCalled();
   });
 });
 

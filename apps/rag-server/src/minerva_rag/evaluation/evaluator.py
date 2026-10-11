@@ -33,13 +33,17 @@ class Evaluator:
         self._searcher = searcher
         self._settings = settings
 
+    def validate(self, case: EvaluationCase) -> None:
+        """평가 입력만 검사한다. ★ search를 부르지 않는다. 비면 포함 비율이 0으로 나누기가 된다."""
+        if not strip_whitespace(case.answer_span):
+            raise InvalidRequestError("정답 원문 구간이 비어 있습니다")
+
     async def evaluate(self, case: EvaluationCase) -> EvaluationResult:
         """정답 문서를 확인하고 검색 한 번의 결과로 확장 전·후 지표를 계산한다."""
         started = time.perf_counter()
+        # ★ 검색 전에 막는다
+        self.validate(case)
         span = strip_whitespace(case.answer_span)
-        # ★ 검색 전에 막는다. 비면 포함 비율이 0으로 나누기가 된다
-        if not span:
-            raise InvalidRequestError("정답 원문 구간이 비어 있습니다")
         n = case.top_n if case.top_n is not None else self._settings.search_default_top_n
         doc = await self._searcher.document_chunks(case.doc_id)
         if doc.version is None:

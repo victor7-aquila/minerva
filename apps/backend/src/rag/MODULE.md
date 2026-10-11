@@ -7,13 +7,13 @@ RAG Server HTTP API(`apps/rag-server/API.md`)를 부르는 Backend의 유일한 
 **핵심 계약**
 
 - RAG Server 호출은 이 모듈만 한다. 모든 호출에 API 토큰 헤더와 시간 제한이 붙는다 (`REQ-BE-10.1.1`, `REQ-BE-10.1.3`, `REQ-BE-10.1.4`, `ARCHITECT.md` 「의존 규칙」)
-- 응답하지 않음·시간 초과·`503`은 모두 `RagUnavailableError`다. 그 밖의 오류 응답은 RAG Server의 오류 코드를 담은 `RagRequestError`로 넘겨, 부른 모듈이 코드로 판단한다 (`REQ-BE-10.1.2`)
+- 응답하지 않음·시간 초과·`503`은 모두 `RagUnavailableError`다. 단, 오류 코드가 `BATCH_INDEXING`인 `503`은 남은 작업 수를 담은 `BatchIndexingError`다. 그 밖의 오류 응답은 RAG Server의 오류 코드를 담은 `RagRequestError`로 넘겨, 부른 모듈이 코드로 판단한다 (`REQ-BE-10.1.2`, `REQ-BE-10.1.5`)
 
 **기능 그룹**
 
 | REQ | 기능 그룹 | 책임 |
 | :--- | :--- | :--- |
-| `REQ-BE-10.1` | RAG Server 호출 | RAG Server API를 타입이 붙은 메서드로 제공하고, 주소·토큰·시간 제한·오류 변환을 지킨다 |
+| `REQ-BE-10.1` | RAG Server 호출 | RAG Server API를 타입이 붙은 메서드로 제공하고, 주소·토큰·시간 제한·오류 변환(일괄 색인 중 거부 포함)을 지킨다 |
 
 **비범위**
 
@@ -47,16 +47,16 @@ src/rag/**/*.spec.ts
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | RAG Server | HTTP | 모든 엔드포인트, `X-Minerva-Token` | `apps/rag-server/API.md` | `REQ-BE-10.1` |
-| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`, `RAG_WAIT_TIMEOUT_MS`), `RagUnavailableError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-10.1`, `REQ-BE-8.2.1` |
+| common | DI | `ConfigService`(`RAG_SERVER_URL`, `RAG_SERVER_API_TOKEN`, `RAG_TIMEOUT_MS`, `RAG_CAPTION_TIMEOUT_MS`, `RAG_WAIT_TIMEOUT_MS`), `RagUnavailableError`, `BatchIndexingError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-10.1`, `REQ-BE-8.2.1` |
 
 ### 공개 표면
 
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
 | RAG Server 호출 | `RagModule`, `RagClient`, `RagRequestError` | 「RAG Server 호출 — REQ-BE-10.1」 | `REQ-BE-10.1` |
-| RAG Server 호출 | `RagIndexJobAccepted`, `RagIndexJob`, `RagIndexState`, `RagDocumentChunks`, `RagSearchResult`, `RagEvaluationResult` 등 응답 타입 | `apps/rag-server/API.md` 「공용 모델」 | `REQ-BE-10.1` |
+| RAG Server 호출 | `RagIndexJobAccepted`, `RagIndexJob`, `RagJobStage`, `RagIndexState`, `RagDocumentChunks`, `RagSearchResult`, `RagEvaluationResult` 등 응답 타입 | `apps/rag-server/API.md` 「공용 모델」 | `REQ-BE-10.1` |
 
-응답 타입은 `apps/rag-server/API.md`의 공용 모델을 TypeScript로 옮긴 것이며, 필드 이름은 camelCase로 바꾼다. 필드의 뜻은 그 문서가 소유한다.
+응답 타입은 `apps/rag-server/API.md`의 공용 모델을 TypeScript로 옮긴 것이며, 필드 이름은 camelCase로 바꾼다. 필드의 뜻과 허용값은 그 문서가 소유한다 — 예를 들어 `RagJobStage`는 `IndexJob.stage`의 값 목록(`embedding_pending` 포함)과 같다.
 
 ## 기능 그룹별 요구사항
 
@@ -100,7 +100,7 @@ export class RagClient {
 
 **`REQ-BE-10.1.2`** 응답하지 않거나 준비 중이면 오류
 
-- 처리 계약: 연결 실패, 시간 초과, `503` 응답은 `RagUnavailableError`로 바꾼다. 그 밖의 `4xx`·`5xx`는 응답 본문의 `error.code`로 `RagRequestError`를 낸다. 이 모듈은 다시 시도하지 않는다
+- 처리 계약: 연결 실패, 시간 초과, `503` 응답(`REQ-BE-10.1.5`의 `BATCH_INDEXING` 제외)은 `RagUnavailableError`로 바꾼다. 그 밖의 `4xx`·`5xx`는 응답 본문의 `error.code`로 `RagRequestError`를 낸다. 이 모듈은 다시 시도하지 않는다
 - 충족 기준: 연결 거부·시간 초과·`503 SERVER_NOT_READY`에서 `RagUnavailableError`가, `409 DOCUMENT_NOT_SEARCHABLE`에서 `code`가 그 값인 `RagRequestError`가 난다
 
 **`REQ-BE-10.1.3`** 호출마다 시간 제한
@@ -112,6 +112,11 @@ export class RagClient {
 
 - 충족 기준: 모든 요청의 `X-Minerva-Token` 헤더가 `RAG_SERVER_API_TOKEN`과 같다
 
+**`REQ-BE-10.1.5`** 일괄 색인 중 거부를 남은 작업 수와 함께 알림
+
+- 처리 계약: `503` 응답의 `error.code`가 `BATCH_INDEXING`이면 `error.details.remaining_jobs`를 `remainingJobs`로 담은 `BatchIndexingError`를 낸다(`apps/rag-server/API.md` 「오류 코드」, 루트 `IF-3`). 이 오류를 AI 에이전트·개발 도구에 전하는 일은 search가, 평가 실패로 기록하는 일은 evaluation이 한다(`REQ-BE-5.2.9`)
+- 충족 기준: `search`·`evaluate`가 `503`과 `{"error": {"code": "BATCH_INDEXING", "details": {"remaining_jobs": 7}}}`를 받으면 `remainingJobs`가 7인 `BatchIndexingError`를 내고, 코드가 `SERVER_NOT_READY`인 `503`은 여전히 `RagUnavailableError`다
+
 ## 실행 계약
 
 ### 설정
@@ -122,7 +127,8 @@ export class RagClient {
 
 | 예외 | 발생 조건 | 코드 | 처리 책임 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| `RagUnavailableError` | 연결 실패, 시간 초과, `503` | `RAG_UNAVAILABLE` | 발생: rag. 부른 모듈이 그대로 전파하거나 상태로 바꾼다 | `REQ-BE-10.1.2` |
+| `RagUnavailableError` | 연결 실패, 시간 초과, `503`(`BATCH_INDEXING` 제외) | `RAG_UNAVAILABLE` | 발생: rag. 부른 모듈이 그대로 전파하거나 상태로 바꾼다 | `REQ-BE-10.1.2` |
+| `BatchIndexingError` | `503` `BATCH_INDEXING` | `BATCH_INDEXING` | 발생: rag. search가 전파하고, evaluation이 평가 실패로 바꾼다 | `REQ-BE-10.1.5` |
 | `RagRequestError` | 그 밖의 오류 응답 | 경계 밖으로 그대로 나가지 않는다 | 발생: rag. 부른 모듈이 `code`로 판단한다 | `REQ-BE-10.1.2` |
 
 ### 로그
@@ -141,3 +147,4 @@ export class RagClient {
 | `REQ-BE-10.1.2` | unit | 연결 거부·시간 초과·503은 `RagUnavailableError`, 그 밖은 `RagRequestError`와 코드 | RAG Server (가짜 HTTP) | `src/rag/**/*.spec.ts` |
 | `REQ-BE-10.1.3` | unit | 요약·캡션, 삭제·이름 변경, 나머지의 시간 제한과 `signal` 중단 | RAG Server (가짜 HTTP, 지연) | `src/rag/**/*.spec.ts` |
 | `REQ-BE-10.1.4` | unit | 모든 요청의 토큰 헤더 | RAG Server (가짜 HTTP) | `src/rag/**/*.spec.ts` |
+| `REQ-BE-10.1.5` | unit | `503 BATCH_INDEXING`은 `details.remaining_jobs`를 담은 `BatchIndexingError`, 다른 `503`은 `RagUnavailableError` | RAG Server (가짜 HTTP) | `src/rag/**/*.spec.ts` |

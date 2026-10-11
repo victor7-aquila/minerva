@@ -13,13 +13,14 @@ from minerva_rag.core import (
     JobNotFoundError,
     MinervaError,
     ModelUnavailableError,
+    ServerNotReadyError,
     Settings,
     StoreUnavailableError,
     VectorDimensionMismatchError,
 )
 from minerva_rag.indexing import Indexer, IndexInput
 from minerva_rag.service import IndexService, JobState
-from minerva_rag.service.jobs import IndexOutcome, JobFailure, JobManager, JobStage
+from minerva_rag.service.jobs import CurrentIndex, IndexOutcome, JobFailure, JobManager, JobStage
 
 from .fakes import (
     FakeChunker,
@@ -243,32 +244,96 @@ def test_extra_assets_allowed(settings: Settings) -> None:
     go(scenario())
 
 
+@pytest.mark.req("REQ-RAG-10.3.1")
+@pytest.mark.parametrize("outcome", ["queued", "joined", "reused"])
+def test_note_index_request_each_decision(outcome: str) -> None:
+    """[REQ-RAG-10.3.1] 세 결정(submit·join·reuse) 모두 note_index_request가 한 번이고
+    체크섬보다 먼저다."""
+    timeline: Timeline = []
+    service, _, _, queue = _queue_service(timeline)
+    request = index_request()
+    if outcome == "joined":
+        queue.open_job_id = "job-open"
+    elif outcome == "reused":
+        checksum = FakeIndexer().checksum(request.markdown, request.assets, request.chunking.value)
+        queue.current = CurrentIndex("job-cur", request.version, checksum)
+
+    accepted = go(service.submit(request))
+
+    assert accepted.outcome == outcome
+    names = [entry[0] for entry in timeline]
+    assert names.count("queue.note") == 1
+    # ★ 체크섬 계산(Indexer.checksum)과 열린 작업 조회보다 먼저다
+    assert names.index("queue.note") < names.index("checksum")
+    assert names.index("queue.note") < names.index("queue.find_open")
+
+
+@pytest.mark.req("REQ-RAG-10.3.1")
+def test_note_skipped_when_not_ready() -> None:
+    """[REQ-RAG-10.3.1] 준비 확인에서 막히면 note_index_request를 부르지 않는다(준비 확인이
+    먼저)."""
+    timeline: Timeline = []
+    queue = FakeJobQueue(timeline)
+    service = IndexService(
+        cast(Chunker, FakeChunker(timeline)),
+        cast(Indexer, FakeIndexer(timeline)),
+        cast(JobManager, queue),
+        ReadyStub(False),
+    )
+
+    with pytest.raises(ServerNotReadyError):
+        go(service.submit(index_request()))
+
+    assert ("queue.note",) not in timeline
+
+
 @pytest.mark.req("REQ-RAG-10.3.2")
-def test_runner_order() -> None:
-    """[REQ-RAG-10.3.2] 러너는 단계 알림, 청킹, 임베딩, prepared, 저장 순으로 부르고 결과가 같다."""
+def test_index_runner_only_splits() -> None:
+    """[REQ-RAG-10.3.2] IndexRunner는 청킹만 하고 임베딩·저장 없이 EmbedRunner를 돌려준다."""
+    timeline: Timeline = []
+    service, _, indexer, queue = _queue_service(timeline)
+    request = index_request(chunking=ChunkingMode.RULE, name="이름")
+
+    async def scenario() -> object:
+        await service.submit(request)
+        timeline.clear()
+        return await queue.runners[0](FakeReporter("job-x", timeline))
+
+    embed_run = go(scenario())
+
+    assert callable(embed_run)
+    assert timeline == [
+        ("stage", JobStage.CHUNKING),
+        ("split", request.markdown, ChunkingMode.RULE),
+    ]
+    assert indexer.embedded == []
+
+
+@pytest.mark.req("REQ-RAG-10.3.2")
+def test_embed_runner_order() -> None:
+    """[REQ-RAG-10.3.2] EmbedRunner는 단계 알림, 임베딩, prepared, 단계 알림, 저장 순으로 부르고
+    결과가 같다."""
     timeline: Timeline = []
     service, chunker, indexer, queue = _queue_service(timeline)
     request = index_request(chunking=ChunkingMode.RULE, name="이름")
 
     async def scenario() -> IndexOutcome:
         await service.submit(request)
+        embed_run = await queue.runners[0](FakeReporter("job-x", timeline))
         timeline.clear()
-        reporter = FakeReporter("job-x", timeline)
-        return await queue.runners[0](reporter)
+        return await embed_run(FakeReporter("job-x", timeline))
 
     outcome = go(scenario())
 
     names = [entry[0] for entry in timeline]
-    assert names == ["stage", "split", "stage", "embed", "prepared", "stage", "write"]
+    assert names == ["stage", "embed", "prepared", "stage", "write"]
     assert [entry[1] for entry in timeline if entry[0] == "stage"] == [
-        JobStage.CHUNKING,
         JobStage.EMBEDDING,
         JobStage.STORING,
     ]
     assert outcome == IndexOutcome(3, True)  # 레코드 3개, 청킹 결과의 fallback_used
-    assert timeline[4] == ("prepared", outcome)
-    assert timeline[1] == ("split", request.markdown, ChunkingMode.RULE)
-    inp = timeline[3][1]
+    assert timeline[2] == ("prepared", outcome)
+    inp = timeline[1][1]
     assert isinstance(inp, IndexInput)
     assert inp.job_id == "job-x"
     assert inp.doc_id == request.doc_id
@@ -278,15 +343,17 @@ def test_runner_order() -> None:
     assert inp.name == "이름"
     assert inp.edition == request.edition
     assert inp.chunking_mode == "rule"
+    # embed는 분할이 만든 청킹 결과를 받는다
+    assert indexer.chunking_results[0] is chunker.result
     # 저장은 embed가 돌려준 결과를 받는다
-    assert timeline[6][1] is indexer.embedded[0]
+    assert timeline[4][1] is indexer.embedded[0]
     assert all(record.job_id == "job-x" for record in indexer.embedded[0].records)
-    assert chunker.result.fallback_used is True
 
 
 @pytest.mark.req("REQ-RAG-10.3.3")
 def test_chunking_failure_skips_indexing() -> None:
-    """[REQ-RAG-10.3.3] 청킹이 실패하면 CHUNKING_FAILED(위치 포함)이고 색인하지 않는다."""
+    """[REQ-RAG-10.3.3] 청킹이 실패하면 IndexRunner가 CHUNKING_FAILED(위치 포함)를 내고
+    EmbedRunner를 주지 않는다."""
     timeline: Timeline = []
     service, chunker, _, queue = _queue_service(timeline)
     location = FailureLocation(("설치", "Docker"), "t1")
@@ -356,9 +423,10 @@ def test_store_failure_keeps_previous() -> None:
 
     async def scenario() -> JobFailure:
         await service.submit(index_request())
+        embed_run = await queue.runners[0](FakeReporter("job-x", timeline))
         timeline.clear()
         with pytest.raises(JobFailure) as caught:
-            await queue.runners[0](FakeReporter("job-x", timeline))
+            await embed_run(FakeReporter("job-x", timeline))
         return caught.value
 
     failure = go(scenario())
@@ -388,6 +456,36 @@ def test_resource_errors_mapped(error: MinervaError, code: str) -> None:
 
     async def scenario() -> JobFailure:
         await service.submit(index_request())
+        embed_run = await queue.runners[0](FakeReporter("job-x", timeline))
+        timeline.clear()
+        with pytest.raises(JobFailure) as caught:
+            await embed_run(FakeReporter("job-x", timeline))
+        return caught.value
+
+    failure = go(scenario())
+
+    assert failure.code == code
+    assert "write" not in [entry[0] for entry in timeline]
+
+
+@pytest.mark.req("REQ-RAG-10.3.3")
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (ModelUnavailableError(), "MODEL_UNAVAILABLE"),
+        (StoreUnavailableError(), "STORE_UNAVAILABLE"),
+        (VectorDimensionMismatchError(), "VECTOR_DIMENSION_MISMATCH"),
+    ],
+)
+def test_index_runner_resource_error(error: MinervaError, code: str) -> None:
+    """[REQ-RAG-10.3.3] 분할 중 resource 오류는 그 코드의 JobFailure가 되고 EmbedRunner를 주지
+    않는다."""
+    timeline: Timeline = []
+    service, chunker, _, queue = _queue_service(timeline)
+    chunker.error = error
+
+    async def scenario() -> JobFailure:
+        await service.submit(index_request())
         timeline.clear()
         with pytest.raises(JobFailure) as caught:
             await queue.runners[0](FakeReporter("job-x", timeline))
@@ -396,7 +494,9 @@ def test_resource_errors_mapped(error: MinervaError, code: str) -> None:
     failure = go(scenario())
 
     assert failure.code == code
-    assert "write" not in [entry[0] for entry in timeline]
+    names = [entry[0] for entry in timeline]
+    assert "embed" not in names
+    assert "write" not in names
 
 
 @pytest.mark.req("REQ-RAG-10.8.2.4")

@@ -141,7 +141,10 @@ describe('REQ-BE-1.10.8', () => {
 
     // ★ 기동 처리는 색인을 요청하지 않는다. 기동 처리가 끝났다는 신호(documents.resume 로그)를 기다린다
     await waitFor(() => capture.parsed().some((line) => line.msg === 'documents.resume'));
-    expect(capture.parsed().filter((line) => line.msg === 'documents.resume')).toHaveLength(1);
+    const resumed = capture.parsed().filter((line) => line.msg === 'documents.resume');
+    expect(resumed).toHaveLength(1);
+    // ★ 대기열 문서는 기동 처리 대상이 아니다 — 업로드됨·요약·캡션 생성 중 문서가 없으므로 둘 다 0이다
+    expect(resumed[0]).toMatchObject({ uploaded: 0, captioning: 0 });
     expect(indexRequestCount(docId)).toBe(0);
     const row = await harness.db.collection('documents').findOne({ docId });
     expect(row?.queuedVersion).toBe('1');
@@ -157,6 +160,100 @@ describe('REQ-BE-1.10.8', () => {
     });
     const after = await harness.db.collection('documents').findOne({ docId });
     expect(after?.queuedVersion).toBeNull();
+  });
+});
+
+/** MD 하나를 올려 대기열에 들어간 doc_id를 돌려준다. */
+async function uploadQueued(baseUrl: string, name: string): Promise<string> {
+  const upload = await request(baseUrl)
+    .post('/v1/documents')
+    .attach('files', Buffer.from('# 제목\n\n본문', 'utf8'), 'a.md')
+    .field('meta', JSON.stringify([{ file_name: 'a.md', name }]));
+  expect(upload.status).toBe(201);
+  const docId = (upload.body as { documents: Array<{ doc_id: string }> }).documents[0].doc_id;
+  await waitFor(async () => {
+    const body = (await request(baseUrl).get(`/v1/documents/${docId}`)).body as {
+      processing_state: string;
+      in_index_queue: unknown;
+    };
+    return body.processing_state === 'queued' && body.in_index_queue === true;
+  });
+  return docId;
+}
+
+/** 요약·캡션 요청(/v1/captions/*)의 수다. */
+function captionRequestCount(): number {
+  return fake.requests.filter((r) => r.url.startsWith('/v1/captions/')).length;
+}
+
+describe('REQ-BE-1.9.12', () => {
+  it('T-E2E-RESTART-2 요약·캡션 생성 중으로 남은 채 다시 뜨면 대기열(queued)로 돌아가고 기동 때 요약·캡션·색인 요청이 없다', async () => {
+    harness = await bootApp();
+    const first = `http://127.0.0.1:${harness.port}`;
+    const docId = await uploadQueued(first, 'restart-captioning');
+    // ★ 예약 색인이 요약·캡션을 만들다 끊긴 상태를 만든다 (captioning, 대기열 밖)
+    await harness.db
+      .collection('documents')
+      .updateOne({ docId }, { $set: { processingState: 'captioning', queuedVersion: null } });
+
+    await harness.close();
+    harness = undefined;
+    capture.clear();
+    harness = await bootApp();
+    const second = `http://127.0.0.1:${harness.port}`;
+    await waitFor(() => capture.parsed().some((line) => line.msg === 'documents.resume'));
+
+    const row = await harness.db.collection('documents').findOne({ docId });
+    expect(row?.processingState).toBe('queued');
+    expect(row?.queuedVersion).toBe('1');
+    const resumed = capture.parsed().filter((line) => line.msg === 'documents.resume');
+    expect(resumed[0]).toMatchObject({ captioning: 1 });
+    const detail = (await request(second).get(`/v1/documents/${docId}`)).body as {
+      processing_state: string;
+      in_index_queue: boolean | null;
+    };
+    expect(detail).toMatchObject({ processing_state: 'queued', in_index_queue: true });
+    expect(captionRequestCount()).toBe(0);
+    expect(indexRequestCount(docId)).toBe(0);
+  });
+});
+
+describe('REQ-BE-1.9.9', () => {
+  it('T-E2E-RESTART-3 업로드됨으로 남은 채 다시 뜨면 표·이미지와 색인용 MD를 다시 만들어 대기열(queued)로 돌아가고 요약·색인 요청이 없다', async () => {
+    harness = await bootApp();
+    const first = `http://127.0.0.1:${harness.port}`;
+    const docId = await uploadQueued(first, 'restart-uploaded');
+    // ★ 업로드 응답 뒤 색인 대기 갱신이 끊긴 상태를 만든다 (uploaded, 대기열 밖)
+    await harness.db
+      .collection('documents')
+      .updateOne({ docId }, { $set: { processingState: 'uploaded', queuedVersion: null } });
+    // ★ 색인용 MD도 아직 못 만든 상태로 비워 둔다. 재시작 뒤 채워졌는지로 "다시 만들었다"를 직접 본다
+    await harness.db
+      .collection('document_versions')
+      .updateOne({ docId, version: '1' }, { $set: { indexingMarkdown: null } });
+    const before = await harness.db
+      .collection('document_versions')
+      .findOne({ docId, version: '1' });
+    expect(before?.indexingMarkdown).toBeNull();
+
+    await harness.close();
+    harness = undefined;
+    capture.clear();
+    harness = await bootApp();
+    await waitFor(() => capture.parsed().some((line) => line.msg === 'documents.resume'));
+
+    const row = await harness.db.collection('documents').findOne({ docId });
+    expect(row?.processingState).toBe('queued');
+    expect(row?.queuedVersion).toBe('1');
+    const version = await harness.db
+      .collection('document_versions')
+      .findOne({ docId, version: '1' });
+    expect(typeof version?.indexingMarkdown).toBe('string');
+    expect(version?.indexingMarkdown).not.toBe('');
+    const resumed = capture.parsed().filter((line) => line.msg === 'documents.resume');
+    expect(resumed[0]).toMatchObject({ uploaded: 1 });
+    expect(captionRequestCount()).toBe(0);
+    expect(indexRequestCount(docId)).toBe(0);
   });
 });
 

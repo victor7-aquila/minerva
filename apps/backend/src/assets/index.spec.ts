@@ -1,5 +1,4 @@
 import 'reflect-metadata';
-import { LogsModule } from '../logs';
 import { RagModule } from '../rag';
 import { StorageModule } from '../storage';
 import { AssetsController } from './controllers/assets.controller';
@@ -9,6 +8,7 @@ import type {
   AssetKind,
   AssetViewData,
   HintContext,
+  HintKind,
   HintRunResult,
   PreparedVersion,
   UploadedImage,
@@ -19,7 +19,7 @@ type Equals<A, B> =
   (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 const assertType = <T extends true>(): T => true as T;
 
-/** AssetsService의 열 가지 메서드 시그니처를 assets MODULE.md 「기능 그룹별 요구사항」의 AssetsService 시그니처와 같은 함수 타입에 대입한다. 컴파일되면 통과다. */
+/** AssetsService의 열두 가지 메서드 시그니처를 assets MODULE.md 「기능 그룹별 요구사항」의 AssetsService 시그니처와 같은 함수 타입에 대입한다. 컴파일되면 통과다. */
 function signatureChecks(svc: AssetsService): unknown[] {
   const prepare: (
     docId: string,
@@ -27,8 +27,15 @@ function signatureChecks(svc: AssetsService): unknown[] {
     markdown: string,
     images: readonly UploadedImage[],
   ) => Promise<PreparedVersion> = svc.prepareVersion.bind(svc);
-  const generate: (docId: string, version: string, ctx: HintContext) => Promise<HintRunResult> =
-    svc.generateHints.bind(svc);
+  const generate: (
+    docId: string,
+    version: string,
+    kind: HintKind,
+    ctx: HintContext,
+  ) => Promise<HintRunResult> = svc.generateHints.bind(svc);
+  const rebuild: (docId: string, version: string, markdown: string) => Promise<PreparedVersion> =
+    svc.rebuildVersion.bind(svc);
+  const pending: (docId: string, version: string) => Promise<number> = svc.pendingHints.bind(svc);
   const inherit: (
     docId: string,
     fromVersion: string,
@@ -53,7 +60,20 @@ function signatureChecks(svc: AssetsService): unknown[] {
   const restore: (docId: string, version: string, text: string) => Promise<string> =
     svc.restore.bind(svc);
   const remove: (docId: string) => Promise<void> = svc.deleteDocument.bind(svc);
-  return [prepare, generate, inherit, mark, hints, views, urls, read, restore, remove];
+  return [
+    prepare,
+    rebuild,
+    pending,
+    generate,
+    inherit,
+    mark,
+    hints,
+    views,
+    urls,
+    read,
+    restore,
+    remove,
+  ];
 }
 
 describe('REQ-BE-2.4.1', () => {
@@ -62,9 +82,10 @@ describe('REQ-BE-2.4.1', () => {
     expect(Object.keys(barrel).sort()).toEqual(['AssetsModule', 'AssetsService']);
   });
 
-  it('T-SURF-3 AssetsModule은 storage·rag·logs를 가져오고 컨트롤러와 AssetsService를 노출한다', () => {
+  it('T-SURF-3 AssetsModule은 storage·rag 둘만 가져오고(logs 없음) 컨트롤러와 AssetsService를 노출한다', () => {
     const imports = Reflect.getMetadata('imports', AssetsModule) as unknown[];
-    expect(imports).toEqual(expect.arrayContaining([StorageModule, RagModule, LogsModule]));
+    expect(imports).toHaveLength(2);
+    expect(imports).toEqual(expect.arrayContaining([StorageModule, RagModule]));
     expect(Reflect.getMetadata('controllers', AssetsModule)).toEqual([AssetsController]);
     expect(Reflect.getMetadata('exports', AssetsModule)).toEqual([AssetsService]);
   });
@@ -88,6 +109,19 @@ describe('REQ-BE-2.1.1', () => {
       >(),
     ).toBe(true);
     expect(assertType<Equals<AssetKind, 'table' | 'image'>>()).toBe(true);
+    expect(assertType<Equals<HintKind, 'table' | 'image'>>()).toBe(true);
+    // ★ 키 집합: HintContext는 shouldContinue 하나, HintRunResult는 넷
+    expect(assertType<Equals<keyof HintContext, 'shouldContinue'>>()).toBe(true);
+    expect(
+      assertType<
+        Equals<keyof HintRunResult, 'generated' | 'temporary' | 'stopped' | 'remaining'>
+      >(),
+    ).toBe(true);
+    // 메서드 인자 수: generateHints 넷, rebuildVersion 셋, pendingHints 둘
+    const proto = AssetsService.prototype;
+    expect(proto.generateHints.length).toBe(4);
+    expect(proto.rebuildVersion.length).toBe(3);
+    expect(proto.pendingHints.length).toBe(2);
 
     // 필드 전부를 가진 리터럴은 컴파일되고, 필드가 하나 더 있으면 컴파일 오류다
     const image: UploadedImage = {
@@ -96,12 +130,8 @@ describe('REQ-BE-2.1.1', () => {
       data: Buffer.alloc(0),
     };
     const prepared: PreparedVersion = { indexingMarkdown: '', unmatchedImages: [], assetCount: 0 };
-    const run: HintRunResult = { generated: 0, temporary: 0, stopped: false };
-    const context: HintContext = {
-      name: 'n',
-      editionLabel: null,
-      shouldContinue: async () => true,
-    };
+    const run: HintRunResult = { generated: 0, temporary: 0, stopped: false, remaining: 0 };
+    const context: HintContext = { shouldContinue: async () => true };
     const view: AssetViewData = {
       placeholderId: 't1',
       kind: 'table',
@@ -128,6 +158,8 @@ describe('REQ-BE-2.1.1', () => {
         'constructor',
         'onModuleInit',
         'prepareVersion',
+        'rebuildVersion',
+        'pendingHints',
         'generateHints',
         'inheritVersion',
         'markTemporaryForRegeneration',
@@ -142,10 +174,12 @@ describe('REQ-BE-2.1.1', () => {
   });
 
   // ★ contract 도구가 없어 공개 메서드가 몰래 사라지거나 함수가 아니게 되지 않는지 여기서 보완 검증한다.
-  // 공개 메서드 11개만 본다 — private 내부 메서드 이름은 구현 자유라 고정하지 않는다
-  it('T-PR3-SURF-1 AssetsService 프로토타입에 계획한 공개 메서드 11개가 모두 함수로 있다', () => {
+  // 공개 메서드 13개만 본다 — private 내부 메서드 이름은 구현 자유라 고정하지 않는다
+  it('T-PR3-SURF-1 AssetsService 프로토타입에 계획한 공개 메서드 13개가 모두 함수로 있다', () => {
     const publicMethods = [
       'prepareVersion',
+      'rebuildVersion',
+      'pendingHints',
       'generateHints',
       'inheritVersion',
       'markTemporaryForRegeneration',
@@ -160,6 +194,7 @@ describe('REQ-BE-2.1.1', () => {
     const proto = AssetsService.prototype as unknown as Record<string, unknown>;
     const missing = publicMethods.filter((name) => typeof proto[name] !== 'function');
     expect(missing).toEqual([]);
+    expect(publicMethods).toHaveLength(13);
   });
 });
 
@@ -174,6 +209,17 @@ describe('REQ-BE-1.4.4', () => {
         >
       >(),
     ).toBe(true);
+    // ★ pending이면 text가 null이다
+    const pendingView: AssetViewData = {
+      placeholderId: 't1',
+      kind: 'table',
+      tableMarkdown: '',
+      imageUrl: null,
+      text: null,
+      isTemporary: false,
+    };
+    expect(pendingView.text).toBeNull();
+    expect(assertType<Equals<AssetViewData['text'], string | null>>()).toBe(true);
     expect(
       assertType<
         Equals<keyof PreparedVersion, 'indexingMarkdown' | 'unmatchedImages' | 'assetCount'>

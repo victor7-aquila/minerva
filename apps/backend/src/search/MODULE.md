@@ -9,6 +9,7 @@ AI 에이전트·개발 도구의 검색 요청을 RAG Server에 넘기고, 결�
 - 결과의 자리표시는 RAG Server가 그 결과에 붙인 버전의 표·이미지로 복원한다. 새 버전 처리 중이어도 검색되는 버전의 표·이미지가 나온다 (`REQ-BE-4.2.1`, `REQ-BE-2.5.3`)
 - 삭제됨·교체됨 문서의 결과는 RAG Server에서 지워지기 전이라도 응답에서 뺀다 (`REQ-BE-4.2.2`)
 - 답변 문장을 만들지 않는다. 이 모듈은 LLM을 부르지 않는다 (`REQ-BE-4.1.3`)
+- RAG Server가 일괄 색인 중이라 검색을 거부하면 `BatchIndexingError`를 다른 오류로 바꾸지 않고 그대로 던져, AI 에이전트·개발 도구가 `503 BATCH_INDEXING`과 남은 작업 수를 받게 한다 (`REQ-BE-10.1.5`, 루트 `IF-3`)
 
 **기능 그룹**
 
@@ -49,7 +50,7 @@ test/search.e2e-spec.ts
 | documents | DI | `resolveNames`, `visibleDocIds` | documents `MODULE.md` | `REQ-BE-4.1.2`, `REQ-BE-4.2.2` |
 | assets | DI | `restore` | assets `MODULE.md` | `REQ-BE-4.2.1` |
 | rag | DI | `RagClient.search` | rag `MODULE.md` | `REQ-BE-4.1.2` |
-| common | DI·import | `RagUnavailableError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-4`, `REQ-BE-8.2.1` |
+| common | DI·import | `RagUnavailableError`, `BatchIndexingError`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-4`, `REQ-BE-8.2.1`, `REQ-BE-10.1.5` |
 
 ### 공개 표면
 
@@ -102,6 +103,9 @@ test/search.e2e-spec.ts
 | :--- | :--- | :--- | :--- | :--- |
 | `RagUnavailableError` | RAG Server가 응답하지 않거나 준비 중 | `RAG_UNAVAILABLE` | 발생: rag. 전파: search | `REQ-BE-10.1.2` |
 | `RagRequestError` | RAG Server가 그 밖의 오류로 응답 | `RAG_UNAVAILABLE` | 발생: rag. search가 `RagUnavailableError`로 바꿔 던진다 | `REQ-BE-10.1.2` |
+| `BatchIndexingError` | RAG Server가 일괄 색인 중이라 검색을 거부(`503 BATCH_INDEXING`) | `BATCH_INDEXING` (`API.md`의 `POST /v1/search`) | 발생: rag. 전파: search(바꾸지 않는다). 변환: api | `REQ-BE-10.1.5` |
+
+충족 기준(`REQ-BE-10.1.5`의 search 쪽): RAG Server가 검색을 `503 BATCH_INDEXING`으로 거부하면 `POST /v1/search`가 `503`과 오류 코드 `BATCH_INDEXING`, RAG Server가 준 남은 작업 수와 같은 `details.remaining_jobs`로 응답한다. 이름 범위가 비어 RAG Server를 부르지 않는 요청(`REQ-BE-4.1.2`)은 그대로 빈 결과다.
 
 ### 로그
 
@@ -123,3 +127,4 @@ test/search.e2e-spec.ts
 | `REQ-BE-4.2.1` | unit | 결과 버전으로 복원 | rag·assets (가짜) | `src/search/**/*.spec.ts` |
 | `REQ-BE-4.2.2` | unit | 삭제됨·교체됨 제거와 순위 다시 매김 | documents·rag (가짜) | `src/search/**/*.spec.ts` |
 | `REQ-BE-4.2.3` | unit | 결과 필드, 버전 필드 없음 | rag (가짜) | `src/search/**/*.spec.ts` |
+| `REQ-BE-10.1.5` (search 쪽) | e2e | RAG Server가 `503 BATCH_INDEXING`과 남은 작업 수를 주면 `POST /v1/search`가 `503 BATCH_INDEXING`과 같은 `details.remaining_jobs`를 준다 | RAG Server (가짜) | `test/search.e2e-spec.ts` |

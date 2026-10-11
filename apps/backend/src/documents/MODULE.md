@@ -1,6 +1,6 @@
 # documents 모듈 명세 (REQ-BE-1)
 
-문서를 올리고, 이름·판으로 묶고, 고치고, 다시 올리고, 재색인하고, 지운다. 처리 상태·검색 상태·색인 대기열과 교체를 바꾸는 유일한 모듈이며, 표·이미지 처리(assets)를 부르고, 색인할 준비가 된 버전을 색인 대기열에 넣어 예약 색인 때 색인 연동(indexing)을 부르고, 그 결과로 상태를 반영한다. 기동 때 끊긴 처리를 잇고, 예약 색인·상태 맞추기·RAG Server 재요청을 정해진 일정과 주기로 돌린다. 폴더는 `apps/backend/src/documents`다.
+문서를 올리고, 이름·판으로 묶고, 고치고, 다시 올리고, 재색인하고, 지운다. 처리 상태·검색 상태·색인 대기열과 교체를 바꾸는 유일한 모듈이며, 표·이미지 추출(assets)을 부르고, 색인용 MD를 만든 버전을 색인 대기열에 넣어 예약 색인 때 요약·캡션 생성(assets)과 색인 연동(indexing)을 차례로 부르고, 그 결과로 상태를 반영한다. 기동 때 끊긴 처리를 잇고, 예약 색인·상태 맞추기·RAG Server 재요청을 정해진 일정과 주기로 돌린다. 폴더는 `apps/backend/src/documents`다.
 
 ## 요약
 
@@ -8,7 +8,8 @@
 
 - 처리 상태·검색 상태·색인 대기열·교체·삭제됨 표시는 이 모듈만 쓴다. 상태를 바꾸는 쓰기는 "현재 상태가 X일 때만"을 조건으로 한 번에 갱신해, 검사와 쓰기 사이에 다른 요청이 끼어들지 못하게 한다 (`REQ-BE-1.5.5`, `REQ-BE-1.9`, `ARCHITECT.md` 「의존 규칙」)
 - 색인 대기열은 `Document.queuedVersion`이다. 대기열에 넣고 빼는 일은 처리 상태를 바꾸는 갱신과 같은 갱신에서 한다 — 처리 상태만 바뀌고 대기열이 그대로인 문서가 생기지 않는다 (`REQ-BE-1.10.2`, `REQ-BE-1.10.7`, `REQ-BE-1.10.8`)
-- RAG Server에 색인을 요청하는 곳은 예약 색인 하나다. 업로드·편집·재색인·실패 되돌리기는 색인 대기열에 넣기까지만 한다 (`REQ-BE-1.10.1`)
+- RAG Server에 요약·캡션과 색인을 요청하게 하는 곳은 예약 색인 하나다. 업로드·내용 다시 올리기·편집·재색인·실패 되돌리기·기동 처리는 색인 대기열에 넣기까지만 한다 (`REQ-BE-1.10.1`, `REQ-BE-2.3.7`)
+- 예약 색인은 이번 실행의 모든 문서의 이미지 캡션을 요청한 뒤 표 요약을, 그다음 색인을 요청하며, 요약·캡션이 남은(`pending`) 버전의 색인은 요청하지 않는다 (`REQ-BE-1.10.1`, `REQ-BE-1.10.9`, 루트 `IF-3`)
 - 교체는 남을 문서가 검색 가능일 때만, 같은 판에서 판에 들어온 시각이 더 이른 문서에만 일어난다. 교체됨은 돌아오지 않는다 (`REQ-BE-1.2.3`~`REQ-BE-1.2.6`)
 - 교체됨·삭제됨 문서와 마지막 버전이 아닌 작업의 상태로는 아무 상태도 바꾸지 않는다 (`REQ-BE-1.9.6`, `IF-BE-1`)
 - 버전은 Console에 보내는 응답의 필드로 나가지 않는다. 이미지 주소의 경로 안에만 들어간다 (`REQ-BE-1.6.4`)
@@ -17,7 +18,7 @@
 
 | REQ | 기능 그룹 | 책임 |
 | :--- | :--- | :--- |
-| `REQ-BE-1.1` | 업로드 | MD·이미지를 검증해 문서와 첫 버전을 만들고 처리를 시작한다 |
+| `REQ-BE-1.1` | 업로드 | MD·이미지를 검증해 문서와 첫 버전을 만들고 색인 대기열에 넣는다 |
 | `REQ-BE-1.2` | 이름·판·교체 | 같은 판과 최신판을 정하고, 교체를 반영한다 |
 | `REQ-BE-1.3` | 목록 조회 | 문서 목록을 거르고 정렬해 판·단계·실패 사유와 함께 준다 |
 | `REQ-BE-1.4` | 문서 조회 | 문서 하나의 정보, 원본, 표·이미지, 검색에 쓰이는 청크를 준다 |
@@ -25,8 +26,8 @@
 | `REQ-BE-1.6` | 새 버전 | 내용 다시 올리기와 요약·캡션 변경·재색인의 새 버전을 만든다 |
 | `REQ-BE-1.7` | 재색인 | 같은 내용의 새 버전을 만들어 예약 색인에서 강제 재색인하게 한다 |
 | `REQ-BE-1.8` | 삭제 | 바로 삭제됨으로 표시하고, 뒤에서 처리를 멈추고 청크와 데이터를 지운다 |
-| `REQ-BE-1.9` | 상태 반영 | 처리 상태·검색 상태를 정해진 계기에서만 바꾸고, 기동 때 끊긴 처리를 잇는다 |
-| `REQ-BE-1.10` | 예약 색인 | 색인 대기열을 관리하고, 설정한 일정마다 대기열의 버전을 RAG Server에 색인 요청한다 |
+| `REQ-BE-1.9` | 상태 반영 | 처리 상태·검색 상태를 정해진 계기에서만 바꾸고, 기동 때 끊긴 처리를 색인 대기열로 되돌린다 |
+| `REQ-BE-1.10` | 예약 색인 | 색인 대기열을 관리하고, 설정한 일정마다 대기열 문서의 요약·캡션을 만들게 한 뒤 RAG Server에 색인을 요청한다 |
 
 **비범위**
 
@@ -92,9 +93,9 @@ flowchart LR
 
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| assets | DI | `prepareVersion`, `generateHints`, `inheritVersion`, `markTemporaryForRegeneration`, `hintsFor`, `listViews`, `imageUrls`, `restore`, `deleteDocument` | assets `MODULE.md` | `REQ-BE-1.1`, `REQ-BE-1.4`, `REQ-BE-1.6`, `REQ-BE-1.8` |
-| indexing | DI, 이벤트 (구독) | `requestIndex`, `reconcile`, `getStages`, `updateMetadata`, `deleteChunks`; `indexing.job-state-changed` | indexing `MODULE.md`, `IF-BE-1` | `REQ-BE-1.9`, `REQ-BE-1.10.1`, `REQ-BE-1.2.8`, `REQ-BE-1.8.4` |
-| logs | DI | `LogsService.record` | logs `MODULE.md` | `REQ-BE-6.1.1` |
+| assets | DI | `prepareVersion`, `rebuildVersion`, `pendingHints`, `generateHints`, `inheritVersion`, `markTemporaryForRegeneration`, `hintsFor`, `listViews`, `imageUrls`, `restore`, `deleteDocument` | assets `MODULE.md`, 루트 `IF-3` | `REQ-BE-1.1`, `REQ-BE-1.4`, `REQ-BE-1.6`, `REQ-BE-1.8`, `REQ-BE-1.9.9`, `REQ-BE-1.10.1`, `REQ-BE-1.10.9` |
+| indexing | DI, 이벤트 (구독) | `requestIndex`, `reconcile`, `getStages`, `updateMetadata`, `deleteChunks`; `indexing.job-state-changed` | indexing `MODULE.md`, `IF-BE-1`, 루트 `IF-3` | `REQ-BE-1.9`, `REQ-BE-1.10.1`, `REQ-BE-1.2.8`, `REQ-BE-1.8.4` |
+| logs | DI | `LogsService.record`(`captioning` 포함) | logs `MODULE.md` | `REQ-BE-6.1.1` |
 | rag | DI | `RagClient.getDocumentChunks` | rag `MODULE.md` | `REQ-BE-1.4.5` |
 | storage | DI | `MONGO_DB`(컬렉션 `documents`, `document_versions`) | storage `MODULE.md` | `REQ-BE-1` |
 | common | DI·import | `ConfigService`, 오류 클래스, `parseKstDayRange`, `kstDayRange`, `toIsoUtc`, 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`), `ProcessingState`, `SearchState`, `PinoLogger` (nestjs-pino) | common `MODULE.md` | `REQ-BE-1`, `REQ-BE-8.2.1`, `REQ-BE-8.4.1`, `REQ-BE-7.1.3` |
@@ -171,7 +172,7 @@ classDiagram
 | `origin` | `'upload' \| 'content' \| 'hints' \| 'reindex'` | 필수 | 이 버전을 만든 계기 |
 | `fileName` | `string` | 필수 | 원본 MD 파일 이름 |
 | `originalMarkdown` | `string` | 필수 | 받은 그대로(`REQ-BE-1.1.7`). `hints`·`reindex` 버전은 이전 버전 값 그대로 |
-| `indexingMarkdown` | `string \| null` | 조건부 | 표·이미지 처리를 마치면 값이 있다 |
+| `indexingMarkdown` | `string \| null` | 조건부 | 표·이미지 추출을 마치면 값이 있다. 업로드·내용 다시 올리기는 버전 레코드를 쓸 때 함께 쓴다 |
 | `jobId` | `string \| null` | 선택 | RAG Server가 접수한 작업(`REQ-BE-3.1.2`) |
 | `requestSeq` | `number` | 필수 | 이 버전을 다시 요청 대상으로 돌린 횟수. 버전을 만들 때 `0`이고, `REQ-BE-1.10.5`의 1단계에서만 1 늘어나며 줄지 않는다. 예약 색인 결과의 버전 기록 조건이다(`REQ-BE-1.9.4`) |
 | `result` | `{ chunkCount: number; fallbackUsed: boolean } \| null` | 선택 | |
@@ -185,7 +186,7 @@ classDiagram
 
 **`REQ-BE-1.1.1`** MD마다 문서 하나
 
-- 실패: 문서를 만드는 도중 오류가 나면 그 요청에서 만든 문서·버전·표·이미지·파일을 모두 지우고(하나를 지우다 실패해도 나머지는 계속 지운다) 원래 오류를 낸다. 업로드 기록은 모든 문서를 만든 뒤에 남기고, 처리는 모두 만든 뒤에만 시작한다(`REQ-BE-1.1.9`)
+- 실패: 문서를 만드는 도중 오류가 나면 그 요청에서 만든 문서·버전·표·이미지·파일을 모두 지우고(하나를 지우다 실패해도 나머지는 계속 지운다) 원래 오류를 낸다. 업로드 기록은 모든 문서를 만든 뒤에 남기고, 색인 대기로 바꾸는 일은 모두 만든 뒤에만 한다(`REQ-BE-1.1.9`)
 - 충족 기준: MD 셋과 이미지들을 한 요청으로 올리면 문서 셋과 각 첫 버전이 생긴다
 
 **`REQ-BE-1.1.2`** 받지 않는 형식이면 요청 전체 거부
@@ -217,12 +218,12 @@ classDiagram
 
 **`REQ-BE-1.1.8`** 처음 상태
 
-- 충족 기준: 응답 직후 처리 상태가 `uploaded`, 검색 상태가 `not_searchable`이다
+- 충족 기준: 만든 문서의 처리 상태가 `uploaded`, 검색 상태가 `not_searchable`이고, 응답 뒤 남는 처리 상태 기록이 `uploaded`에서 출발한다
 
-**`REQ-BE-1.1.9`** 바로 표·이미지 처리 시작
+**`REQ-BE-1.1.9`** 바로 표·이미지 추출과 색인용 MD
 
-- 처리 계약: 응답한 뒤 문서마다 「핵심 흐름」의 처리를 백그라운드로 시작한다. 업로드 기록(`upload`)을 남긴다
-- 충족 기준: 응답 뒤 RAG Server 가짜에 요약·캡션 요청이 들어오고, 업로드 기록이 문서마다 하나 생긴다
+- 처리 계약: 요청 안에서(응답 전에) 문서마다 `prepareVersion`으로 표·이미지를 추출하고 색인용 MD를 만들어 첫 버전 레코드에 쓴다. 업로드 기록(`upload`)을 남기고, 응답한 뒤 문서마다 「버전 처리」의 색인 대기 갱신을 백그라운드로 한다(`REQ-BE-1.9.3`, `REQ-BE-1.10.2`). 요약·캡션은 만들지 않는다(`REQ-BE-2.3.7`)
+- 충족 기준: 응답 전에 첫 버전에 색인용 MD가 있고, 응답 뒤 처리 상태가 `queued`·`queuedVersion`이 `"1"`이 되며, RAG Server 가짜에 요약·캡션 요청도 색인 요청도 가지 않고, 업로드 기록이 문서마다 하나 생긴다
 
 **`REQ-BE-1.1.10`** 업로드 한도
 
@@ -266,7 +267,7 @@ classDiagram
 
 **`REQ-BE-1.2.8`** 교체됨이 된 문서 정리
 
-- 처리 계약: 교체됨이 된 문서의 처리 상태가 `uploaded`·`captioning`·`queued`·`indexing`이면 `failed`(코드 `REPLACED`)로 바꾸고, 진행 중인 표·이미지 처리가 다음 단계로 가지 않게 한다. 교체됨으로 바꾸는 갱신에서 `queuedVersion`을 비워 예약 색인이 요청하지 않게 하고(`REQ-BE-1.10.7`), `pendingRag.deleteChunks`를 참으로 두고, 백그라운드로 `indexing.deleteChunks`를 불러 참이면 지운다. 거짓이면 주기 작업이 다시 부른다
+- 처리 계약: 교체됨이 된 문서의 처리 상태가 `uploaded`·`captioning`·`queued`·`indexing`이면 `failed`(코드 `REPLACED`)로 바꾸고, 진행 중인 요약·캡션 생성과 색인 대기 갱신이 다음 단계로 가지 않게 한다. 교체됨으로 바꾸는 갱신에서 `queuedVersion`을 비워 예약 색인이 요청하지 않게 하고(`REQ-BE-1.10.7`), `pendingRag.deleteChunks`를 참으로 두고, 백그라운드로 `indexing.deleteChunks`를 불러 참이면 지운다. 거짓이면 주기 작업이 다시 부른다
 - 충족 기준: 색인 중에 교체된 문서가 `failed`(`REPLACED`)가 되고 RAG Server에 삭제 요청이 가며, RAG Server가 닿지 않으면 다음 주기에 다시 간다
 
 ### 목록 조회 — `REQ-BE-1.3`
@@ -298,8 +299,8 @@ classDiagram
 
 **`REQ-BE-1.3.6`** 색인 중 단계
 
-- 처리 계약: 페이지에 든 `indexing` 문서들의 단계를 `indexing.getStages`로 한 번에 받는다. 받지 못하면 단계 없이(`null`) 목록을 준다
-- 충족 기준: 색인 중인 문서에 단계가 붙고, RAG Server가 닿지 않아도 목록이 `200`이며 단계가 `null`이다
+- 처리 계약: 페이지에 든 `indexing` 문서들의 단계를 `indexing.getStages`로 한 번에 받는다. 받지 못하면 단계 없이(`null`) 목록을 준다. 단계는 RAG Server가 준 값을 바꾸지 않고 준다(`embedding_pending` 포함, `API.md`의 `stage`)
+- 충족 기준: 색인 중인 문서에 RAG Server가 준 단계(`chunking`·`embedding_pending`·`embedding`·`storing`)가 그대로 붙고, RAG Server가 닿지 않아도 목록이 `200`이며 단계가 `null`이다
 
 **`REQ-BE-1.3.7`** 이름 목록
 
@@ -323,6 +324,7 @@ classDiagram
 
 **`REQ-BE-1.4.2`** 처리 상태별 부가 정보
 
+- 처리 계약: 색인 중 단계는 `REQ-BE-1.3.6`과 같은 값을 준다
 - 충족 기준: 색인 중이면 단계, 완료면 청크 수·대체 분할 여부, 실패면 코드·설명·위치가 나오고, 아니면 각 값이 `null`이다
 
 **`REQ-BE-1.4.3`** 원본 MD와 이미지 주소
@@ -332,8 +334,8 @@ classDiagram
 
 **`REQ-BE-1.4.4`** 표·이미지
 
-- 처리 계약: 마지막 버전의 `AssetsService.listViews`를 준다
-- 충족 기준: 표·이미지마다 원래 모양, 요약·캡션, 임시 여부가 문서 안 순서대로 나온다
+- 처리 계약: 마지막 버전의 `AssetsService.listViews`를 준다. 예약 색인에서 아직 만들지 않은 요약·캡션은 `null`이고 임시 여부는 거짓이다(`API.md`의 `AssetView`)
+- 충족 기준: 표·이미지마다 원래 모양, 요약·캡션, 임시 여부가 문서 안 순서대로 나오고, 업로드한 뒤 예약 색인 전에는 요약·캡션이 `null`·임시 여부가 거짓이다
 
 **`REQ-BE-1.4.5`** 검색에 쓰이는 청크
 
@@ -387,7 +389,8 @@ classDiagram
 
 **`REQ-BE-1.6.2`** 다시 올린 버전은 표·이미지 처리부터, 그동안 이전 버전 검색
 
-- 충족 기준: 다시 올린 뒤 요약·캡션 요청부터 다시 가고, 처리 중 검색 상태가 `searchable` 그대로다
+- 처리 계약: 다시 올린 버전은 이전 버전의 표·이미지를 이어받지 않고 `prepareVersion`으로 추출부터 한다. 요약·캡션은 다음 예약 색인이 만든다(`REQ-BE-1.10.1`)
+- 충족 기준: 다시 올린 버전의 표·이미지가 모두 아직 만들지 않은 상태이고, 다음 예약 색인에서 그 요약·캡션 요청부터 다시 가며, 처리 중 검색 상태가 `searchable` 그대로다
 
 **`REQ-BE-1.6.3`** 요약·캡션 변경과 재색인의 새 버전
 
@@ -402,8 +405,8 @@ classDiagram
 
 **`REQ-BE-1.7.1`** 같은 내용의 새 버전을 만들어 예약 색인에서 강제 재색인
 
-- 처리 계약: `origin: 'reindex'` 버전을 만들고, `markTemporaryForRegeneration`이 1 이상이면 표·이미지 처리부터 하고, 0이면 바로 색인 대기로 바꾸며 대기열에 넣는다(`REQ-BE-1.9.3`, `REQ-BE-1.10.2`). 이 버전의 색인 요청은 예약 색인이 `force: true`로 보낸다(`REQ-BE-1.10.1`)
-- 충족 기준: 임시 설명이 있으면 그것만 다시 요청한 뒤 대기열에 들어가고, 없으면 바로 대기열에 들어가며, 어느 쪽이든 재색인 요청 뒤 RAG Server에 색인 요청이 가지 않고 다음 예약 색인에서 `force: true`로 간다
+- 처리 계약: `origin: 'reindex'` 버전을 색인 대기로 두며 대기열에 넣고(「버전 처리」의 선점, `REQ-BE-1.9.3`, `REQ-BE-1.10.2`), 버전 레코드를 쓴 뒤 `markTemporaryForRegeneration`으로 임시 설명(짝 없는 이미지 제외)을 다시 만들 것으로 표시한다. 요청 안에서는 요약·캡션을 만들지 않는다. 다음 예약 색인이 표시한 요약·캡션을 다시 만든 뒤(`REQ-BE-1.9.2`, `REQ-BE-1.9.13`) 이 버전의 색인을 `force: true`로 요청한다(`REQ-BE-1.10.1`, `API.md`의 `POST /v1/documents/{doc_id}/reindex`)
+- 충족 기준: 재색인 요청 뒤 처리 상태가 `queued`이고 `queuedVersion`이 새 버전이며 RAG Server에 요약·캡션 요청도 색인 요청도 가지 않는다. 다음 예약 색인에서 임시 설명이 있으면 그것만 다시 요청한 뒤, 없으면 요약·캡션 요청 없이 `force: true`로 색인 요청이 간다
 
 ### 삭제 — `REQ-BE-1.8`
 
@@ -418,7 +421,7 @@ classDiagram
 
 **`REQ-BE-1.8.3`** 진행 중인 처리 멈춤
 
-- 처리 계약: 표·이미지 처리의 `shouldContinue`와 예약 색인의 요청 직전 검사가 `deleted`를 보고 멈춘다. 삭제 표시가 대기열도 비우므로 예약 색인은 그 문서를 요청하지 않는다
+- 처리 계약: 예약 색인의 요약·캡션 생성(`shouldContinue`)과 색인 요청 직전 검사가 `deleted`를 보고 멈춘다. 삭제 표시가 대기열도 비우므로 예약 색인은 그 문서를 요청하지 않는다
 - 충족 기준: 요약·캡션 생성 중에 지우면 남은 요약·캡션 요청이 가지 않고, 대기열에 있던 문서를 지우면 다음 예약 색인에서 색인 요청이 가지 않는다
 
 **`REQ-BE-1.8.4`** RAG Server 청크 삭제와 재요청
@@ -442,16 +445,17 @@ classDiagram
 
 **`REQ-BE-1.9.1`** 내용 다시 올리기 → 업로드됨
 
-- 충족 기준: 다시 올리기 직후 처리 상태가 `uploaded`다
+- 충족 기준: 다시 올리기의 선점이 처리 상태를 `uploaded`로 두고, 그 뒤 처리 상태 기록이 `uploaded`에서 출발한다
 
-**`REQ-BE-1.9.2`** 표·이미지 처리 시작 → 요약·캡션 생성 중
+**`REQ-BE-1.9.2`** 예약 색인의 요약·캡션 생성 시작 → 요약·캡션 생성 중
 
-- 충족 기준: 업로드 뒤와 임시 설명이 있는 재색인 뒤 처리 상태가 `captioning`을 거친다
+- 처리 계약: 예약 색인이 요약·캡션을 만들 문서(대기열 버전에 `pendingHints`가 1 이상인 문서, 재색인으로 다시 만들 임시 설명 포함)를 `queued`에서 `captioning`으로 바꾸고, 같은 갱신에서 대기열에서 뺀다(`REQ-BE-1.10.7`). 갱신 조건은 삭제됨·교체됨이 아니고, 처리 상태가 `queued`이며 `queuedVersion`과 `latestVersion`이 이번 실행이 읽은 버전인 것이다. 조건이 어긋나면 그 문서는 이번 실행에서 요약·캡션을 만들지 않는다. 그 밖의 계기로는 `captioning`이 되지 않는다
+- 충족 기준: 만들 요약·캡션이 있는 대기열 문서는 예약 색인이 시작하면 `captioning`이 되고 `queuedVersion`이 `null`이며, 만들 것이 없는 대기열 문서는 `captioning`을 거치지 않고, 업로드·재색인 요청만으로는 `captioning`이 되지 않는다
 
-**`REQ-BE-1.9.3`** 색인할 준비가 되면 → 색인 대기
+**`REQ-BE-1.9.3`** 새 버전의 색인용 MD를 만들면 → 색인 대기
 
-- 처리 계약: 표·이미지 처리를 마친 때(assets의 `generateHints`가 `stopped: false`로 끝남, `REQ-BE-2.3.5`)와 표·이미지 처리 없이 새 버전을 만든 때(요약·캡션 변경, 임시 설명 없는 재색인) 처리 상태를 `queued`로 바꾼다. 같은 갱신에서 대기열에 넣는다(`REQ-BE-1.10.2`)
-- 충족 기준: 표·이미지 처리를 마치거나 요약·캡션 변경·임시 설명 없는 재색인으로 새 버전을 만들면 처리 상태가 `queued`이고 `queuedVersion`이 그 버전이며, 그때 RAG Server에 색인 요청이 가지 않는다
+- 처리 계약: 표·이미지 추출로 색인용 MD를 만든 때(업로드·내용 다시 올리기의 응답 뒤, 기동 때 다시 추출한 뒤 `REQ-BE-1.9.9`)는 「버전 처리」의 색인 대기 갱신으로, 표·이미지 처리 없이 새 버전을 만든 때(요약·캡션 변경, 재색인)는 선점 갱신으로 처리 상태를 `queued`로 바꾼다. 같은 갱신에서 대기열에 넣는다(`REQ-BE-1.10.2`)
+- 충족 기준: 업로드·내용 다시 올리기·요약·캡션 변경·재색인으로 새 버전을 만들면 처리 상태가 `queued`이고 `queuedVersion`이 그 버전이며, 그때 RAG Server에 요약·캡션 요청도 색인 요청도 가지 않는다
 
 **`REQ-BE-1.9.4`** 이미 같은 색인 → 완료, 거부 → 실패, 연결 실패 → 그대로
 
@@ -480,29 +484,45 @@ classDiagram
 
 - 충족 기준: 검색 가능인 문서의 새 버전이 실패하면 처리 상태는 `failed`, 검색 상태는 `searchable`이다
 
-**`REQ-BE-1.9.9`** 기동 때 표·이미지 처리 잇기
+**`REQ-BE-1.9.9`** 기동 때 업로드됨 문서의 표·이미지 추출 다시 하기
 
-- 충족 기준: `captioning`으로 남은 문서가 있으면 기동 뒤 `hintStatus`가 `pending`인 표·이미지만 요청한다
+- 처리 계약: 기동 처리는 처리 상태가 `uploaded`인 문서(교체됨·삭제됨 제외, `REQ-BE-1.9.11`)마다 마지막 버전의 원본 MD로 `rebuildVersion`을 불러 표·이미지와 색인용 MD를 다시 만들고, 색인용 MD를 그 버전에 쓴 뒤 「버전 처리」의 색인 대기 갱신을 한다(`REQ-BE-1.9.3`, `REQ-BE-1.10.2`). RAG Server를 부르지 않는다
+- 충족 기준: `uploaded`로 남은 문서가 있으면 기동 뒤 그 버전의 색인용 MD가 원본 MD로 다시 만든 값이고 처리 상태가 `queued`·`queuedVersion`이 그 버전이며, RAG Server에 요약·캡션 요청이 가지 않는다
 
 `REQ-BE-1.9.10`은 폐기됐다(`REQUIREMENTS.md` `REV-4`). 기동할 때 색인을 다시 요청하지 않고, 대기열에 남은 문서는 다음 예약 색인이 요청한다(`REQ-BE-1.10.8`).
 
 **`REQ-BE-1.9.11`** 교체됨·삭제됨은 기동 처리·상태 맞추기·예약 색인에서 뺌
 
-- 충족 기준: 교체됨·삭제됨 문서는 기동 처리, `reconcile`, 예약 색인의 요청 대상에 없다
+- 충족 기준: 교체됨·삭제됨 문서는 기동 처리(`REQ-BE-1.9.9`, `REQ-BE-1.9.12`), `reconcile`, 예약 색인의 요약·캡션 생성과 요청 대상에 없다
+
+**`REQ-BE-1.9.12`** 기동 때 요약·캡션 생성 중 문서를 색인 대기로 되돌림
+
+- 처리 계약: 기동 처리는 처리 상태가 `captioning`인 문서(교체됨·삭제됨 제외)를, 처리 상태가 `captioning`이고 `latestVersion`이 읽은 값일 때만 조건부 갱신 하나로 `queued`로 바꾸며 `queuedVersion`을 `latestVersion`으로 둔다(`REQ-BE-1.10.2`). 이미 저장한 요약·캡션은 남고, 다음 예약 색인이 남은 `pending`부터 만든다(`REQ-BE-2.3.6`). 요약·캡션을 다시 요청하지 않는다
+- 충족 기준: `captioning`으로 남은 채 기동하면 처리 상태가 `queued`이고 `queuedVersion`이 마지막 버전이며 기동 때 RAG Server에 요약·캡션 요청이 가지 않고, 다음 예약 색인에서 `pending`인 표·이미지만 요청한다
+
+**`REQ-BE-1.9.13`** 예약 색인에서 요약·캡션을 모두 마치면 → 색인 대기
+
+- 처리 계약: 예약 색인에서 `generateHints`가 `stopped: false`, `remaining: 0`으로 끝나 그 문서의 요약·캡션을 모두 마치면(`REQ-BE-2.3.5`), 삭제됨·교체됨이 아니고 처리 상태가 `captioning`이며 `latestVersion`이 이번 실행이 읽은 버전일 때만 조건부 갱신 하나로 `queued`로 바꾸고 `queuedVersion`을 그 버전으로 둔다(`REQ-BE-1.10.2`). 바꾼 뒤 그 문서의 이번 실행 `generated`·`temporary` 합이 1 이상이면 `captioning` 기록(`count`는 `generated` 합, `failedCount`는 `temporary` 합)을 남긴다(`REQ-BE-6.1.1`). 조건이 어긋나면 바꾸지 않고 기록도 남기지 않는다
+- 충족 기준: 이미지만 남은 문서는 이미지 캡션을, 표가 남은 문서는 표 요약을 마친 뒤 처리 상태가 `queued`이고 `queuedVersion`이 그 버전이며 `captioning` 기록이 하나 생기고, 그사이 삭제·교체된 문서는 `queued`로 돌아가지 않는다
+
+**`REQ-BE-1.9.14`** 예약 색인에서 요약·캡션을 다 마치지 못하면 → 그 실행이 끝날 때 색인 대기
+
+- 처리 계약: 예약 색인이 `captioning`으로 바꾼 문서 중 그 실행에서 `REQ-BE-1.9.13`으로 되돌리지 못한 문서(저장 오류 등으로 요약·캡션 생성이 중간에 멈췄거나, 표 요약 뒤에도 `remaining`이 0이 아닌 문서 등)를, 그 실행의 색인 요청(「예약 색인 실행」)을 마친 뒤 삭제됨·교체됨이 아니고 처리 상태가 `captioning`이며 `latestVersion`이 이번 실행이 읽은 버전일 때만 조건부 갱신 하나로 `queued`로 바꾸고 `queuedVersion`을 그 버전으로 둔다(`REQ-BE-1.10.2`). 그 실행에서는 그 문서의 색인을 요청하지 않는다. 이미 저장한 요약·캡션은 남고, 다음 예약 색인이 남은 `pending`부터 만든다(`REQ-BE-2.3.6`). 바꾼 뒤 `outcome: 'failure'`인 `captioning` 기록을 남기며, 상세에는 그 문서의 이번 실행 `generated` 합(`count`)과 `temporary` 합(`failedCount`)만 담는다(`REQ-BE-6.1.1`, logs `MODULE.md`의 `LogDetail`). 종료로 실행이 끊기면 되돌리지 않고 다음 기동이 `REQ-BE-1.9.12`로 되돌린다. 이 갱신이 저장 오류로 실패한 문서는 `captioning`으로 남고 다음 예약 색인이 시작할 때 `REQ-BE-1.10.10`으로 되돌린다. 조건이 어긋나면 바꾸지 않고 기록도 남기지 않는다
+- 충족 기준: 요약·캡션 생성이 중간에 멈춘 문서와 표 요약 뒤에도 `pending`이 남은 문서는 그 실행이 끝나면 처리 상태가 `queued`이고 `queuedVersion`이 그 버전이며, 결과가 실패이고 그 실행에서 만든 수를 담은 `captioning` 기록이 하나 생기고, 그 실행에서 그 문서의 색인 요청이 가지 않고, 다음 예약 색인에서 남은 `pending`만 요청된다. 그사이 삭제·교체된 문서와 종료로 끊긴 실행의 문서는 `queued`로 돌아가지 않고 기록도 생기지 않는다
 
 ### 예약 색인 — `REQ-BE-1.10`
 
-예약 작업은 `INDEX_SCHEDULE_CRON` 일정(KST)마다 돈다. 일정 등록과 겹침 방지는 「기동 처리와 주기 작업」과 「런타임·보안」이 소유한다.
+예약 작업은 `INDEX_SCHEDULE_CRON` 일정(KST)마다 돈다. 한 실행의 순서는 「예약 색인 실행」이, 일정 등록과 겹침 방지는 「기동 처리와 주기 작업」과 「런타임·보안」이 소유한다.
 
-**`REQ-BE-1.10.1`** 일정마다 대기열의 버전을 색인 요청
+**`REQ-BE-1.10.1`** 일정마다 대기열 문서의 요약·캡션을 만든 뒤 색인 요청
 
-- 처리 계약: 일정마다 `queuedVersion`에 값이 있는 문서(삭제됨·교체됨 제외, `REQ-BE-1.9.11`)를 모아, 문서마다 그 버전의 `hintsFor`·색인용 MD와 그때의 이름·판 정보로 `requestIndex`를 부른다. `force`는 그 버전의 `origin`이 `'reindex'`면 참, 아니면 거짓이다. 요청 직전에 문서를 다시 읽어 아직 그 버전이 대기열에 있을 때만 보내고, 그때 그 버전의 `requestSeq`를 읽어 결과를 쓰는 조건으로 둔다(`REQ-BE-1.9.4`). 이 프로세스에서 선점을 진행 중인 문서(「버전 처리」)는 이번 일정에서 건너뛰고 대기열에 둔다. 결과는 `REQ-BE-1.9.4`와 `REQ-BE-1.10.3`대로 반영한다
-- 충족 기준: 일정 시각에 대기열의 문서마다 색인 요청이 한 번씩 가고, 재색인 버전은 `force: true`, 그 밖의 버전은 `force: false`이며, 일정 사이에는 색인 요청이 가지 않는다
+- 처리 계약: 실행을 시작할 때 `queuedVersion`에 값이 있는 문서(삭제됨·교체됨 제외, `REQ-BE-1.9.11`)와 그 버전을 읽어 이번 실행의 대상으로 삼는다. 이 프로세스에서 선점을 진행 중인 문서(「버전 처리」)는 대상에서 빼고 대기열에 둔다. 대상 중 요약·캡션을 만들 문서는 `REQ-BE-1.9.2`, `REQ-BE-1.10.9`, `REQ-BE-1.9.13`대로 요약·캡션을 만들고 대기열로 돌아온다. 다 마치지 못한 문서는 `REQ-BE-1.9.14`대로 그 실행이 끝날 때 대기열로 돌아오며, 그 실행에서는 요청하지 않는다. 그다음 대상 문서마다 그 버전의 `hintsFor`·색인용 MD와 그때의 이름·판 정보로 `requestIndex`를 부른다. `force`는 그 버전의 `origin`이 `'reindex'`면 참, 아니면 거짓이다. 요청 직전에 문서를 다시 읽어 아직 그 버전이 대기열에 있을 때만 보내고, 그때 그 버전의 `requestSeq`를 읽어 결과를 쓰는 조건으로 둔다(`REQ-BE-1.9.4`). 실행을 시작한 뒤 대기열에 들어온 문서·버전은 이번 실행에서 요청하지 않고 다음 실행에 맡긴다. 결과는 `REQ-BE-1.9.4`와 `REQ-BE-1.10.3`대로 반영한다
+- 충족 기준: 일정 시각에 대기열 문서의 남은 요약·캡션을 요청한 뒤 대상 문서마다 색인 요청이 한 번씩 가고, 재색인 버전은 `force: true`, 그 밖의 버전은 `force: false`이며, 일정 사이에는 요약·캡션 요청도 색인 요청도 가지 않는다. 실행 중에 대기열에 들어온 문서는 그 실행에서 요청되지 않는다. 앞 실행이 끝나지 않은 일정 시각에는 새 실행이 시작되지 않고 건너뛴 로그가 남으며, 남은 문서는 그다음 일정 시각의 실행에서 요청된다
 
 **`REQ-BE-1.10.2`** 색인 대기로 바꾸는 갱신과 함께 대기열에 넣기
 
-- 처리 계약: `REQ-BE-1.9.3`과 `REQ-BE-1.10.5`가 처리 상태를 `queued`로 바꾸는 조건부 갱신 하나에서 `queuedVersion`을 `latestVersion`으로 둔다. 둘 중 하나만 쓰는 갱신은 없다
-- 충족 기준: 두 계기 뒤 처리 상태가 `queued`이면 `queuedVersion`이 마지막 버전이고, 그 갱신이 조건이 어긋나 실패하면 처리 상태도 `queuedVersion`도 그대로다
+- 처리 계약: `REQ-BE-1.9.3`, `REQ-BE-1.9.13`, `REQ-BE-1.9.14`, `REQ-BE-1.9.12`, `REQ-BE-1.10.10`, `REQ-BE-1.10.5`가 처리 상태를 `queued`로 바꾸는 조건부 갱신 하나에서 `queuedVersion`을 `latestVersion`으로 둔다. 둘 중 하나만 쓰는 갱신은 없다
+- 충족 기준: 여섯 계기 뒤 처리 상태가 `queued`이면 `queuedVersion`이 마지막 버전이고, 그 갱신이 조건이 어긋나 실패하면 처리 상태도 `queuedVersion`도 그대로다
 
 **`REQ-BE-1.10.3`** 응답을 받으면 대기열에서 빼고, 연결 실패면 남김
 
@@ -531,13 +551,23 @@ classDiagram
 
 **`REQ-BE-1.10.7`** 삭제·교체·상태 이탈이면 대기열에서 뺌
 
-- 처리 계약: 삭제 표시(`REQ-BE-1.8.1`), 교체(`REQ-BE-1.2.8`), 처리 상태를 `queued` 밖으로 바꾸는 갱신(작업 상태 이벤트, 재색인의 요약·캡션 생성 시작, 내용 다시 올리기의 선점)은 같은 갱신에서 `queuedVersion`을 비운다
-- 충족 기준: 대기열에 있던 문서를 지우거나 교체하거나 작업 상태 이벤트로 `indexing`이 되면 `queuedVersion`이 `null`이고 다음 예약 색인에서 요청이 가지 않는다
+- 처리 계약: 삭제 표시(`REQ-BE-1.8.1`), 교체(`REQ-BE-1.2.8`), 처리 상태를 `queued` 밖으로 바꾸는 갱신(작업 상태 이벤트, 예약 색인의 요약·캡션 생성 시작 `REQ-BE-1.9.2`, 내용 다시 올리기의 선점)은 같은 갱신에서 `queuedVersion`을 비운다
+- 충족 기준: 대기열에 있던 문서를 지우거나 교체하거나 작업 상태 이벤트로 `indexing`이 되거나 예약 색인이 `captioning`으로 바꾸면 `queuedVersion`이 `null`이고, 앞의 셋은 다음 예약 색인에서 요청이 가지 않는다
 
 **`REQ-BE-1.10.8`** 대기열은 재시작 뒤에도 남음
 
 - 처리 계약: 대기열은 MongoDB `documents`의 `queuedVersion`이라 프로세스 메모리에 기대지 않는다. 기동 처리는 대기열을 비우거나 바로 요청하지 않는다
 - 충족 기준: 대기열에 문서를 둔 채 앱을 다시 띄우면 대기열 여부가 그대로이고, 다음 예약 색인에서 그 문서의 요청이 간다
+
+**`REQ-BE-1.10.9`** 이미지 캡션, 표 요약, 색인 순으로 몰아서 요청
+
+- 처리 계약: 한 실행에서 어느 문서의 표 요약도 `captioning`으로 바꾼 모든 문서의 이미지 캡션(`generateHints`의 `image`)보다 먼저 요청하지 않고, 색인 요청을 그 문서들의 요약·캡션 요청보다 먼저 보내지 않는다. 단계는 「예약 색인 실행」이 정한다. `shouldContinue`는 문서가 삭제됨·교체됨이 아니고, 처리 상태가 `captioning`이며 마지막 버전이 이번 실행이 읽은 버전인지를 본다(`REQ-BE-1.8.3`, `REQ-BE-1.2.8`). `stopped`인 문서는 남은 단계를 건너뛰고, 대기열로 되돌리는 일은 `REQ-BE-1.9.14`가 정한다. 요청 순서의 앱 사이 계약은 루트 `IF-3`이 소유한다
+- 충족 기준: 이미지와 표가 함께 있는 문서 둘이 대기열에 있으면 RAG Server 가짜가 받는 요청이 두 문서의 이미지 캡션, 두 문서의 표 요약, 색인 요청 순이고, 표만 있는 문서도 다른 문서의 이미지 캡션이 모두 끝난 뒤 표 요약을 받는다
+
+**`REQ-BE-1.10.10`** 예약 색인 시작 때 요약·캡션 생성 중에 남은 문서를 색인 대기로 되돌림
+
+- 처리 계약: 예약 색인은 대상을 읽기 전에(「예약 색인 실행」 0단계) 처리 상태가 `captioning`인 문서(교체됨·삭제됨 제외, `REQ-BE-1.9.11`)를, 처리 상태가 `captioning`이고 `latestVersion`이 읽은 값일 때만 조건부 갱신 하나로 `queued`로 바꾸며 `queuedVersion`을 `latestVersion`으로 둔다(`REQ-BE-1.10.2`). 예약 색인은 겹쳐 돌지 않으므로 이때 `captioning`인 문서는 앞 실행이 `REQ-BE-1.9.14`의 갱신에 실패해 남긴 문서다. 되돌린 문서는 이어서 읽는 대상에 들어가, 그 실행이 남은 `pending`부터 요약·캡션을 만들고 색인을 요청한다(`REQ-BE-2.3.6`). 조건이 어긋나면 바꾸지 않는다. 되돌린 문서 수는 `documents.index_scheduled`의 `requeued`로 남긴다
+- 충족 기준: 앞 실행이 끝난 뒤 `captioning`으로 남은 문서가 있으면 다음 예약 색인에서 그 문서가 `queued`와 대기열을 거쳐 남은 `pending`인 표·이미지만 요청받고 그 실행에서 색인 요청까지 가며, 삭제됨·교체됨인 `captioning` 문서는 되돌리지 않는다
 
 ## 다른 모듈용 조회
 
@@ -578,13 +608,12 @@ export interface EvaluationTarget extends DocumentRefData {
 ```mermaid
 stateDiagram-v2
     [*] --> uploaded: 업로드, 내용 다시 올리기
-    uploaded --> captioning: 표·이미지 처리 시작
-    completed --> captioning: 재색인 (임시 설명 있음)
-    failed --> captioning: 재색인 (임시 설명 있음)
     queued_in_queue: queued (대기열)
     queued_at_rag: queued (RAG 접수)
+    uploaded --> queued_in_queue: 색인용 MD 완성
+    queued_in_queue --> captioning: 예약 색인 (만들 요약·캡션 있음)
+    captioning --> queued_in_queue: 요약·캡션 완료·미완료, 기동
     queued_in_queue --> queued_at_rag: 예약 색인 accepted
-    captioning --> queued_in_queue: 색인 준비 완료
     completed --> queued_in_queue: 요약·캡션 변경, 재색인
     failed --> queued_in_queue: 요약·캡션 변경, 재색인, 되돌리기
     queued_in_queue --> queued_in_queue: 요약·캡션 변경, unreachable
@@ -601,21 +630,21 @@ stateDiagram-v2
     failed --> uploaded: 내용 다시 올리기
 ```
 
-- `queued`는 그림에서 둘로 나뉜다. `queued (대기열)`(`queuedVersion` 값 있음)은 예약 색인을 기다리고, `queued (RAG 접수)`(대기열 밖)는 RAG Server가 접수한 작업이 시작을 기다린다(`REQ-BE-1.9.5`의 `queued` 이벤트도 이쪽이다). 대기열에 들어가는 계기는 색인 준비 완료(`REQ-BE-1.9.3`)와 실패 되돌리기(`REQ-BE-1.10.5`)뿐이다(`REQ-BE-1.10.2`). 다만 선점을 되돌리면 선점 전의 대기열이 되살아난다(`REQ-BE-1.10.4`, 「기동 때 선점 되돌리기」)
-- `completed`·`failed`에서 대기열로 가는 재색인은 임시 설명이 없을 때다
+- `queued`는 그림에서 둘로 나뉜다. `queued (대기열)`(`queuedVersion` 값 있음)은 예약 색인을 기다리고, `queued (RAG 접수)`(대기열 밖)는 RAG Server가 접수한 작업이 시작을 기다린다(`REQ-BE-1.9.5`의 `queued` 이벤트도 이쪽이다). 대기열에 들어가는 계기는 색인용 MD 완성(`REQ-BE-1.9.3`), 예약 색인의 요약·캡션 완료(`REQ-BE-1.9.13`)와 미완료 되돌리기(`REQ-BE-1.9.14`), 기동 때 요약·캡션 생성 중 되돌리기(`REQ-BE-1.9.12`), 예약 색인 시작 때 요약·캡션 생성 중 되돌리기(`REQ-BE-1.10.10`), 실패 되돌리기(`REQ-BE-1.10.5`)뿐이다(`REQ-BE-1.10.2`). 다만 선점을 되돌리면 선점 전의 대기열이 되살아난다(`REQ-BE-1.10.4`, 「기동 때 선점 되돌리기」)
+- `captioning`은 예약 색인 안에서만 생긴다(`REQ-BE-1.9.2`). 재색인은 임시 설명이 있어도 바로 대기열로 가고, 다음 예약 색인이 `captioning`을 거치게 한다(`REQ-BE-1.7.1`)
 - `queued (대기열)`에서 다른 상태로 가는 전이는 모두 같은 갱신에서 대기열에서 뺀다(`REQ-BE-1.10.3`, `REQ-BE-1.10.7`). `unreachable`은 상태도 대기열도 바꾸지 않는다
 - 교체됨이 되면 `uploaded`·`captioning`·`queued`·`indexing`에서 `failed`(`REPLACED`)로 간다(`REQ-BE-1.2.8`)
 
 ### 버전 처리
 
-1. **표·이미지 처리** — 업로드·내용 다시 올리기는 요청 안에서(응답 전에) `prepareVersion`으로 색인용 MD를 만들어 버전에 쓴다(응답의 `unmatched_images`가 그 결과다. 업로드 이미지는 요청이 끝나면 남지 않는다). 백그라운드 처리는 처리 상태를 `captioning`으로 바꾸고(`REQ-BE-1.9.2`), `generateHints`를 부른다. `shouldContinue`는 문서가 삭제됨·교체됨이 아니고 마지막 버전이 이 버전인지를 본다. `stopped`면 여기서 끝낸다. (`REQ-BE-2`, `REQ-BE-1.8.3`)
-2. **색인 대기** — `stopped: false`면 삭제됨·교체됨이 아니고 마지막 버전이 이 버전이며 처리 상태가 `captioning`일 때만, 처리 상태를 `queued`로 바꾸고 `queuedVersion`을 이 버전으로 두는 갱신 하나를 한다(`REQ-BE-1.9.3`, `REQ-BE-1.10.2`). 여기서 RAG Server를 부르지 않는다.
-3. **예약 색인** — 일정 시각에 대기열의 버전을 `requestIndex`로 요청하고, 결과를 반영하며 대기열에서 뺀다. 연결 실패면 대기열에 남는다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.4`, `REQ-BE-1.10.3`)
+1. **표·이미지 추출** — 업로드·내용 다시 올리기는 요청 안에서(응답 전에) `prepareVersion`으로 표·이미지를 추출하고 색인용 MD를 만들어 버전에 쓴다(응답의 `unmatched_images`가 그 결과다. 업로드 이미지는 요청이 끝나면 남지 않는다). 요약·캡션은 만들지 않는다. (`REQ-BE-1.1.9`, `REQ-BE-2.1`, `REQ-BE-2.2`, `REQ-BE-2.3.7`)
+2. **색인 대기** — 응답한 뒤 백그라운드로, 삭제됨·교체됨이 아니고 마지막 버전이 이 버전이며 처리 상태가 `uploaded`일 때만 처리 상태를 `queued`로 바꾸고 `queuedVersion`을 이 버전으로 두는 갱신 하나를 한다(`REQ-BE-1.9.3`, `REQ-BE-1.10.2`). 조건이 어긋나면 바꾸지 않는다. 기동 때 다시 추출한 버전(`REQ-BE-1.9.9`)도 같은 갱신을 한다. 여기서 RAG Server를 부르지 않는다.
+3. **예약 색인** — 일정 시각에 대기열 문서의 요약·캡션을 만들게 하고, 대기열의 버전을 `requestIndex`로 요청하고, 결과를 반영하며 대기열에서 뺀다. 연결 실패면 대기열에 남는다. 순서는 「예약 색인 실행」이 정한다. (`REQ-BE-1.10.1`, `REQ-BE-1.10.9`, `REQ-BE-1.9.4`, `REQ-BE-1.10.3`)
 4. **작업 상태** — 이벤트(`IF-BE-1`)로 `REQ-BE-1.9.5`~`REQ-BE-1.9.7`을 반영한다. 처리 상태가 실제로 바뀌면 `processing_state` 기록을 남긴다.
 
 ★ 처리 상태를 `queued`로 바꾸는 일과 대기열에 넣는 일을 두 갱신으로 나누지 않는다 — 그 사이 Backend가 멈추면 대기열 밖 `queued`로 갇히고, 기동 처리는 그런 문서를 다시 요청하지 않는다(`REQ-BE-1.9.10` 폐기). 실패 되돌리기도 이 갱신 하나로 바꾸되, 그 앞에 버전의 `jobId`를 비우며 `requestSeq`를 늘리고, 뒤에 기억한 값과 같은 `failure`만 비운다. 이 순서를 바꾸지 않으며, 순서와 이유는 `REQ-BE-1.10.5`가 정한다. 예약 색인의 결과는 요청 전에 읽은 `requestSeq`가 그대로일 때만 버전에 쓰고, 버전 기록을 처리 상태 반영보다 먼저 쓴다 — 실패 되돌리기가 늘린 `requestSeq`가 늦게 온 지난 요청의 결과를 막는다(`REQ-BE-1.9.4`).
 
-내용 다시 올리기·요약·캡션 변경·재색인은 먼저 조건부 갱신 하나로 문서를 선점한다. 선점은 처리 상태가 받을 수 있는 상태이고(`REQ-BE-1.5.5`) `latestVersion`·`updatedAt`이 읽은 값일 때만 `latestVersion`을 새 버전으로 바꾸고, 처리 상태와 대기열을 이렇게 둔다 — 내용 다시 올리기는 `uploaded`와 빈 대기열, 요약·캡션 변경과 재색인은 `queued`와 새 버전의 대기열(`REQ-BE-1.10.2`, `REQ-BE-1.10.4`). 그다음 `prepareVersion` 또는 `inheritVersion`으로 새 버전의 표·이미지를 만들고 버전 레코드를 쓴다. 재색인은 버전 레코드를 쓴 뒤 `markTemporaryForRegeneration`이 1 이상이면 대기열에서 빼며 `captioning`으로 바꾼다. 그 사이 실패하면 선점을 되돌린다 — 처리 상태, `latestVersion`, `queuedVersion`을 선점 전 값으로 둔다(`REQ-BE-1.10.4`). 선점이 끝나고 그 요청이 선점 표시를 풀 때까지 예약 색인은 그 문서를 건너뛴다(`REQ-BE-1.10.1`). 선점한 뒤 새 버전 레코드를 쓰기 전에 프로세스가 멈춘 문서는 기동 처리가 되돌린다(「기동 때 선점 되돌리기」). 선점한 뒤 새 버전 레코드를 쓰기 전까지 문서 조회·원본 조회는 레코드가 있는 직전 버전의 파일 이름·원본·표·이미지로 응답한다. 새 버전을 쓴 뒤(실패해 선점을 되돌린 뒤 포함) 문서를 다시 읽어, 삭제됨이면 `purged`를 거짓으로 되돌리고 청크 삭제를 다시 요청하며(그 사이 지워진 데이터를 다시 지운다), 교체로 실패했고 새 버전에 실패 사유가 없으면 `REPLACED` 사유를 쓴다. 삭제됨·교체됨을 확인하면 선점 전이의 `processing_state` 기록과 처리 시작을 건너뛴다 — 삭제·교체가 남긴 `processing_state` 기록이 마지막이 되게 한다.
+내용 다시 올리기·요약·캡션 변경·재색인은 먼저 조건부 갱신 하나로 문서를 선점한다. 선점은 처리 상태가 받을 수 있는 상태이고(`REQ-BE-1.5.5`) `latestVersion`·`updatedAt`이 읽은 값일 때만 `latestVersion`을 새 버전으로 바꾸고, 처리 상태와 대기열을 이렇게 둔다 — 내용 다시 올리기는 `uploaded`와 빈 대기열, 요약·캡션 변경과 재색인은 `queued`와 새 버전의 대기열(`REQ-BE-1.10.2`, `REQ-BE-1.10.4`). 그다음 `prepareVersion` 또는 `inheritVersion`으로 새 버전의 표·이미지를 만들고 버전 레코드를 쓴다. 재색인은 버전 레코드를 쓴 뒤 `markTemporaryForRegeneration`으로 임시 설명을 다시 만들 것으로 표시하며, 처리 상태와 대기열은 그대로 둔다(`REQ-BE-1.7.1`). 그 사이 실패하면 선점을 되돌린다 — 처리 상태, `latestVersion`, `queuedVersion`을 선점 전 값으로 둔다(`REQ-BE-1.10.4`). 선점이 끝나고 그 요청이 선점 표시를 풀 때까지 예약 색인은 그 문서를 건너뛴다(`REQ-BE-1.10.1`). 선점한 뒤 새 버전 레코드를 쓰기 전에 프로세스가 멈춘 문서는 기동 처리가 되돌린다(「기동 때 선점 되돌리기」). 선점한 뒤 새 버전 레코드를 쓰기 전까지 문서 조회·원본 조회는 레코드가 있는 직전 버전의 파일 이름·원본·표·이미지로 응답한다. 새 버전을 쓴 뒤(실패해 선점을 되돌린 뒤 포함) 문서를 다시 읽어, 삭제됨이면 `purged`를 거짓으로 되돌리고 청크 삭제를 다시 요청하며(그 사이 지워진 데이터를 다시 지운다), 교체로 실패했고 새 버전에 실패 사유가 없으면 `REPLACED` 사유를 쓴다. 삭제됨·교체됨을 확인하면 선점 전이의 `processing_state` 기록과 색인 대기 갱신을 건너뛴다 — 삭제·교체가 남긴 `processing_state` 기록이 마지막이 되게 한다.
 
 #### 기동 때 선점 되돌리기
 
@@ -630,6 +659,32 @@ stateDiagram-v2
 
 직전 버전에 남은 `failure`는 `REQ-BE-1.10.5`가 3단계 전에 멈춰 남은 것일 수도 있다. 그 뒤 대기열에 있던 그 문서를 선점하다 멈춘 경우에도 문서는 `failed`로 되돌아가며, 관리자가 다시 색인 대기로 바꾼다(`REQ-BE-1.10.5`).
 
+### 예약 색인 실행
+
+```mermaid
+flowchart TB
+    Z["남은 captioning 문서를 queued로"] --> S["대상 읽기: 대기열 문서와 버전"] --> C["만들 요약·캡션이 있는 문서를 captioning으로"]
+    C --> I["모든 captioning 문서의 이미지 캡션"]
+    I --> T["마치지 않은 문서의 표 요약"]
+    T --> X["대상 문서의 색인 요청"]
+    X --> R["못 마친 문서를 queued로"]
+    I -.->|문서를 마침| Q["queued로 되돌리며 대기열에"]
+    T -.->|문서를 마침| Q
+    R -.-> Q
+```
+
+0. **남은 요약·캡션 생성 중 되돌리기** — `captioning`으로 남은 문서(앞 실행이 되돌리지 못한 문서)를 `queued`로 되돌리며 대기열에 넣는다. 삭제됨·교체됨은 뺀다. (`REQ-BE-1.10.10`, `REQ-BE-1.9.11`)
+1. **대상 읽기** — 0을 마친 뒤 대기열의 문서와 버전을 읽는다. 선점 중인 문서, 삭제됨·교체됨은 뺀다. 이 뒤에 대기열에 들어온 문서·버전은 다음 실행에 맡긴다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.11`)
+2. **요약·캡션 생성 중** — 대상 중 `pendingHints`가 1 이상인 문서를 `captioning`으로 바꾸며 대기열에서 뺀다. 만들 것이 없는 문서는 `queued` 그대로 둔다. 모든 문서를 바꾼 뒤에 이미지 캡션을 시작한다. (`REQ-BE-1.9.2`, `REQ-BE-1.10.7`)
+3. **이미지 캡션** — `captioning`으로 바꾼 모든 문서에 `image`로 `generateHints`를 부른다. `remaining`이 0이 된 문서는 바로 `queued`로 되돌리며 대기열에 넣는다. (`REQ-BE-1.10.9`, `REQ-BE-1.9.13`)
+4. **표 요약** — 3에서 되돌리지 않은 문서(멈춘 문서 제외)에 `table`로 `generateHints`를 부르고, 마친 문서를 `queued`로 되돌리며 대기열에 넣는다. (`REQ-BE-1.10.9`, `REQ-BE-1.9.13`)
+5. **색인 요청** — 1의 대상 문서마다, 아직 그 버전이 대기열에 있으면 색인을 요청하고 결과를 반영한다. 다 마치지 못해 `captioning`으로 남은 문서는 대기열에 없으므로 요청하지 않는다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.4`, `REQ-BE-1.10.3`)
+6. **못 마친 문서 되돌리기** — 2에서 `captioning`으로 바꾼 문서 중 3·4에서 되돌리지 않은 문서를 `queued`로 되돌리며 대기열에 넣는다. 다음 실행이 남은 요약·캡션부터 만든다. (`REQ-BE-1.9.14`)
+
+- 종료 중이면 남은 단계(6 포함)를 하지 않는다. `captioning`으로 남은 문서는 다음 기동이 `queued`로 되돌리고(`REQ-BE-1.9.12`), 대기열에 남은 문서는 다음 실행이 요청한다(`REQ-BE-1.10.8`)
+- `captioning`인 문서는 편집·재색인·내용 다시 올리기를 받지 않으므로(`REQ-BE-1.5.5`) 2~6 사이에 버전이 바뀌지 않는다. 삭제·교체는 `shouldContinue`가 멈추고(`REQ-BE-1.8.3`, `REQ-BE-1.2.8`), 그 문서는 3·4에서도 6에서도 `queued`로 돌아가지 않는다
+- 1의 대상 중 `queued`로 남은 문서(만들 요약·캡션이 없던 문서)는 2~4 동안 편집·내용 다시 올리기를 받을 수 있다. 버전이 바뀌면 5에서 요청하지 않고 다음 실행에 맡긴다(`REQ-BE-1.10.1`, `REQ-BE-1.10.4`)
+
 ### 교체
 
 1. **계기** — 문서가 `searchable`이 되거나, `searchable`인 문서의 이름·판 표기가 바뀐다. (`REQ-BE-1.2.5`)
@@ -638,8 +693,8 @@ stateDiagram-v2
 
 ### 기동 처리와 주기 작업
 
-1. **기동** — 기동 처리는 이벤트 구독이 준비된 뒤(`EventEmitterReadinessWatcher.waitUntilReady()`, `onApplicationBootstrap` 이후) 한다. storage 연결 뒤 「기동 때 선점 되돌리기」를 하고, `captioning`·`uploaded` 문서의 표·이미지 처리를 잇고, 대기열에 없는 `queued`·`indexing` 문서로 `reconcile`을 부른다. 대기열에 있는 문서는 색인을 요청하지 않고 다음 예약 색인에 맡긴다. 교체됨·삭제됨은 뺀다. (`REQ-BE-1.9.9`, `REQ-BE-1.9.11`, `REQ-BE-1.10.8`, `REQ-BE-3.3.1`)
-2. **예약 색인** — `INDEX_SCHEDULE_CRON` 일정(KST)마다 `REQ-BE-1.10.1`을 실행한다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.11`)
+1. **기동** — 기동 처리는 이벤트 구독이 준비된 뒤(`EventEmitterReadinessWatcher.waitUntilReady()`, `onApplicationBootstrap` 이후) 한다. storage 연결 뒤 「기동 때 선점 되돌리기」를 하고, `uploaded` 문서의 표·이미지 추출과 색인용 MD를 다시 해 색인 대기로 바꾸고, `captioning` 문서를 색인 대기로 되돌리고, 대기열에 없는 `queued`·`indexing` 문서로 `reconcile`을 부른다. 요약·캡션과 색인을 요청하지 않고 다음 예약 색인에 맡긴다. 교체됨·삭제됨은 뺀다. (`REQ-BE-1.9.9`, `REQ-BE-1.9.12`, `REQ-BE-1.9.11`, `REQ-BE-1.10.8`, `REQ-BE-3.3.1`)
+2. **예약 색인** — `INDEX_SCHEDULE_CRON` 일정(KST)마다 「예약 색인 실행」을 한다. 앞 실행이 다음 일정 시각까지 끝나지 않으면 그 시각의 실행은 건너뛰고 `documents.index_schedule_skipped`를 남긴다. 대기열에 남은 문서는 그다음 일정 시각의 실행이 처리한다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.11`, `REQ-BE-1.10.8`)
 3. **상태 맞추기** — `RECONCILE_INTERVAL_MS`마다 대기열에 없는 `queued`·`indexing` 문서로 `reconcile`. (`REQ-BE-3.3.1`)
 4. **재요청** — `RAG_RETRY_INTERVAL_MS`마다 `pendingRag`가 남은 문서의 청크 삭제·이름·판 정보 변경을 다시 부르고, 성공하면 표시를 지운다. 청크 삭제가 성공한 삭제됨 문서는 데이터를 지운다. (`REQ-BE-1.8.4`, `REQ-BE-1.8.5`, `REQ-BE-3.4.2`)
 
@@ -671,8 +726,9 @@ stateDiagram-v2
 | `documents.state_changed` | 처리·검색 상태 변경 | info | `docId`, `version`, `from`, `to`, `searchState` | `REQ-BE-1.9` |
 | `documents.replaced` | 교체 | info | `docId`, `replacedBy` | `REQ-BE-1.2.5` |
 | `documents.processing_stopped` | 삭제·교체·새 버전·종료·상태 변경으로 처리를 멈춤 | info | `docId`, `version`, `reason`(`deleted`·`replaced`·`superseded`·`shutdown`·`state_changed`) | `REQ-BE-1.8.3` |
-| `documents.resume` | 기동 처리 | info | `captioning`, `reconciled`, `recovered`(「기동 때 선점 되돌리기」로 직전 버전으로 되돌린 문서 수) | `REQ-BE-1.9.9` |
-| `documents.index_scheduled` | 예약 색인 한 번이 끝남 | info | `requested`(요청한 문서 수), `unreachable`(연결 실패로 대기열에 남긴 문서 수) | `REQ-BE-1.10.1`, `REQ-BE-1.10.3` |
+| `documents.resume` | 기동 처리 | info | `uploaded`(표·이미지 추출을 다시 한 문서 수), `captioning`(색인 대기로 되돌린 문서 수), `reconciled`, `recovered`(「기동 때 선점 되돌리기」로 직전 버전으로 되돌린 문서 수) | `REQ-BE-1.9.9`, `REQ-BE-1.9.12` |
+| `documents.index_scheduled` | 예약 색인 한 번이 끝남 | info | `requeued`(시작 때 요약·캡션 생성 중에서 색인 대기로 되돌린 문서 수), `captioned`(요약·캡션 생성 중으로 바꾼 문서 수), `requested`(색인을 요청한 문서 수), `unreachable`(연결 실패로 대기열에 남긴 문서 수) | `REQ-BE-1.10.1`, `REQ-BE-1.10.3`, `REQ-BE-1.10.10` |
+| `documents.index_schedule_skipped` | 앞 예약 색인이 끝나지 않아 그 일정 시각의 실행을 건너뜀 | warning | `queued`(그때 대기열에 있는 문서 수), `captioning`(그때 요약·캡션 생성 중인 문서 수) | `REQ-BE-1.10.1` |
 | `documents.task_failed` | 백그라운드 작업 실패 | warning | `task`(`process`·`scheduled_index`·`delete_chunks`·`metadata`·`resume`·`reconcile`·`rag_retry`), `docId`(문서와 무관하면 `null`), `errorName` | `REQ-BE-1.1.9` |
 | `documents.event_dropped` | 작업 상태 이벤트를 3번 시도해도 조건이 어긋나 반영하지 못함 | warning | `docId`, `version`, `jobState` | `REQ-BE-1.9.5` |
 
@@ -680,7 +736,7 @@ stateDiagram-v2
 
 ### 런타임·보안
 
-- **실행 형태** — 표·이미지 처리는 요청에 응답한 뒤 백그라운드로 한다. 색인 요청은 예약 색인에서만 한다. 예약 색인과 주기 작업은 앞 실행이 끝나기 전에 겹쳐 돌지 않는다. 백그라운드 작업은 응답 뒤(다음 이벤트 루프 차례)에 시작하고, 실패는 `documents.task_failed`로 남긴다. 종료할 때는 새 작업을 받지 않고 진행 중인 작업을 기다린 뒤 저장소를 닫는다(멈춘 표·이미지 처리는 다음 기동 처리가 잇는다). ★ 기다리기 전에 청크 삭제·이름·판 정보 변경 요청은 끊는다 — 이 요청은 `RAG_WAIT_TIMEOUT_MS`(기본 10분)까지 기다려 종료를 붙잡는다. 백그라운드 작업이 `indexing.deleteChunks`·`indexing.updateMetadata`에 종료 때 중단되는 `signal`을 넘기며, 끊긴 요청은 실패와 같아 `pendingRag` 표시가 남고 다음 기동 뒤 재요청이 잇는다(`REQ-BE-1.8.4`, `REQ-BE-3.4.2`).
+- **실행 형태** — 표·이미지 추출은 요청 안에서, 색인 대기로 바꾸는 갱신은 요청에 응답한 뒤 백그라운드로 한다. 요약·캡션 생성과 색인 요청은 예약 색인에서만 한다. 예약 색인과 주기 작업은 앞 실행이 끝나기 전에 겹쳐 돌지 않는다. 겹친 예약 색인 시각의 실행은 건너뛴다(「기동 처리와 주기 작업」). 백그라운드 작업은 응답 뒤(다음 이벤트 루프 차례)에 시작하고, 실패는 `documents.task_failed`로 남긴다. 종료할 때는 새 작업을 받지 않고 진행 중인 작업을 기다린 뒤 저장소를 닫는다(색인 대기로 바꾸지 못한 `uploaded`와 멈춘 `captioning`은 다음 기동 처리가 잇는다, `REQ-BE-1.9.9`, `REQ-BE-1.9.12`). ★ 기다리기 전에 청크 삭제·이름·판 정보 변경 요청은 끊는다 — 이 요청은 `RAG_WAIT_TIMEOUT_MS`(기본 10분)까지 기다려 종료를 붙잡는다. 백그라운드 작업이 `indexing.deleteChunks`·`indexing.updateMetadata`에 종료 때 중단되는 `signal`을 넘기며, 끊긴 요청은 실패와 같아 `pendingRag` 표시가 남고 다음 기동 뒤 재요청이 잇는다(`REQ-BE-1.8.4`, `REQ-BE-3.4.2`).
 - **동시성** — 상태를 바꾸는 쓰기는 기대하는 현재 상태를 조건으로 한 원자적 갱신이다. 조건이 맞지 않으면 바꾸지 않는다
 
 ## 테스트와 추적성
@@ -694,8 +750,8 @@ stateDiagram-v2
 | `REQ-BE-1.1.5` | unit | 판 정보 유무 저장 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.1.6` | e2e | 이름 없음·판 반쪽 거부, 문서 없음 | | `test/` |
 | `REQ-BE-1.1.7` | unit | 원본 보존 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.1.8` | e2e | 처음 상태 | RAG Server (가짜) | `test/` |
-| `REQ-BE-1.1.9` | e2e | 백그라운드 처리 시작과 업로드 기록 | RAG Server (가짜) | `test/` |
+| `REQ-BE-1.1.8` | e2e | 처음 상태, 처리 상태 기록이 `uploaded`에서 출발 | RAG Server (가짜) | `test/` |
+| `REQ-BE-1.1.9` | e2e | 응답 전 색인용 MD, 응답 뒤 `queued`와 대기열, 요약·캡션·색인 요청 없음, 업로드 기록 | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.1.10` | e2e | 한도 초과 `413`, 경계 크기 수용 | | `test/` |
 | `REQ-BE-1.2.1` | unit | 이름으로 묶임 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.2.2` | unit | 최신판, 같은 날짜, 검색 안 됨 제외 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
@@ -710,14 +766,14 @@ stateDiagram-v2
 | `REQ-BE-1.3.3` | e2e | 조건별 거르기, 최신판만 | | `test/` |
 | `REQ-BE-1.3.4` | e2e | KST 하루 경계 | | `test/` |
 | `REQ-BE-1.3.5` | unit | 판 칸 구성과 순서 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.3.6` | unit | 단계 붙이기, 실패 시 `null` | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.3.6` | unit | 단계 붙이기(`embedding_pending` 그대로), 실패 시 `null` | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.3.7` | e2e | 이름 목록 중복 없음·접두사·가나다순 | | `test/` |
 | `REQ-BE-1.3.8` | unit | 실패 설명 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.3.9` | unit | 대기열 여부, 일정의 다음 시각, `queued` 밖은 `null` | `MONGO_DB` (가짜), 시계 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.4.1` | e2e | 문서 정보, 버전 필드 없음, 삭제 문서 `404` | | `test/` |
 | `REQ-BE-1.4.2` | unit | 처리 상태별 부가 정보 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.4.3` | e2e | 원본과 이미지 주소 | RAG Server (가짜) | `test/` |
-| `REQ-BE-1.4.4` | unit | 표·이미지 목록 | assets (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.4.4` | unit | 표·이미지 목록, 예약 색인 전 요약·캡션 `null`·임시 아님 | assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.4.5` | unit | 검색 가능일 때만, RAG 버전으로 복원, RAG 불가 시 오류 | rag·assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.4.6` | e2e | 문서 조회의 대기열 여부와 다음 예약 시각 | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.5.1` | unit | 보낸 필드만 변경과 편집 기록 | `MONGO_DB` (가짜), logs (가짜) | `src/documents/**/*.spec.ts` |
@@ -727,33 +783,38 @@ stateDiagram-v2
 | `REQ-BE-1.5.5` | e2e | 처리 중·대기열 밖 `queued` 변경 `409`, 대기열 문서의 편집·다시 올리기 수용과 재색인 `409`, 동시 편집 하나만 | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.5.6` | unit | 교체됨 변경·색인 대기로 바꾸기 거부 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.6.1` | e2e | 다시 올리기 규칙과 기록 | RAG Server (가짜) | `test/` |
-| `REQ-BE-1.6.2` | unit | 표·이미지 처리부터, 검색 상태 유지 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.6.2` | unit | 이어받지 않고 추출부터, 요약·캡션은 다음 예약 색인, 검색 상태 유지 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.6.3` | unit | 이어받은 새 버전 | assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.6.4` | e2e | 응답에 버전 필드 없음 | RAG Server (가짜) | `test/` |
-| `REQ-BE-1.7.1` | unit | 임시 설명 유무별 경로, 바로 요청하지 않음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.7.1` | unit | 임시 설명 유무와 관계없이 바로 대기열, 요청 때 요약·캡션·색인 요청 없음, 다음 예약 색인에서 임시 설명만 다시 만든 뒤 `force: true` | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.1` | e2e | 즉시 `204`와 삭제됨, 대기열 비움 | RAG Server (가짜, 지연) | `test/` |
 | `REQ-BE-1.8.2` | unit | 목록·조회·검색·이름 목록에서 빠짐 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.8.3` | unit | 삭제 뒤 남은 요청 없음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.8.3` | unit | 예약 색인의 요약·캡션 생성 중 삭제 뒤 남은 요청 없음, 대기열 문서 삭제 뒤 색인 요청 없음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.4` | unit | 청크 삭제 재요청, 종료 때 요청을 끊고 표시를 남김 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.5` | unit | 청크 삭제 뒤에만 데이터 삭제 | indexing·assets (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.8.6` | unit | 삭제 뒤 이름·판 유지 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.1` | unit | 다시 올리기 → 업로드됨 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.9.2` | unit | 요약·캡션 생성 중을 거침 | assets (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.9.3` | unit | 색인 준비 계기마다 `queued`와 대기열, 그때 요청 없음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.2` | unit | 예약 색인에서 만들 것이 있는 문서만 `captioning`과 대기열 빼기, 만들 것이 없는 문서와 업로드·재색인 요청은 거치지 않음, 조건이 어긋나면 건너뜀 | assets (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.3` | unit | 색인용 MD 완성 계기마다 `queued`와 대기열, 그때 요약·캡션·색인 요청 없음 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.4` | unit | 결과별 상태와 작업 ID, 거부 코드별 실패 사유, 연결 실패 시 그대로, 마지막 버전이 아니면 상태 미반영이어도 `accepted`의 작업 ID 기록, `requestSeq`가 바뀌었으면 결과를 버림 | indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.5` | unit | 이벤트별 처리 상태, 실패 사유, `failed` 문서는 어떤 이벤트로도 바뀌지 않음, `queued` 이벤트가 대기열에 넣지 않음 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.6` | unit | 반영하지 않는 이벤트 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.7` | unit | 검색 가능 전환과 교체 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.9.8` | unit | 새 버전 실패에도 검색 가능 | 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.9.9` | unit | 기동 때 남은 표·이미지만 | assets (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.9.11` | unit | 기동 처리·상태 맞추기·예약 색인에서 교체됨·삭제됨 제외 | indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.9` | unit | 기동 때 `uploaded` 문서의 다시 추출과 색인용 MD 쓰기, `queued`와 대기열, 요약·캡션 요청 없음 | assets (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.11` | unit | 기동 처리·상태 맞추기·예약 색인의 요약·캡션 생성과 요청에서 교체됨·삭제됨 제외 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.12` | unit | 기동 때 `captioning` → `queued`와 대기열, 요약·캡션 요청 없음, 다음 예약 색인에서 남은 것만 | assets (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.13` | unit | 마친 문서만 `queued`와 대기열, `captioning` 기록의 합계, 삭제·교체된 문서는 되돌리지 않음 | assets·logs (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.9.14` | unit | 요약·캡션 생성 예외·표 요약 뒤 `pending` 남음 문서가 실행 끝에 `queued`와 대기열, 실패 결과의 `captioning` 기록과 그 실행의 개수, 그 실행에서 색인 요청 없음, 다음 실행에서 남은 것만, 삭제·교체·종료로 끊긴 문서는 되돌리지 않고 기록 없음 | assets·indexing·logs (가짜, 예외) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-3.3.1` | unit | (documents 쪽, 대기열 제외) 기동 처리·상태 맞추기에서 대기열 문서 제외, 대기열 밖 `queued`·`indexing`만 `reconcile`에 넘김 | indexing (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.10.1` | unit | 일정 시각에만 대기열 문서마다 요청, 재색인 버전만 `force`, 선점 중 문서 건너뜀 | indexing (가짜), 일정 (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.10.2` | unit | 색인 대기 전환과 대기열 넣기가 한 갱신, 조건이 어긋나면 둘 다 그대로 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.10.1` | unit | 일정 시각에만 요약·캡션을 만든 뒤 대상 문서마다 요청, 재색인 버전만 `force`, 선점 중 문서 건너뜀, 실행 중 대기열에 들어온 문서는 요청하지 않음, 앞 실행 중의 일정 시각은 건너뛰고 `documents.index_schedule_skipped`를 남기며 다음 일정에 처리 | assets·indexing (가짜), 일정 (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.10.2` | unit | 여섯 계기마다 색인 대기 전환과 대기열 넣기가 한 갱신, 조건이 어긋나면 둘 다 그대로 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.3` | unit | 응답 결과별 대기열에서 빼기, 연결 실패면 남고 다음 일정에 다시 요청, `requestSeq`가 바뀌어 버린 결과는 대기열을 건드리지 않음 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.4` | unit | 대기열 문서의 편집·다시 올리기가 이전 버전을 빼기, 새 버전 실패 시 대기열 복원, 「기동 때 선점 되돌리기」 표의 네 경우 | assets (가짜, 실패), `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.5` | unit | 실패 문서를 색인 대기로 바꾸기와 대기열, `jobId` 비우기·`requestSeq` 늘리기 → 상태 갱신 → 같은 값의 `failure`만 비우기 순서, 단계 사이에서 멈춘 경우, 늦게 온 지난 `accepted`가 `jobId`를 못 씀, 2·3단계 사이의 새 실패 사유가 남음 | `MONGO_DB` (가짜, 단계 사이 실패), indexing·logs (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.5` | e2e | `POST /v1/documents/{doc_id}/queue`가 실패 문서에 `202`이고 뒤이은 조회가 처리 상태 색인 대기·`in_index_queue` 참, 교체됨 문서는 `409 DOCUMENT_LOCKED` | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.10.6` | e2e | 실패가 아닌 문서 `409`, 상태 그대로 | RAG Server (가짜) | `test/` |
-| `REQ-BE-1.10.7` | unit | 삭제·교체·작업 상태 이벤트로 대기열에서 빠짐 | `MONGO_DB` (가짜), 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.10.7` | unit | 삭제·교체·작업 상태 이벤트·`captioning` 전환으로 대기열에서 빠짐 | `MONGO_DB` (가짜), 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.8` | e2e | 앱을 다시 띄워도 대기열이 남고 다음 일정에 요청 | RAG Server (가짜) | `test/` |
+| `REQ-BE-1.10.9` | unit | 모든 문서의 이미지 캡션 → 표 요약 → 색인 요청 순서, 멈춘 문서는 남은 단계 건너뜀 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.10.10` | unit | 시작 때 남은 `captioning` 문서가 `queued`와 대기열로 돌아와 그 실행 대상이 되고 남은 `pending`만 요청·색인 요청까지, 삭제됨·교체됨·조건 어긋남은 그대로, `requeued` 개수 | assets·indexing (가짜), `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |

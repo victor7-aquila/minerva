@@ -415,10 +415,14 @@ def make_record(
 
 
 def expected_index_text(chunk: Chunk, assets: Mapping[str, str]) -> str:
-    """MODULE.md 3.1.1의 색인 텍스트를 테스트 쪽에서 계산한다."""
+    """MODULE.md 3.1.1·3.1.3의 색인 텍스트를 테스트 쪽에서 계산한다."""
     if chunk.kind == ChunkKind.ASSET:
         return assets[chunk.placeholder_ids[0]]
     text = chunk.text
     for placeholder in find_placeholders(chunk.text):
         text = text.replace(placeholder.raw, assets[placeholder.placeholder_id])
-    return text
+    # 머리글: 헤딩 경로 한 줄 + 제목 한 줄(빈 쪽은 줄을 뺀다), 둘 다 비면 본문만
+    header_lines = [line for line in (" > ".join(chunk.heading_path), chunk.title or "") if line]
+    if not header_lines:
+        return text
+    return "\n".join(header_lines) + "\n\n" + text

@@ -8,7 +8,7 @@ Backend의 모든 모듈이 기대는 공통 기반이다. 설정 키 정의와 
 
 - 설정은 `ConfigService`로만 읽고, 모든 "설정한 값"은 환경 변수로 바꿀 수 있다. 키 정의는 이 문서 「설정」 한 곳이다 (`REQ-BE-8.1.1`, `AGENTS.md`)
 - 문서 본문, 청크 텍스트, 질의 원문, 토큰은 애플리케이션 로그에 나가지 않는다. 금지 경로는 로거 설정이 지운다 (`REQ-BE-8.2.1`)
-- 경계 밖으로 나가는 실패는 모두 `DomainError`의 하위 클래스이고, 코드와 내부 정보 없는 한국어 메시지를 갖는다 (`REQ-BE-8.3`). 예외는 순수 함수 `kstDayRange`의 `RangeError` 하나이며, 사용자 입력을 받는 호출자는 이를 `InvalidRequestError`로 바꾸는 `parseKstDayRange`를 쓴다 (`REQ-BE-8.4.1`)
+- 경계 밖으로 나가는 실패는 모두 `DomainError`의 하위 클래스이고, 코드와 내부 정보 없는 한국어 메시지, 오류 응답의 `details`가 될 값을 갖는다 (`REQ-BE-8.3`, `API.md` 「공통 규약」). 예외는 순수 함수 `kstDayRange`의 `RangeError` 하나이며, 사용자 입력을 받는 호출자는 이를 `InvalidRequestError`로 바꾸는 `parseKstDayRange`를 쓴다 (`REQ-BE-8.4.1`)
 - 시각은 UTC ISO 8601로 주고받고, 날짜 필터는 KST 하루로 해석한다. 두 변환은 이 모듈의 함수로만 한다. 요청의 날짜 필터는 `parseKstDayRange`를 거쳐, 날짜가 틀리면 `InvalidRequestError`를 낸다 (`REQ-BE-8.4.1`, `REQ-BE-1.3.4`, `REQ-BE-6.2.2`)
 
 **기능 그룹**
@@ -17,7 +17,7 @@ Backend의 모든 모듈이 기대는 공통 기반이다. 설정 키 정의와 
 | :--- | :--- | :--- |
 | `REQ-BE-8.1` | 설정 | 모든 설정 키를 정의하고 기동 때 검증한다 |
 | `REQ-BE-8.2` | 로그 | nestjs-pino 로거를 구성해 전역으로 제공하고 금지 데이터를 지운다 |
-| `REQ-BE-8.3` | 오류 응답 | 도메인 오류 클래스와 코드, 한국어 메시지를 정의한다 |
+| `REQ-BE-8.3` | 오류 응답 | 도메인 오류 클래스와 코드, 한국어 메시지, 오류 코드별 추가 정보(`details`)를 정의한다 |
 | `REQ-BE-8.4` | 시각 | 시각 직렬화와 KST 날짜 범위 변환, 날짜 오류의 도메인 오류 변환을 제공한다 |
 | `REQ-BE-7.1.3` (떠받침) | 페이지 규약 | 목록 요청 DTO와 페이지 응답 형식을 정의한다 |
 
@@ -125,22 +125,32 @@ export function scrubForbiddenKeys(value: unknown): unknown;
 /** 경계 밖으로 나가는 오류의 기반이다. */
 export abstract class DomainError extends Error {
   abstract readonly code: ErrorCode;
+  /** 오류 응답의 details다. API.md 「오류 코드」가 정하지 않은 코드는 null이다. */
+  readonly details: Readonly<Record<string, unknown>> | null;
   constructor(message?: string);
+}
+
+/** RAG Server가 일괄 색인 중이라 요청을 거부했다. */
+export class BatchIndexingError extends DomainError {
+  readonly code: 'BATCH_INDEXING';
+  readonly remainingJobs: number;
+  readonly details: { remaining_jobs: number };
+  constructor(remainingJobs: number, message?: string);
 }
 
 export type ErrorCode =
   | 'INVALID_REQUEST' | 'UNSUPPORTED_FILE' | 'ANSWER_SPAN_NOT_FOUND'
   | 'UNAUTHORIZED' | 'DOCUMENT_NOT_FOUND' | 'ASSET_NOT_FOUND' | 'GOLDEN_SET_NOT_FOUND'
   | 'DOCUMENT_LOCKED' | 'DOCUMENT_NOT_SEARCHABLE' | 'EVALUATION_IN_PROGRESS'
-  | 'PAYLOAD_TOO_LARGE' | 'RAG_UNAVAILABLE';
+  | 'PAYLOAD_TOO_LARGE' | 'RAG_UNAVAILABLE' | 'BATCH_INDEXING';
 ```
 
 `ErrorCode`는 `API.md` 「오류 코드」에서 `INTERNAL_ERROR`·`NOT_FOUND`를 뺀 목록과 같다. 두 코드는 api가 도메인 오류가 아닌 예외를 바꿀 때만 쓴다(api `MODULE.md` 「예외」). 하위 클래스는 「예외」 표가 소유한다.
 
 **`REQ-BE-8.3.1`** 오류 코드와 한국어 메시지
 
-- 처리 계약: 모든 하위 클래스는 `code`와 한국어 기본 메시지를 갖는다. 메시지를 넘기면 그 메시지를 쓴다
-- 충족 기준: 「예외」 표의 모든 도메인 오류 클래스가 `API.md` 목록의 `code`와 한글이 든 기본 메시지를 갖는다
+- 처리 계약: 모든 하위 클래스는 `code`와 한국어 기본 메시지를 갖는다. 메시지를 넘기면 그 메시지를 쓴다. `details`는 `API.md` 「오류 코드」가 그 코드에 정한 객체이고, 정하지 않은 코드는 `null`이다. `BatchIndexingError`의 `details`는 `API.md` 「오류 코드」의 `BATCH_INDEXING` 모양을 `remainingJobs`로 채운 것이다(`REQ-BE-10.1.5`)
+- 충족 기준: 「예외」 표의 모든 도메인 오류 클래스가 `API.md` 목록의 `code`와 한글이 든 기본 메시지를 갖고, `BatchIndexingError(3)`의 `details`가 `{ remaining_jobs: 3 }`이며 그 밖의 클래스는 `null`이다
 
 **`REQ-BE-8.3.2`** 내부 정보 비노출
 
@@ -250,6 +260,7 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 | `AnswerSpanNotFoundError` | 정답 구간이 색인용 MD에 없다 | `ANSWER_SPAN_NOT_FOUND` | 발생: evaluation | `REQ-BE-5.1.5` |
 | `EvaluationInProgressError` | 평가 중인 골든셋이 있다 | `EVALUATION_IN_PROGRESS` | 발생: evaluation | `REQ-BE-5.2.5` |
 | `RagUnavailableError` | RAG Server가 응답하지 않거나 준비 중이다 | `RAG_UNAVAILABLE` | 발생: rag | `REQ-BE-10.1.2` |
+| `BatchIndexingError` | RAG Server가 일괄 색인 중이라 검색·평가를 거부했다. `remainingJobs`는 RAG Server가 알려 준 남은 작업 수 | `BATCH_INDEXING` | 발생: rag. 전파: search. 기록으로 바꿈: evaluation | `REQ-BE-10.1.5`, `REQ-BE-5.2.9` |
 | `RangeError` | `kstDayRange`에 날짜 형식이 아니거나 달력에 없는 날짜가 들어온다 | 도메인 오류가 아니다 | 발생: common(`kstDayRange`). 변환: common(`parseKstDayRange` → `InvalidRequestError`) | `REQ-BE-8.4.1` |
 
 ## 테스트와 추적성
@@ -258,7 +269,7 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 | :--- | :--- | :--- | :--- | :--- |
 | `REQ-BE-8.1.1` | unit | 키별 환경 변수 반영과 기본값, 필수 키 누락·`INDEX_SCHEDULE_CRON` 형식 오류 시 기동 실패와 이유에 값 없음 | 환경 변수 | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.2.1` | unit | 금지 키·본문·토큰 헤더 제거, 허용 필드 유지 | 로그 출력 캡처 | `src/common/**/*.spec.ts` |
-| `REQ-BE-8.3.1` | unit | 모든 오류의 코드·한국어 메시지, 코드가 `API.md` 목록에 있음 | | `src/common/**/*.spec.ts` |
+| `REQ-BE-8.3.1` | unit | 모든 오류의 코드·한국어 메시지, 코드가 `API.md` 목록에 있음, `details`는 `BATCH_INDEXING`만 객체이고 나머지 `null` | | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.3.2` | unit | 기본 메시지에 내부 표현 없음, 감싼 오류 문자열 비노출 | | `src/common/**/*.spec.ts` |
 | `REQ-BE-8.4.1` | unit | UTC 문자열, KST 하루 범위, 잘못된 날짜의 `RangeError`와 `InvalidRequestError`, 메시지에 입력값 없음 | | `src/common/**/*.spec.ts` |
 | `REQ-BE-7.1.3` (떠받침) | unit | `PageQueryDto` 기본값·제약과 `toPage()`의 응답 형식만 본다. 목록 응답 전체의 충족 기준은 api의 e2e 행이 본다 | | `src/common/**/*.spec.ts` |

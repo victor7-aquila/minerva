@@ -1,6 +1,6 @@
 # resource 모듈 명세 (REQ-RAG-12)
 
-RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한 통로다. Ollama의 LLM·VLM(청킹, 표 요약, 이미지 캡션)과 프로세스 안의 sentence-transformers 모델(임베딩, 재정렬)을 감싸고, 색인과 질의가 같은 방식으로 만들어야 하는 dense·키워드 벡터를 한 곳에서 만든다. 또 Qdrant에 연결해 청크 레코드(`IF-RAG-1`의 `ChunkRecord`)와 dense·키워드 벡터를 저장·삭제·조회한다. 레코드의 필드를 스스로 채우거나 바꾸지 않고 받은 그대로 저장하며, 저장된 벡터 차원이 지금 임베딩 모델과 다르면 저장도 조회도 하지 않는다. 폴더는 `apps/rag-server/src/minerva_rag/resource`다.
+RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한 통로다. Ollama의 LLM·VLM(청킹, 표 요약, 이미지 캡션)과 프로세스 안의 sentence-transformers 모델(임베딩, 재정렬)을 감싸고, GPU를 쓸 수 있으면 임베딩·재정렬 모델을 GPU에서 실행하며, service가 일괄 색인 단계마다 부르는 모델 내리기·올리기를 제공한다. 색인과 질의가 같은 방식으로 만들어야 하는 dense·키워드 벡터를 한 곳에서 만든다. 또 Qdrant에 연결해 청크 레코드(`IF-RAG-1`의 `ChunkRecord`)와 dense·키워드 벡터를 저장·삭제·조회한다. 레코드의 필드를 스스로 채우거나 바꾸지 않고 받은 그대로 저장하며, 저장된 벡터 차원이 지금 임베딩 모델과 다르면 저장도 조회도 하지 않는다. 폴더는 `apps/rag-server/src/minerva_rag/resource`다.
 
 ## 요약
 
@@ -11,6 +11,7 @@ RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한
 - 생성 요청은 Ollama의 기본 컨텍스트에 맡기지 않는다. 요청마다 `RAG_LLM_CONTEXT_TOKENS`를 지정하고, 넘치는 입력은 보내지 않고 오류를 낸다. Ollama는 컨텍스트를 넘는 입력을 오류 없이 잘라 쓰기 때문이다 (`REQ-RAG-2.5.2.2`)
 - 생각 모드를 끄고 생성한다. 생각 과정이 응답에 섞이면 부른 단위의 응답 해석이 깨진다 (`REQ-RAG-2.1.1`, `REQ-RAG-10.2.2.1`)
 - 외부에서 호스팅하는 모델 API를 부르지 않는다. LLM·VLM은 설정한 Ollama, 임베딩·재정렬은 프로세스 안에서만 실행한다 (`AGENTS.md`)
+- 임베딩·재정렬 계산은 언제 불려도 그 모델이 실행 장치(GPU를 쓸 수 있으면 GPU, 아니면 CPU)에 올라간 상태에서 한다. 내려 둔 모델로 계산하거나 GPU가 있는데 CPU로 계산하지 않는다 (`REQ-RAG-12.1.3`)
 - 레코드는 받은 그대로 저장하고 그대로 돌려준다. 버전 전환, 최신판 표시 같은 판단은 하지 않고 indexing이 지시한 대로만 바꾼다 (`IF-RAG-1`)
 - 조회 메서드는 `active`가 `True`인 레코드만 돌려준다(기동 복구용 `job_records`만 예외). search가 이전 버전·색인 중인 버전을 보지 않게 하는 경계다 (`REQ-RAG-3.3.1`, `REQ-RAG-3.3.2`)
 - 차원이 맞지 않으면 모든 저장·조회가 오류를 낸다. 틀린 공간의 벡터로 조용히 검색하지 않는다 (`REQ-RAG-12.2.2`)
@@ -19,7 +20,7 @@ RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한
 
 | REQ | 기능 그룹 | 책임 |
 | :--- | :--- | :--- |
-| `REQ-RAG-12.1` | 모델 준비와 호출 | 기동 때 모델을 준비하고, 생성·임베딩·키워드 벡터·재정렬·토큰 세기를 제공한다 |
+| `REQ-RAG-12.1` | 모델 준비와 호출 | 기동 때 모델을 준비하고, 생성·임베딩·키워드 벡터·재정렬·토큰 세기와 GPU 메모리에서 모델 내리기·올리기를 제공한다 |
 | `REQ-RAG-12.2` | 저장소 연결 | Qdrant에 연결해 컬렉션을 맞추고, 청크 레코드를 저장·삭제·조회한다 |
 
 **비범위**
@@ -27,6 +28,7 @@ RAG Server가 쓰는 외부 자원 — 모델과 Qdrant — 에 닿는 유일한
 - 모델에 보낼 프롬프트와 응답 해석 — 그 모델을 쓰는 단위(service의 표 요약·이미지 캡션, chunking)
 - 재정렬 실패 시 합친 순위로 돌려주는 폴백 — search (`REQ-RAG-4.2.2`)
 - 작업 실패 사유로 바꾸는 일 — service
+- 언제 모델을 내리고 올릴지(일괄 색인의 단계) — service (`REQ-RAG-10.8.8`)
 - 어떤 레코드를 언제 저장·활성화·삭제할지 — indexing
 - 검색 범위(판, 문서 ID)를 무엇으로 할지, 점수 합치기 — search
 
@@ -78,12 +80,13 @@ flowchart LR
 | :--- | :--- | :--- | :--- | :--- |
 | core | import | `Settings`, `get_logger`, `ModelLoadError`, `ModelUnavailableError`, `PromptTooLongError`, `SparseVector` | core `MODULE.md` | `REQ-RAG-12.1` |
 | core | import | `ChunkRecord`, `Chunk`, `Edition`, `SparseVector`, `Settings`, `get_logger`, `StoreUnavailableError`, `VectorDimensionMismatchError` | `IF-RAG-1`, core `MODULE.md` | `REQ-RAG-12.2` |
-| Ollama | HTTP | 생성, 모델 목록 | Ollama | `REQ-RAG-12.1.1`, `REQ-RAG-12.1.2` |
+| Ollama | HTTP | 생성, 모델 목록, 모델 내리기 | Ollama | `REQ-RAG-12.1.1`, `REQ-RAG-12.1.2`, `REQ-RAG-10.8.8.4` |
 | sentence-transformers | import | 임베딩·재정렬 모델 실행 | sentence-transformers | `REQ-RAG-12.1.1` |
+| PyTorch | import | GPU 사용 가능 여부, 실행 장치, 정밀도 | PyTorch | `REQ-RAG-12.1.3` |
 | 모델 파일 위치 | 파일 읽기 | `RAG_MODELS_DIR` | core 「설정」 | `REQ-RAG-12.1.1` |
 | Qdrant | HTTP (qdrant-client) | 컬렉션·포인트 API | Qdrant | `REQ-RAG-12.2` |
 
-**금지 의존** — Qdrant와 Ollama·sentence-transformers에는 resource만 접근한다. `ChunkStore`의 저장·삭제 메서드는 indexing만 부르고, search는 조회 메서드만 부른다. service는 조립, 기동·종료, 상태 확인, 표 요약·이미지 캡션 생성에만 resource를 쓴다(`ARCHITECT.md` 「의존 규칙」). 외부 호스팅 모델 API를 부르지 않는다(`AGENTS.md`).
+**금지 의존** — Qdrant와 Ollama·sentence-transformers에는 resource만 접근한다. `ChunkStore`의 저장·삭제 메서드는 indexing만 부르고, search는 조회 메서드만 부른다. service는 조립, 기동·종료, 상태 확인, 표 요약·이미지 캡션 생성, 일괄 색인 단계마다 모델 내리기·올리기에만 resource를 쓴다(`ARCHITECT.md` 「의존 규칙」). 외부 호스팅 모델 API를 부르지 않는다(`AGENTS.md`).
 
 ### 공개 표면
 
@@ -93,6 +96,7 @@ flowchart LR
 | 모델 준비와 호출 | `ModelHub.generate`, `LlmRole` | 같은 절 | `REQ-RAG-12.1.2` |
 | 모델 준비와 호출 | `ModelHub.embed_documents`, `embed_query`, `encode_sparse_documents`, `encode_sparse_query`, `rerank`, `count_tokens`, `embedding_dimension`, `embedding_model_name` | 같은 절 | `REQ-RAG-12.1` |
 | 모델 준비와 호출 | `ModelHub.ollama_available` | 같은 절 | `REQ-RAG-9.2.1` |
+| 모델 준비와 호출 (내리기·올리기) | `ModelHub.release_ollama_models`, `release_local_models`, `load_local_models` | 같은 절의 「GPU 메모리에서 내리기·올리기」 | `REQ-RAG-10.8.8.4`, `REQ-RAG-10.8.8.5`, `REQ-RAG-10.8.8.6`, `REQ-RAG-12.1.3` |
 | 저장소 연결 | `ChunkStore.connect`, `close`, `ping` | 「저장소 연결 — REQ-RAG-12.2」 | `REQ-RAG-12.2.1`, `REQ-RAG-12.2.2` |
 | 저장소 연결 (쓰기) | `ChunkStore.upsert`, `activate_records`, `delete_records_except`, `delete_records`, `delete_document`, `set_document_metadata`, `set_latest_editions` | 같은 절 | `REQ-RAG-12.2` |
 | 저장소 연결 (조회) | `ChunkStore.search_dense`, `search_sparse`, `active_records`, `active_editions`, `job_records`, `ChunkFilter`, `ScoredRecord` | 같은 절 | `REQ-RAG-12.2` |
@@ -164,9 +168,14 @@ class ModelHub:
     def embedding_model_name(self) -> str: ...
 
     async def ollama_available(self) -> bool: ...
+
+    # GPU 메모리에서 내리기·올리기 — service만 부른다
+    async def release_ollama_models(self) -> None: ...
+    async def release_local_models(self) -> None: ...
+    async def load_local_models(self) -> None: ...
 ```
 
-- `prepare` 전에 `generate`·`embed_documents`·`embed_query`·`rerank`·`count_tokens`·`embedding_dimension`을 부르면 `RuntimeError`다(호출 순서 위반). `encode_sparse_documents`·`encode_sparse_query`·`embedding_model_name`·`ollama_available`·`close`는 `prepare` 없이 동작한다. `close`는 여러 번 불러도 된다
+- `prepare` 전에 `generate`·`embed_documents`·`embed_query`·`rerank`·`count_tokens`·`embedding_dimension`·`release_local_models`·`load_local_models`를 부르면 `RuntimeError`다(호출 순서 위반). `encode_sparse_documents`·`encode_sparse_query`·`embedding_model_name`·`ollama_available`·`release_ollama_models`·`close`는 `prepare` 없이 동작한다. `close`는 여러 번 불러도 된다
 - `generate`는 `role`에 대응하는 설정의 모델로 생성한다. `image`는 `IMAGE_CAPTION`에서만 쓰며, 다른 역할에 주면 `ValueError`다. `json_schema`를 주면 그 스키마에 맞는 JSON 문자열을 요청한다
 - `generate`는 모든 요청에 컨텍스트 크기 `RAG_LLM_CONTEXT_TOKENS`를 지정한다. `prompt`의 토큰 수가 `RAG_LLM_CONTEXT_TOKENS - RAG_LLM_OUTPUT_RESERVE_TOKENS`를 넘으면 Ollama에 보내지 않고 `PromptTooLongError`를 낸다. 이미지의 토큰은 세지 않는다
 - `generate`는 생각 모드를 끄고 요청한다. 그래도 응답 앞에 생각 블록(`<think>…</think>`)이 오면 지우고 나머지만 돌려준다
@@ -195,6 +204,23 @@ class ModelHub:
 
 - 처리 계약: `prepare`가 끝난 뒤 `generate`가 Ollama에 연결할 수 없으면(연결 거부, 연결 시간 초과) `ModelUnavailableError`를 낸다. 연결은 됐지만 생성이 실패한 경우는 그 오류를 그대로 내며, 해석은 부른 단위가 한다
 - 충족 기준: Ollama가 연결을 거부하면 `generate`가 `ModelUnavailableError`를 내고, `ollama_available()`이 `False`다
+
+**`REQ-RAG-12.1.3`** GPU가 있으면 GPU에서 실행
+
+- 처리 계약: `prepare`는 GPU를 쓸 수 있으면 임베딩·재정렬 모델을 GPU에, 아니면 CPU에 올린다. GPU에 올릴 때 임베딩 모델은 반정밀도(fp16)로 올린다 — 16GB GPU에 맞추기 위해서다(`ARCHITECT.md` 「설계 결정」). 어느 장치에 올렸는지는 `resource.models_ready` 로그로 남긴다
+- 충족 기준: GPU를 쓸 수 있다고 보이면 `prepare` 뒤 임베딩·재정렬 모델이 GPU 장치에 있고 임베딩 모델이 fp16이다. 쓸 수 없다고 보이면 두 모델이 CPU 장치에 있고, 임베딩·재정렬 호출이 정상으로 결과를 돌려준다
+
+**GPU 메모리에서 내리기·올리기** (`REQ-RAG-10.8.8.4`~`REQ-RAG-10.8.8.6`, `REQ-RAG-12.1.3`)
+
+이 블록은 service가 일괄 색인 단계마다 부르는 표면이다. 언제 부를지는 service `MODULE.md` 「일괄 처리 단계 — `REQ-RAG-10.8.8`」가 소유한다.
+
+- 처리 계약 (`release_ollama_models`): Ollama에 `RAG_CHUNKING_LLM`·`RAG_TABLE_LLM`·`RAG_CAPTION_VLM`을 메모리에서 내리게 하고, 내린 뒤에 돌아온다. 내리는 방법은 구현 재량이다(예: Ollama의 keep_alive 0). 그 뒤의 `generate`는 내리기 전과 같게 동작한다
+- 처리 계약 (`release_local_models`): 돌아온 뒤 임베딩·재정렬 모델이 GPU 메모리에 없다. 진행 중인 임베딩·재정렬 계산이 있으면 그 계산이 끝난 뒤에 내린다. 내린 뒤에도 `count_tokens`·`embedding_dimension`·`embedding_model_name`은 모델을 다시 올리지 않고 동작한다
+- 처리 계약 (`load_local_models`): 돌아온 뒤 임베딩·재정렬 모델이 모두 실행 장치에 올라가 있다. 이미 올라가 있으면 아무 일 없이 끝난다
+- 처리 계약 (내린 뒤의 계산): `release_local_models` 뒤에 `embed_documents`·`embed_query`·`rerank`가 불리면, 그 호출이 쓰는 모델만 실행 장치에 다시 올린 뒤 계산한다(`REQ-RAG-12.1.3`)
+- 처리 계약 (CPU): 임베딩·재정렬 모델이 CPU에서 돌면 `release_local_models`·`load_local_models`는 하는 일 없이 끝나도 된다
+- 실패: `release_ollama_models`는 Ollama에 연결할 수 없으면 `ModelUnavailableError`를 내고, 세 메서드 모두 그 밖의 실패는 그 예외를 그대로 낸다. 부른 service가 경고 로그만 남기고 단계를 진행한다(service `MODULE.md` `REQ-RAG-10.8.8.4`~`REQ-RAG-10.8.8.6`)
+- 충족 기준: `release_ollama_models`가 세 모델 각각을 내리는 요청을 Ollama에 보내고, 그 뒤 `generate`가 정상으로 생성한다. GPU에서 `release_local_models` 뒤 두 모델이 GPU 메모리에 없고 `count_tokens`가 동작하며, 이어서 `embed_documents`를 부르면 임베딩 모델만 GPU에 다시 올라간 뒤 결과가 나온다. `load_local_models` 뒤 두 모델이 GPU에 있다. CPU에서는 두 메서드가 오류 없이 끝나고 임베딩·재정렬이 결과를 돌려준다
 
 ### 저장소 연결 — `REQ-RAG-12.2`
 
@@ -289,6 +315,9 @@ class ChunkStore:
 | 이벤트 | 발생 시점 | 레벨 | 허용 필드 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | `resource.prepare_failed` | `prepare` 실패 | error | `model`, `reason` | `REQ-RAG-12.1.1` |
+| `resource.models_ready` | `prepare` 끝 | info | `device`(`cuda`·`cpu`), `embedding_dtype` | `REQ-RAG-12.1.3` |
+| `resource.models_released` | `release_ollama_models`·`release_local_models` 끝 | info | `target`(`ollama`·`local`), `elapsed_ms` | `REQ-RAG-10.8.8.4`, `REQ-RAG-10.8.8.5` |
+| `resource.models_loaded` | `load_local_models`가 모델을 올리고 끝날 때, 내린 모델을 계산 전에 다시 올릴 때 | info | `models`(`embedding`·`reranker`), `device`, `elapsed_ms` | `REQ-RAG-10.8.8.6`, `REQ-RAG-12.1.3` |
 | `resource.generate` | `generate` 끝 | info | `role`, `model`, `prompt_chars`, `elapsed_ms` | `REQ-RAG-12.1.2` |
 | `resource.model_unavailable` | Ollama 연결 실패 | warning | `role`, `model` | `REQ-RAG-12.1.2` |
 | `resource.dimension_mismatch` | `connect`에서 차원이 다를 때 | error | `stored_dimension`, `model_dimension` | `REQ-RAG-12.2.2` |
@@ -305,6 +334,7 @@ class ChunkStore:
 ### 실패 모드
 
 - **임베딩 모델 교체** (`REQ-RAG-3.2.1`) — 증상: 설정의 임베딩 모델을 바꾸면 기존 벡터와 새 질의 벡터의 공간이 달라 검색이 틀어진다. 탐지: 차원이 다르면 `ChunkStore`가 거부한다(`REQ-RAG-12.2.2`). 같은 차원의 다른 모델은 체크섬이 달라지므로(`REQ-RAG-3.5.2`) 강제 재색인으로 바로잡는다. 방어: `embedding_model_name`을 체크섬에 넣는다(indexing)
+- **GPU 배포에서 CPU로 실행** (`REQ-RAG-12.1.3`) — 증상: GPU가 있는 배포인데 PyTorch CUDA 휠을 설치하지 않았거나 GPU를 찾지 못하면 오류 없이 CPU에서 임베딩·재정렬해 검색이 크게 느려진다(`ARCHITECT.md` 「설계 결정」). 탐지: `resource.models_ready`의 `device`가 `cpu`다. 방어: CUDA 휠은 `pyproject.toml`의 선택 설치 항목으로 받는다(`ARCHITECT.md` 「기술 스택」)
 - **여러 호출에 걸친 쓰기** (`REQ-RAG-3.3`) — 증상: `activate_records`와 `delete_records_except` 사이에 조회하면 한 문서의 이전 레코드와 새 레코드가 함께 나올 수 있다. 탐지: 결과에 같은 `doc_id`의 이전·새 레코드가 섞인다. 방어: 두 호출을 indexing이 연달아 부른다. 순서의 소유자는 indexing이다(indexing `MODULE.md` 「핵심 흐름」)
 
 ## 테스트와 추적성
@@ -314,6 +344,10 @@ class ChunkStore:
 | `REQ-RAG-12.1.1` | unit | Ollama 모델 없음·연결 불가·로컬 모델 로드 실패 시 `ModelLoadError`, 정상 시 차원 양수 | Ollama (가짜 HTTP), sentence-transformers 로더 | `tests/unit/resource/` |
 | `REQ-RAG-12.1.1` | integration | 실제 Ollama·모델 파일로 `prepare` 성공 | | `tests/integration/resource/` |
 | `REQ-RAG-12.1.2` | unit | 연결 거부 시 `ModelUnavailableError`, `ollama_available()` 거짓 | Ollama (가짜 HTTP) | `tests/unit/resource/` |
+| `REQ-RAG-12.1.3` | unit | GPU 있음: 두 모델이 GPU, 임베딩 모델 fp16, `models_ready`의 `device`. GPU 없음: 두 모델이 CPU, 호출 정상 | GPU 사용 가능 여부, sentence-transformers 로더 (가짜) | `tests/unit/resource/` |
+| `REQ-RAG-10.8.8.4` | unit | `release_ollama_models`가 세 모델을 내리는 요청을 보냄, 그 뒤 `generate` 정상, 연결 거부 시 `ModelUnavailableError` (내리기·올리기) | Ollama (가짜 HTTP) | `tests/unit/resource/` |
+| `REQ-RAG-10.8.8.5` | unit | GPU에서 `release_local_models` 뒤 두 모델이 GPU 메모리에 없음, `count_tokens` 동작, 진행 중인 계산이 끝난 뒤 내림, 다음 `embed_documents`가 임베딩 모델만 다시 올리고 계산. CPU에서 오류 없음 (내리기·올리기) | GPU 사용 가능 여부, sentence-transformers 로더 (가짜) | `tests/unit/resource/` |
+| `REQ-RAG-10.8.8.6` | unit | `load_local_models` 뒤 두 모델이 실행 장치에 있음, 이미 올라가 있으면 그대로 (내리기·올리기) | GPU 사용 가능 여부, sentence-transformers 로더 (가짜) | `tests/unit/resource/` |
 | `REQ-RAG-2.5.2.2` | unit | 모든 생성 요청에 컨텍스트 크기 지정, 넘치는 프롬프트는 보내지 않고 `PromptTooLongError` (컨텍스트) | Ollama (가짜 HTTP) | `tests/unit/resource/` |
 | `REQ-RAG-2.1.1` | unit | 생각 모드 끔 요청, 응답의 생각 블록 제거 (생각 모드) | Ollama (가짜 HTTP) | `tests/unit/resource/` |
 | `REQ-RAG-4.1.1` | unit | 키워드 토큰화의 정규화·2글자 조각, 문서·질의 인코딩 일치 (키워드 토큰화) | | `tests/unit/resource/` |

@@ -4,6 +4,7 @@ from minerva_rag.core import get_logger
 from minerva_rag.search import DocumentChunks, Searcher, SearchHit, SearchQuery
 
 from ._guard import Readiness, guarded
+from .jobs import JobQueue
 
 log = get_logger(__name__)
 
@@ -11,9 +12,10 @@ log = get_logger(__name__)
 class SearchService:
     """검색 요청을 Searcher에 한 번 넘기고 결과를 그대로 돌려준다."""
 
-    def __init__(self, searcher: Searcher, readiness: Readiness) -> None:
-        """검색기와 준비 상태를 받는다. I/O는 하지 않는다."""
+    def __init__(self, searcher: Searcher, jobs: JobQueue, readiness: Readiness) -> None:
+        """검색기, 작업 큐, 준비 상태를 받는다. I/O는 하지 않는다."""
         self._searcher = searcher
+        self._jobs = jobs
         self._readiness = readiness
 
     async def search(self, q: SearchQuery) -> tuple[SearchHit, ...]:
@@ -27,6 +29,8 @@ class SearchService:
             expand_neighbors=q.expand_neighbors,
         )
         with guarded(log, "search.search", self._readiness):
+            # ★ 일괄 색인 중이면 검색하지 않는다 (GPU 메모리를 다투지 않게)
+            await self._jobs.reject_during_batch()
             return await self._searcher.search(q)
 
     async def document_chunks(self, doc_id: str) -> DocumentChunks:

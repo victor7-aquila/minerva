@@ -7,7 +7,7 @@ Backend의 HTTP 공통 규약을 맡는다. 전역 요청 검증, 전역 예외 
 **핵심 계약**
 
 - 형식이 잘못된 요청은 컨트롤러에 닿기 전에 `400 INVALID_REQUEST`로 거부한다. DTO에 없는 필드도 거부한다 (`REQ-BE-7.1.2`)
-- 모든 실패 응답은 전역 예외 필터 한 곳에서 `API.md`의 본문과 상태로 바뀐다. 응답에 스택 트레이스, 쿼리, 파일 경로, 원래 예외 문자열이 나가지 않는다 (`REQ-BE-8.3`, `AGENTS.md`)
+- 모든 실패 응답은 전역 예외 필터 한 곳에서 `API.md`의 본문(`code`, `message`, `details`)과 상태로 바뀐다. 응답에 스택 트레이스, 쿼리, 파일 경로, 원래 예외 문자열이 나가지 않는다 (`REQ-BE-8.3`, `AGENTS.md`)
 - 목록 응답은 모두 같은 페이지 형식이다 (`REQ-BE-7.1.3`)
 
 **기능 그룹**
@@ -93,7 +93,7 @@ export class AppModule {}
 - 처리 계약: 목록 엔드포인트는 common의 페이지 규약(common `MODULE.md` 「페이지 규약」)을 쓴다. 목록 DTO는 `PageQueryDto`를 이어받고, 응답은 `toPage()`로 만든다
 - 충족 기준: 모든 목록 엔드포인트의 응답이 `items`, `total`, `page`, `page_size`를 갖고, 페이지 크기 20·50·100 밖은 `400`이다
 
-`DomainErrorFilter`는 `DomainError`를 `API.md` 「오류 코드」의 상태와 `{"error": {"code", "message"}}`로, 그 밖의 예외를 `500 INTERNAL_ERROR`와 일반 메시지로 바꾸고 스택은 애플리케이션 로그에만 남긴다(`REQ-BE-8.3.1`, `REQ-BE-8.3.2`). 그 충족 기준은 common이 소유하고, 아래 테스트 표가 HTTP 경계에서 함께 본다.
+`DomainErrorFilter`는 `DomainError`를 `API.md` 「오류 코드」의 상태와 `{"error": {"code", "message", "details"}}`로 바꾸며 `details`는 그 오류의 `details`(common `MODULE.md` 「오류 응답」)를 그대로 쓴다. 도메인 오류가 아닌 예외(그 밖의 예외, 프레임워크 HTTP 오류)는 `details`가 `null`이고, 그 밖의 예외는 `500 INTERNAL_ERROR`와 일반 메시지로 바꾸고 스택은 애플리케이션 로그에만 남긴다(`REQ-BE-8.3.1`, `REQ-BE-8.3.2`, `API.md` 「공통 규약」). 예를 들어 `BatchIndexingError`는 `503`과 `details.remaining_jobs`가 된다(`REQ-BE-10.1.5`). 그 충족 기준은 common이 소유하고, 아래 테스트 표가 HTTP 경계에서 함께 본다.
 
 ## 실행 계약
 
@@ -126,5 +126,5 @@ export class AppModule {}
 | :--- | :--- | :--- | :--- | :--- |
 | `REQ-BE-7.1.1` | e2e | 앱 기동과 엔드포인트 응답, multipart 파일 수 한도 `413` | RAG Server (가짜) | `test/` |
 | `REQ-BE-7.1.2` | e2e | 필수 누락·타입 오류·모르는 필드 `400`, 메시지에 입력값 없음 | | `test/` |
-| `REQ-BE-7.1.2` | unit | 도메인 오류별 상태·본문, 그 밖은 `500`이고 예외 문자열 없음 (`REQ-BE-8.3` 경계) | | `src/api/**/*.spec.ts` |
+| `REQ-BE-7.1.2` | unit | 도메인 오류별 상태·본문과 `details`(`BATCH_INDEXING`은 `503`과 `remaining_jobs`, 나머지 `null`), 그 밖은 `500`이고 예외 문자열 없음·`details` `null` (`REQ-BE-8.3`, `REQ-BE-10.1.5` 경계) | | `src/api/**/*.spec.ts` |
 | `REQ-BE-7.1.3` | e2e | 목록 응답 형식, 페이지 크기 제약 | | `test/` |

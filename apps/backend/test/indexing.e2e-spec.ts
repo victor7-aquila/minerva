@@ -116,12 +116,13 @@ async function cursorOf(docId: string): Promise<Record<string, unknown> | null> 
   > | null;
 }
 
-/** 오류 본문이 키 `error` 하나이고 그 안이 code·message 둘뿐임을 단언한다. */
+/** 오류 본문이 키 `error` 하나이고 그 안이 code·message·details 셋뿐이며 details가 null임을 단언한다. */
 function expectErrorShape(res: request.Response, code: string, message?: string): void {
-  const typed = res.body as { error: { code: string; message: string } };
+  const typed = res.body as { error: { code: string; message: string; details: unknown } };
   expect(Object.keys(typed)).toEqual(['error']);
-  expect(Object.keys(typed.error).sort()).toEqual(['code', 'message']);
+  expect(Object.keys(typed.error).sort()).toEqual(['code', 'details', 'message']);
   expect(typed.error.code).toBe(code);
+  expect(typed.error.details).toBeNull();
   expect(typed.error.message).toMatch(/[가-힣]/);
   if (message !== undefined) expect(typed.error.message).toBe(message);
 }
@@ -160,7 +161,9 @@ describe('REQ-BE-3.2.5', () => {
   it('T-E2E-AUTH-1 토큰이 없으면 401이고 아무것도 반영하지 않는다', async () => {
     const res = await post(body({ doc_id: 'e2e-auth-1' }));
     expect(res.status).toBe(401);
-    expect(res.body).toEqual({ error: { code: 'UNAUTHORIZED', message: UNAUTHORIZED_MESSAGE } });
+    expect(res.body).toEqual({
+      error: { code: 'UNAUTHORIZED', message: UNAUTHORIZED_MESSAGE, details: null },
+    });
     expectErrorShape(res, 'UNAUTHORIZED', UNAUTHORIZED_MESSAGE);
     expect(received).toHaveLength(0);
     expect(await cursorOf('e2e-auth-1')).toBeNull();
@@ -217,6 +220,25 @@ describe('REQ-BE-3.2.1', () => {
       },
     ]);
     expect((await cursorOf('e2e-ok-1'))?.lastSequence).toBe(1);
+  });
+
+  it('T-E2E-OK-6 latest_job_stage가 embedding_pending인 알림도 204이고 이벤트로 넘어간다', async () => {
+    const res = await post(
+      body({
+        doc_id: 'e2e-ok-6',
+        index_state: {
+          searchable_version: null,
+          latest_job_id: 'e2e-job',
+          latest_job_state: 'running',
+          latest_job_stage: 'embedding_pending',
+        },
+      }),
+      TOKEN,
+    );
+    // ★ 400이면 DTO가 새 단계를 거부하는 것이다
+    expect(res.status).toBe(204);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ docId: 'e2e-ok-6', jobState: 'running' });
   });
 
   it('T-E2E-OK-2 오래된 순번과 같은 순번은 204이지만 이벤트가 없다', async () => {

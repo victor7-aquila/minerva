@@ -28,6 +28,10 @@ dev = [
     "pytest>=9.1",
     "ruff>=0.16",
 ]
+# ★ torch 휠 선택용 그룹이다. 기본은 cpu(default-groups)이고, GPU 배포는 cpu를 빼고 gpu를 넣는다
+#   (uv sync --group gpu --no-group cpu). 패키지 소스는 아래 「패키지 소스」에서 그룹별로 고른다
+cpu = ["torch>=2.14.1"]
+gpu = ["torch>=2.14.1"]
 
 [build-system]
 requires = ["uv_build>=0.9"]
@@ -35,17 +39,31 @@ build-backend = "uv_build"
 
 # ── 패키지 소스 ────────────────────────────────────────────
 
-# ★ torch는 CPU 휠 인덱스에서만 받는다. PyPI torch는 Linux에서 nvidia-*·triton을 끌어오며
-#   그 라이선스는 승인 밖이다. sources는 직접 의존성에만 적용되므로 torch를 직접 선언한다
+# ★ 기본 설치의 torch는 CPU 휠 인덱스에서만 받는다. PyPI torch는 Linux에서 nvidia-*·triton을 끌어오며
+#   그 라이선스는 허용 목록 밖이다. sources는 직접 의존성에만 적용되므로 torch를 직접 선언한다
+# ★ CUDA 휠(cu130)은 GPU 배포용 선택 설치(gpu 그룹)로만 받는다. CUDA 런타임(NVIDIA 독점 라이선스)은
+#   그 경우에만 허용한 사용자 승인 예외다 (루트 AGENTS.md 「라이선스」). RTX 50 계열은 cu128 이상이 필요하다
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+# ★ 그룹 조건 소스는 같은 해석 분기의 torch 요구(본 의존성 포함)에 함께 적용된다.
+#   cpu·gpu 그룹을 모두 빼면 torch가 PyPI에서 오므로 --no-default-groups·--no-group cpu만 쓰지 않는다
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
+torch = [
+    { index = "pytorch-cpu", group = "cpu" },
+    { index = "pytorch-cu130", group = "gpu" },
+]
 
 [tool.uv]
+default-groups = ["dev", "cpu"]
+conflicts = [[{ group = "cpu" }, { group = "gpu" }]]
 # ★ portalocker가 Windows에서 끌어오는 pywin32는 LGPL-2.1 등을 번들해 허용 라이선스 밖이라
 #   사용자 결정으로 뺀다. qdrant-client의 로컬 디스크 모드에서만 쓰이고 이 앱은 쓰지 않는다
 exclude-dependencies = ["pywin32"]
@@ -76,7 +94,7 @@ typeCheckingMode = "standard"
 reportMissingParameterType = "error"
 reportUnnecessaryTypeIgnoreComment = "error"
 
-# ★ torch는 CPU 인덱스 고정용으로만 직접 선언한다. 코드에서 import하지 않는다
+# ★ torch는 resource가 GPU 판별·캐시 비우기·fp16 지정에 import한다. CPU 인덱스 고정을 위해 직접 선언한다
 [tool.deptry]
 # ★ 단위가 서로의 공개 표면을 절대 경로(minerva_rag.core)로 import하므로 자기 패키지로 알려 준다
 known_first_party = ["minerva_rag"]
@@ -84,7 +102,7 @@ known_first_party = ["minerva_rag"]
 [tool.deptry.per_rule_ignores]
 # ★ uvicorn은 실행 명령(uvicorn minerva_rag.api:create_app --factory)에서만 쓰고 코드에서 import하지 않는다
 # ★ python-multipart는 FastAPI가 multipart를 해석할 때 내부에서 import한다
-DEP002 = ["torch", "uvicorn", "python-multipart"]
+DEP002 = ["uvicorn", "python-multipart"]
 
 # ★ 의존 규칙의 정본은 ARCHITECT.md 「의존 규칙」이다. 규칙을 바꿀 때는 그 문서부터 바꾼다
 [tool.importlinter]
@@ -129,7 +147,7 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "Qdrant와 모델(Ollama·sentence-transformers)에는 resource만 접근한다"
+name = "Qdrant와 모델(Ollama·sentence-transformers·torch)에는 resource만 접근한다"
 type = "forbidden"
 allow_indirect_imports = true
 source_modules = [
@@ -141,7 +159,7 @@ source_modules = [
     "minerva_rag.evaluation",
     "minerva_rag.core",
 ]
-forbidden_modules = ["qdrant_client", "ollama", "sentence_transformers"]
+forbidden_modules = ["qdrant_client", "ollama", "sentence_transformers", "torch"]
 
 # 근거: ARCHITECT.md 「의존 규칙」 "Backend로 보내는 HTTP 호출은 service의 작업 상태 알림만 한다"
 #   ★ resource는 Ollama 클라이언트 설정에 httpx를 쓰므로 출발지에서 뺀다
@@ -169,14 +187,14 @@ source_modules = [
 forbidden_modules = ["httpx"]
 
 # 근거: ARCHITECT.md 「의존 규칙」 "service가 resource에 직접 기대는 것은 조립, 기동·종료,
-#   상태 확인, 표 요약·이미지 캡션 생성뿐이다" (조립·기동·종료·상태 확인은 lifecycle_service, 생성은 captioner)
+#   상태 확인, 표 요약·이미지 캡션 생성, 일괄 색인 단계마다 모델 내리기·올리기뿐이다"
+#   (조립·기동·종료·상태 확인은 lifecycle_service, 생성은 captioner, 모델 내리기·올리기는 jobs)
 [[tool.importlinter.contracts]]
-name = "service가 resource를 직접 쓰는 것은 조립·기동·종료·상태 확인(lifecycle_service)과 요약·캡션 생성(captioner)뿐이다 (ARCHITECT.md 「의존 규칙」)"
+name = "service가 resource를 직접 쓰는 것은 조립·기동·종료·상태 확인(lifecycle_service), 요약·캡션 생성(captioner), 일괄 색인 단계마다 모델 내리기·올리기(jobs)뿐이다 (ARCHITECT.md 「의존 규칙」)"
 type = "forbidden"
 allow_indirect_imports = true
 source_modules = [
     "minerva_rag.service._guard",
-    "minerva_rag.service.jobs",
     "minerva_rag.service.caption_service",
     "minerva_rag.service.index_service",
     "minerva_rag.service.search_service",
@@ -187,7 +205,8 @@ source_modules = [
 forbidden_modules = ["minerva_rag.resource"]
 
 # 근거: ARCHITECT.md 「폴더 구조와 배치 규칙」(작업 관리는 서비스 파일들이 쓰는 헬퍼)과
-#   service MODULE.md 「작업 관리 헬퍼」 "작업 큐 — 금지: chunking·indexing과 서비스 파일을 import하지 않는다"
+#   service MODULE.md 「작업 관리 헬퍼」 "작업 큐 — 금지: chunking·indexing과 서비스 파일을 import하지 않는다.
+#   resource는 ModelHub의 내리기·올리기 세 메서드만 부른다" (resource 전체 금지는 풀고, 세 메서드는 리뷰와 테스트로 본다)
 [[tool.importlinter.contracts]]
 name = "작업 큐(jobs)는 기능 단위와 서비스 파일을 import하지 않는다 (service MODULE.md 「작업 관리 헬퍼」)"
 type = "forbidden"
@@ -198,7 +217,6 @@ forbidden_modules = [
     "minerva_rag.indexing",
     "minerva_rag.search",
     "minerva_rag.evaluation",
-    "minerva_rag.resource",
     "minerva_rag.service.captioner",
     "minerva_rag.service.lifecycle_service",
     "minerva_rag.service.caption_service",
@@ -211,6 +229,8 @@ forbidden_modules = [
 
 # ★ 아래 금지 의존은 모듈 import로 표현할 수 없어 계약으로 두지 않는다 — 리뷰와 테스트로 본다
 # - 청크 저장·삭제는 indexing만 resource로 하고, search는 조회만 한다
+# - jobs는 resource의 ModelHub 내리기·올리기 세 메서드(release_ollama_models·release_local_models·
+#   load_local_models)만 부른다
 
 # ── 테스트 ────────────────────────────────────────────────
 

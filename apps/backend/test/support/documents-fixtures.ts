@@ -6,6 +6,7 @@ import type { TestingModule } from '@nestjs/testing';
 import type {
   AssetViewData,
   HintContext,
+  HintKind,
   HintRunResult,
   PreparedVersion,
   UploadedImage,
@@ -214,11 +215,26 @@ export function createFakeAssets() {
         assetCount: 0,
       }),
     ),
+    // ★ 일괄 처리 단계에서만 불린다. 종류(image·table)별로 따로 부른다
     generateHints: jest.fn(
-      async (_docId: string, _version: string, _ctx: HintContext): Promise<HintRunResult> => ({
+      async (
+        _docId: string,
+        _version: string,
+        _kind: HintKind,
+        _ctx: HintContext,
+      ): Promise<HintRunResult> => ({
         generated: 0,
         temporary: 0,
         stopped: false,
+        remaining: 0,
+      }),
+    ),
+    pendingHints: jest.fn(async (_docId: string, _version: string): Promise<number> => 0),
+    rebuildVersion: jest.fn(
+      async (_docId: string, _version: string, _markdown: string): Promise<PreparedVersion> => ({
+        indexingMarkdown: IDX_SENT,
+        unmatchedImages: [],
+        assetCount: 0,
       }),
     ),
     inheritVersion: jest.fn(
@@ -248,7 +264,7 @@ export function createFakeAssets() {
           kind: 'table' | 'image';
           tableMarkdown: string | null;
           imageUrl: string | null;
-          text: string;
+          text: string | null;
           isTemporary: boolean;
         }>
       > => [],
@@ -471,4 +487,66 @@ export function expectSafeKoreanMessage(
   expect(message).not.toMatch(
     /node_modules|\bat \S+:\d+|[A-Za-z]+Error\b|mongodb:\/\/|[A-Za-z]:\\/,
   );
+}
+
+/** fakePending이 문서·버전별로 기억하는 pending 수다. */
+export interface PendingCounts {
+  image: number;
+  table: number;
+}
+
+/**
+ * 가짜 assets가 문서별 pending 수를 기억하게 한다 (예약 색인 시나리오용).
+ * - pendingHints는 남은 합을 준다.
+ * - generateHints(kind)는 그 종류를 0으로 만들고 { generated: n, temporary: 0, stopped: false, remaining: 남은 합 }을 준다.
+ * - ★ 항목마다 ctx.shouldContinue()를 묻는다. 거짓이면 그때까지 저장한 수로 stopped: true를 준다.
+ * 호출 시점의 남은 수는 map에 그대로 반영되므로 다음 실행에서 이어받는 시나리오도 쓸 수 있다.
+ */
+export function fakePending(
+  h: { assets: ReturnType<typeof createFakeAssets> },
+  map: Record<string, PendingCounts>,
+): Record<string, PendingCounts> {
+  const remainingOf = (docId: string): number => {
+    const c = map[docId];
+    return c === undefined ? 0 : c.image + c.table;
+  };
+  h.assets.pendingHints.mockImplementation(async (docId: string) => remainingOf(docId));
+  h.assets.generateHints.mockImplementation(
+    async (docId: string, _version: string, kind: HintKind, ctx: HintContext) => {
+      const counts = map[docId];
+      const total = counts === undefined ? 0 : counts[kind];
+      let generated = 0;
+      let stopped = false;
+      for (let i = 0; i < total; i += 1) {
+        if (!(await ctx.shouldContinue())) {
+          stopped = true;
+          break;
+        }
+        generated += 1;
+        if (counts !== undefined) counts[kind] -= 1;
+      }
+      return { generated, temporary: 0, stopped, remaining: remainingOf(docId) };
+    },
+  );
+  return map;
+}
+
+/**
+ * generateHints와 requestIndex 호출을 호출 순서대로 합쳐 [['image', docId], ['table', docId], ['index', docId]] 배열로 만든다.
+ * invocationCallOrder로 정렬하므로 단계 경계(이미지 → 표 → 색인)를 엄격히 비교할 수 있다.
+ */
+export function callOrder(h: {
+  assets: ReturnType<typeof createFakeAssets>;
+  indexing: ReturnType<typeof createFakeIndexing>;
+}): Array<[string, string]> {
+  const entries: Array<{ order: number; item: [string, string] }> = [];
+  const hints = h.assets.generateHints.mock;
+  hints.calls.forEach((call, i) => {
+    entries.push({ order: hints.invocationCallOrder[i] ?? 0, item: [call[2], call[0]] });
+  });
+  const index = h.indexing.requestIndex.mock;
+  index.calls.forEach((call, i) => {
+    entries.push({ order: index.invocationCallOrder[i] ?? 0, item: ['index', call[0].docId] });
+  });
+  return entries.sort((a, b) => a.order - b.order).map((e) => e.item);
 }

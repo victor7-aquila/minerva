@@ -41,6 +41,11 @@ def _expanded_text(query: str, expansion: Expansion) -> str:
     return " ".join((query, *expansion.terms))
 
 
+def _sentence_text(query: str, expansion: Expansion) -> str:
+    """dense·재정렬에 넣을 문장을 고른다. 용어집의 말이 있으면 대표어로 바꾼 질의다."""
+    return expansion.rewritten if expansion.matched else query
+
+
 def _chunk_filter(q: SearchQuery) -> ChunkFilter:
     """판 범위와 문서 ID 범위로 조회 필터를 만든다."""
     if q.edition_scope is EditionScope.SPECIFIC and q.edition is not None:
@@ -176,11 +181,16 @@ class Searcher:
         """질의 확장부터 판 처리까지 검색 한 번을 처리한다."""
         started = time.perf_counter()
         expansion = self._glossary.expand(q.query)  # 1. 질의 확장
-        text = _expanded_text(q.query, expansion)
+        # ★ 넓힌 말은 키워드 검색에만 넣는다. dense·재정렬은 문장 하나를 읽어 뜻을 보므로
+        #   동의어를 이어 붙이면 질문의 뜻이 흐려진다
+        keyword_text = _expanded_text(q.query, expansion)
+        sentence = _sentence_text(q.query, expansion)
         top_n = q.top_n if q.top_n is not None else self._settings.search_default_top_n
         limit = max(top_n * _CANDIDATE_FACTOR, _MIN_CANDIDATES)
-        candidates = await self._hybrid(text, _chunk_filter(q), limit)  # 2. 하이브리드 검색
-        rerank_scores = await self._rerank(text, candidates)  # 3. 재정렬
+        candidates = await self._hybrid(
+            sentence, keyword_text, _chunk_filter(q), limit
+        )  # 2. 하이브리드 검색
+        rerank_scores = await self._rerank(sentence, candidates)  # 3. 재정렬
         ranked = apply_scores(candidates, rerank_scores, self._settings.latest_edition_weight)
         groups = group_fragments(ranked)[:top_n]  # 4. 분할 조각 합치기, 상위 N
         hits = await self._build_hits(groups, q.expand_neighbors)  # 5. 앞뒤 청크
@@ -196,10 +206,12 @@ class Searcher:
         )
         return results
 
-    async def _hybrid(self, text: str, flt: ChunkFilter, limit: int) -> list[Candidate]:
+    async def _hybrid(
+        self, sentence: str, keyword_text: str, flt: ChunkFilter, limit: int
+    ) -> list[Candidate]:
         """dense·키워드 조회를 함께 하고 RRF로 합친다."""
-        dense_vector = await self._hub.embed_query(text)
-        sparse_vector = await self._hub.encode_sparse_query(text)
+        dense_vector = await self._hub.embed_query(sentence)
+        sparse_vector = await self._hub.encode_sparse_query(keyword_text)
         # ★ TaskGroup은 예외를 ExceptionGroup으로 감싸 "그대로 낸다"를 어기므로 gather를 쓴다
         dense, sparse = await asyncio.gather(
             self._store.search_dense(dense_vector, flt, limit),
@@ -212,6 +224,7 @@ class Searcher:
         if not candidates:
             return None
         try:
+            # ★ 재정렬은 본문만 본다. 머리글(경로·제목)을 붙이면 순위가 나빠졌다
             scores = await self._hub.rerank(text, [c.record.chunk.text for c in candidates])
             if len(scores) != len(candidates) or not all(math.isfinite(s) for s in scores):
                 raise ValueError("재정렬 점수가 후보와 맞지 않습니다")

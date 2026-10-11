@@ -57,6 +57,7 @@ export class SearchService {
       return await this.rag.search(request);
     } catch (error) {
       // ★ RagRequestError(4xx·5xx)는 그대로 두면 500이 된다
+      // ★ BatchIndexingError는 바꾸지 않고 그대로 전파한다 (REQ-BE-10.1.5)
       if (error instanceof RagRequestError) throw new RagUnavailableError();
       throw error;
     }

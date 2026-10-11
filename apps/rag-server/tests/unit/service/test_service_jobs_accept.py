@@ -6,7 +6,7 @@ import pytest
 
 from minerva_rag.core import FailureLocation, JobNotFoundError, Settings, ShuttingDownError
 from minerva_rag.service import IndexOutcome, JobStage, JobState
-from minerva_rag.service.jobs import JobFailure, JobManager
+from minerva_rag.service.jobs import JobFailure
 
 from .fakes import (
     WAIT,
@@ -14,6 +14,7 @@ from .fakes import (
     RecoverSpy,
     ScriptedRunner,
     go,
+    make_manager,
     new_manager,
     notified,
     running_manager,
@@ -62,7 +63,7 @@ def test_stop_before_start(settings: Settings) -> None:
     """[REQ-RAG-10.8.1.1] start 전에도 stop이 되고 그 뒤 submit은 ShuttingDownError다."""
 
     async def scenario() -> None:
-        manager = JobManager(settings)
+        manager = make_manager(settings)
         with pytest.raises(RuntimeError):
             await manager.get_job("job-1")
         await manager.stop(0)
@@ -213,7 +214,11 @@ def test_unknown_job(settings: Settings) -> None:
 
 @pytest.mark.req("REQ-RAG-10.8.2.3")
 def test_stage_recorded(settings: Settings) -> None:
-    """[REQ-RAG-10.8.2.3] 알린 단계가 색인 중 조회되고, 대기·완료 작업의 단계는 None이다."""
+    """[REQ-RAG-10.8.2.3] 알린 단계가 색인 중 조회되고, 대기·완료 작업의 단계는 None이다.
+
+    ScriptedRunner(EMBEDDING, WAIT)는 임베딩 단계에서 멈춘다.
+    그 사이 접수한 작업은 단계 중이라 대기한다.
+    """
 
     async def scenario() -> None:
         async with running_manager(settings) as manager:
@@ -222,7 +227,8 @@ def test_stage_recorded(settings: Settings) -> None:
             await wait_event(runner.waiting)
             assert (await manager.get_job(job_id)).stage is JobStage.EMBEDDING
 
-            queued_id = await submit(manager, "doc-b", ScriptedRunner())  # 상한 1이라 대기한다
+            # 임베딩 단계 중에는 새 작업이 분할을 시작하지 않고 QUEUED로 기다린다(REQ-RAG-10.8.8.3)
+            queued_id = await submit(manager, "doc-b", ScriptedRunner())
             queued = await manager.get_job(queued_id)
             assert queued.state is JobState.QUEUED
             assert queued.stage is None

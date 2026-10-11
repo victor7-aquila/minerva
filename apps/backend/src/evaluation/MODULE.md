@@ -59,7 +59,7 @@ test/evaluation.e2e-spec.ts
 | 대상 | 관계 | 사용하는 계약 | 계약 소유 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
 | documents | DI | `getRef`, `getEvaluationTarget` | documents `MODULE.md` | `REQ-BE-5.1.2`, `REQ-BE-5.1.5`, `REQ-BE-5.2.7` |
-| rag | DI | `RagClient.evaluate`, `RagUnavailableError`, `RagRequestError` | rag `MODULE.md` | `REQ-BE-5.2` |
+| rag | DI | `RagClient.evaluate`, `RagUnavailableError`, `RagRequestError`, `BatchIndexingError` | rag `MODULE.md`, 루트 `IF-3` | `REQ-BE-5.2`, `REQ-BE-5.2.9` |
 | storage | DI | `MONGO_DB`(컬렉션 `golden_sets`, `evaluation_records`) | storage `MODULE.md` | `REQ-BE-5` |
 | common | DI·import | 오류 클래스, `PinoLogger` (nestjs-pino), `toIsoUtc`, 페이지 규약(`PageQueryDto`, `Page<T>`, `toPage()`) | common `MODULE.md` | `REQ-BE-5`, `REQ-BE-8.2.1`, `REQ-BE-8.4.1`, `REQ-BE-7.1.3` |
 
@@ -144,7 +144,7 @@ test/evaluation.e2e-spec.ts
 
 **`REQ-BE-5.2.3`** 평가하지 못하면 평가 실패
 
-- 처리 계약: `RagUnavailableError`는 "RAG Server에 연결할 수 없습니다", `RagRequestError`는 코드 `DOCUMENT_NOT_SEARCHABLE`이면 "정답 문서가 검색되지 않습니다", `VECTOR_DIMENSION_MISMATCH`면 "저장된 벡터와 임베딩 모델의 차원이 달라 평가하지 못했습니다", 그 밖의 4xx면 "RAG Server가 평가 요청을 받지 않았습니다", 그 밖의 5xx면 "RAG Server가 평가 중 오류를 냈습니다", 그 밖의 예외(정답 문서 조회 실패 포함)는 "평가 중 예상하지 못한 오류가 발생했습니다"로 `error` 기록을 남긴다. 사유에 RAG Server의 오류 코드·메시지를 넣지 않는다
+- 처리 계약: `BatchIndexingError`는 `REQ-BE-5.2.9`대로 기록한다. `RagUnavailableError`는 "RAG Server에 연결할 수 없습니다", `RagRequestError`는 코드 `DOCUMENT_NOT_SEARCHABLE`이면 "정답 문서가 검색되지 않습니다", `VECTOR_DIMENSION_MISMATCH`면 "저장된 벡터와 임베딩 모델의 차원이 달라 평가하지 못했습니다", 그 밖의 4xx면 "RAG Server가 평가 요청을 받지 않았습니다", 그 밖의 5xx면 "RAG Server가 평가 중 오류를 냈습니다", 그 밖의 예외(정답 문서 조회 실패 포함)는 "평가 중 예상하지 못한 오류가 발생했습니다"로 `error` 기록을 남긴다. 사유에 RAG Server의 오류 코드·메시지를 넣지 않는다
 - 충족 기준: RAG Server가 닿지 않거나 `409`를 주면 기록이 `error`와 사유를 갖는다
 
 **`REQ-BE-5.2.4`** 한 건·전체 다시 평가
@@ -173,6 +173,11 @@ test/evaluation.e2e-spec.ts
 
 - 처리 계약: 기동할 때(요청을 받기 전) `evaluating` 기록을 모두 "서버가 다시 시작해 평가하지 못했습니다"로 `error`로 바꾸고 평가 시각을 기동 시각으로 둔다. 이어서 골든셋이 없는 기록(골든셋 삭제 중 기록 삭제가 실패해 남은 것)을 지운다
 - 충족 기준: `evaluating` 기록이 남은 채 기동하면 모두 `error`가 되고, 그 뒤 전체 다시 평가가 거부되지 않는다
+
+**`REQ-BE-5.2.9`** 일괄 색인 중이라 거부되면 평가 실패
+
+- 처리 계약: `RagClient.evaluate`가 `BatchIndexingError`(RAG Server의 `503 BATCH_INDEXING`, 루트 `IF-3`)를 내면 "RAG Server가 일괄 색인 중이라 평가하지 못했습니다"로 `error` 기록을 남긴다. 남은 작업 수는 사유에 넣지 않는다
+- 충족 기준: RAG Server가 평가 요청에 `503 BATCH_INDEXING`을 주면 기록이 `error`이고 사유가 일괄 색인 중이라는 위 문장이며, `RagUnavailableError`의 사유와 다르다
 
 ### 조회 — `REQ-BE-5.3`
 
@@ -233,6 +238,7 @@ test/evaluation.e2e-spec.ts
 | `REQ-BE-5.2.6` | unit | 확장 후 Hit@N으로 판정 | rag (가짜) | `src/evaluation/**/*.spec.ts` |
 | `REQ-BE-5.2.7` | unit | 검색 불가 문서는 호출 없이 평가 실패 | documents·rag (가짜) | `src/evaluation/**/*.spec.ts` |
 | `REQ-BE-5.2.8` | unit | 기동 때 평가 중 기록 정리 | `MONGO_DB` (가짜) | `src/evaluation/**/*.spec.ts` |
+| `REQ-BE-5.2.9` | unit | `BatchIndexingError`면 일괄 색인 중 사유의 평가 실패 | rag (가짜, 일괄 색인 중 거부) | `src/evaluation/**/*.spec.ts` |
 | `REQ-BE-5.3.1` | e2e | 거르기, 정렬, 값 없는 행 맨 뒤 | | `test/` |
 | `REQ-BE-5.3.2` | unit | 최근 기록 | `MONGO_DB` (가짜) | `src/evaluation/**/*.spec.ts` |
 | `REQ-BE-5.3.3` | unit | 비율·MRR 계산, 분모 규칙, 기록 없음 | `MONGO_DB` (가짜) | `src/evaluation/**/*.spec.ts` |

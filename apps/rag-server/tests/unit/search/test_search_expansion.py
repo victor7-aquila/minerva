@@ -69,7 +69,7 @@ def test_case_insensitive(example: Glossary) -> None:
 @pytest.mark.req("REQ-RAG-4.9.1")
 def test_no_term_empty_expansion(example: Glossary) -> None:
     """[REQ-RAG-4.9.1] 용어집의 말이 없는 질의는 빈 확장이다."""
-    assert example.expand("날씨 어때") == Expansion((), ())
+    assert example.expand("날씨 어때") == Expansion((), (), "날씨 어때")
 
 
 @pytest.mark.req("REQ-RAG-4.9.1")
@@ -81,15 +81,15 @@ def test_korean_particle_matches(example: Glossary) -> None:
 @pytest.mark.req("REQ-RAG-4.9.1")
 def test_ascii_boundary(example: Glossary) -> None:
     """[REQ-RAG-4.9.1] 영문 말은 바로 앞에 영문이 붙으면(concert) 찾지 않고 조사는 붙어도 찾는다."""
-    assert example.expand("concert 일정") == Expansion((), ())
-    assert example.expand("cert를") != Expansion((), ())
+    assert example.expand("concert 일정") == Expansion((), (), "concert 일정")
+    assert example.expand("cert를") != Expansion((), (), "cert를")
 
 
 @pytest.mark.parametrize("query", ["certs 갱신", "cert2 갱신", "cert9", "CERTS"])
 @pytest.mark.req("REQ-RAG-4.9.1")
 def test_ascii_boundary_after(example: Glossary, query: str) -> None:
     """[REQ-RAG-4.9.1] 영문·숫자로 끝나는 말은 바로 뒤에 영문·숫자가 오면 찾지 않는다."""
-    assert example.expand(query) == Expansion((), ())
+    assert example.expand(query) == Expansion((), (), query)
 
 
 @pytest.mark.parametrize("query", ["cert-2", "cert.", "(cert)", "cert 2", "cert"])
@@ -147,6 +147,72 @@ def test_already_in_query_uses_boundary(example: Glossary) -> None:
     assert "cert" in _lower(result.terms)
     assert "certificate" not in _lower(result.terms)
     assert "인증서" in result.terms
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_replaces_synonym_with_canonical(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] rewritten은 질의 안의 동의어를 묶음의 대표어로 바꾼 질의다."""
+    assert example.expand("cert 갱신").rewritten == "인증서 갱신"
+    # ★ 영문은 정규화(소문자)한 형태로 돌려주고, 대표어 그대로인 말은 그대로 둔다
+    assert example.expand("CERT와 CRL").rewritten == "인증서와 폐기 목록"
+    assert example.expand("인증서 갱신").rewritten == "인증서 갱신"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_prefers_longer_overlap(settings: Settings, glossary_path: Path) -> None:
+    """[REQ-RAG-4.9.1] 용어집 말이 서로 겹치면 긴 말을 먼저 대표어로 바꾼다."""
+    write_glossary(
+        glossary_path,
+        "terms:\n"
+        "  - canonical: 인증서\n    synonyms: [인증 문서]\n"
+        "  - canonical: 문서\n    synonyms: [doc]\n",
+    )
+    glossary = Glossary(settings)
+    glossary.load()
+
+    assert glossary.expand("인증 문서 갱신").rewritten == "인증서 갱신"
+    assert glossary.expand("doc 갱신").rewritten == "문서 갱신"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_is_query_when_no_term(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 찾은 말이 없으면 rewritten은 정규화하지 않은 질의 원문 그대로다."""
+    query = "Ｗｅａｔｈｅｒ   어때"
+
+    result = example.expand(query)
+
+    assert result.matched == ()
+    assert result.rewritten == query
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_canonical_and_synonym_together(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 같은 묶음의 대표어와 동의어가 함께 든 질의는 둘 다 대표어로 바뀐다."""
+    assert example.expand("인증서 cert 갱신").rewritten == "인증서 인증서 갱신"
+    assert example.expand("cert와 certificate").rewritten == "인증서와 인증서"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_replaces_every_occurrence(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 한 말이 질의에 여러 번 나오면 나온 곳 모두 대표어로 바뀐다."""
+    assert example.expand("cert 갱신 cert 폐기 cert").rewritten == "인증서 갱신 인증서 폐기 인증서"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_follows_ascii_boundary(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 경계에 걸리는 곳(concert)은 두고 조사가 붙은 말(cert를)은 바꾼다."""
+    assert example.expand("concert cert를 갱신").rewritten == "concert 인증서를 갱신"
+    # ★ 바뀔 곳이 없으면 matched 판정과 같이 질의 원문 그대로다
+    assert example.expand("concert certs").rewritten == "concert certs"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_each_group_own_canonical(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 서로 다른 묶음의 말은 각각 자기 묶음의 대표어로 바뀐다."""
+    assert example.expand("cert 와 crl").rewritten == "인증서 와 폐기 목록"
+    assert example.expand("certificate revocation list 와 certificate").rewritten == (
+        "폐기 목록 와 인증서"
+    )
 
 
 @pytest.mark.req("REQ-RAG-4.9.2")

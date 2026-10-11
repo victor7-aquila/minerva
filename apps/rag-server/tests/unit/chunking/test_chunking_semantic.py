@@ -18,6 +18,7 @@ from minerva_rag.resource import LlmRole
 from .fakes import (
     FakeModelHub,
     GenerationError,
+    MakeSettings,
     assert_verbatim,
     by_headings,
     has_bodyless_text_chunk,
@@ -71,50 +72,74 @@ def test_follows_llm_boundaries(settings: Settings) -> None:
     assert all(call.role is LlmRole.CHUNKING for call in fake.calls)
 
 
-@pytest.mark.req("REQ-RAG-2.1.1")
-@pytest.mark.parametrize(
-    "response",
-    ["이건 JSON이 아니다", '{"result": []}', "[]"],
-    ids=["not-json", "no-chunks-key", "not-object"],
-)
-def test_unparseable_response_fails(settings: Settings, response: str) -> None:
-    """[REQ-RAG-2.1.1] 정해진 형식이 아닌 응답은 다시 시도하지 않고 ChunkingFailedError다."""
+UNPARSEABLE = [
+    "이건 JSON이 아니다",
+    '{"result": []}',
+    "[]",
+    '{"chunks": []}',
+    _one(raw_chunk(0, 3)),
+    _one(raw_chunk(1, 999)),
+    _one(raw_chunk(1, 3, title="")),
+    _one(raw_chunk(1, 3, summary="  ")),
+]
+UNPARSEABLE_IDS = [
+    "not-json",
+    "no-chunks-key",
+    "not-object",
+    "no-chunk",
+    "line-zero",
+    "line-out-of-range",
+    "empty-title",
+    "blank-summary",
+]
+
+
+@pytest.mark.req("REQ-RAG-2.3.1")
+@pytest.mark.parametrize("response", UNPARSEABLE, ids=UNPARSEABLE_IDS)
+def test_unparseable_response_retried(settings: Settings, response: str) -> None:
+    """[REQ-RAG-2.3.1] 해석할 수 없는 응답은 실패하지 않고 다시 시도해 다음 응답대로 나뉜다."""
+    fake = FakeModelHub(boundary=scripted(raw_response(response), whole_part))
+
+    result = run(make_chunker(fake, settings).split(SMALL_DOC, ChunkingMode.SEMANTIC))
+
+    assert len(fake.boundary_calls) == 2
+    assert result.fallback_used is False
+    assert [c.text for c in text_chunks(result)] == [SMALL_DOC.strip()]
+
+
+@pytest.mark.req("REQ-RAG-2.3.2")
+@pytest.mark.parametrize("response", UNPARSEABLE, ids=UNPARSEABLE_IDS)
+def test_unparseable_exhausted_falls_back(make_settings: MakeSettings, response: str) -> None:
+    """[REQ-RAG-2.3.2] 끝내 해석할 수 없으면 ChunkingFailedError 없이 그 부분을 대체 분할한다."""
+    settings = make_settings(retries=1)
     fake = FakeModelHub(boundary=raw_response(response))
 
-    with pytest.raises(ChunkingFailedError) as info:
-        run(make_chunker(fake, settings).split(SMALL_DOC, ChunkingMode.SEMANTIC))
+    result = run(make_chunker(fake, settings).split(SMALL_DOC, ChunkingMode.SEMANTIC))
 
-    assert info.value.location is not None
-    assert len(fake.boundary_calls) == 1
+    assert len(fake.boundary_calls) == 2
+    assert result.fallback_used is True
+    assert_verbatim([c.text for c in text_chunks(result)], SMALL_DOC)
 
 
 @pytest.mark.req("REQ-RAG-2.1.1")
-@pytest.mark.req("REQ-RAG-2.1.2")
-@pytest.mark.parametrize(
-    "response",
-    [
-        '{"chunks": []}',
-        _one(raw_chunk(0, 3)),
-        _one(raw_chunk(1, 999)),
-        _one(raw_chunk(1, 3, title="")),
-        _one(raw_chunk(1, 3, summary="  ")),
-    ],
-    ids=["no-chunk", "line-zero", "line-out-of-range", "empty-title", "blank-summary"],
-)
-def test_unparseable_detail_fails(settings: Settings, response: str) -> None:
-    """[REQ-RAG-2.1.1] 청크가 없거나 원문에 없는 위치이거나 제목·요약이 빈 응답은 즉시 실패한다."""
-    fake = FakeModelHub(boundary=raw_response(response))
+@pytest.mark.parametrize(("title", "summary"), [(" ", " "), ("", "")], ids=["blank", "empty"])
+def test_blank_only_range_accepts_empty_title(settings: Settings, title: str, summary: str) -> None:
+    """[REQ-RAG-2.1.1] 빈 줄만 덮는 범위는 제목·요약이 공백뿐이어도 해석할 수 있는 응답이다."""
+    # SMALL_DOC의 4번 줄은 빈 줄이다
+    chunks = [raw_chunk(1, 3), raw_chunk(4, 4, title=title, summary=summary)]
+    fake = FakeModelHub(boundary=raw_response(json.dumps({"chunks": chunks})))
 
-    with pytest.raises(ChunkingFailedError):
-        run(make_chunker(fake, settings).split(SMALL_DOC, ChunkingMode.SEMANTIC))
+    result = run(make_chunker(fake, settings).split(SMALL_DOC, ChunkingMode.SEMANTIC))
 
     assert len(fake.boundary_calls) == 1
+    assert result.fallback_used is False
+    assert [c.title for c in text_chunks(result)] == ["제목"]
 
 
 @pytest.mark.req("REQ-RAG-2.1.1")
 def test_failure_location_heading_path(settings: Settings) -> None:
     """[REQ-RAG-2.1.1] 경계 호출 실패의 위치에 그 부분의 헤딩 경로가 담기고 자리표시 ID는 없다."""
-    fake = FakeModelHub(boundary=raw_response("x"))
+    fake = FakeModelHub(error=lambda call: GenerationError() if call.is_boundary else None)
 
     with pytest.raises(ChunkingFailedError) as info:
         run(make_chunker(fake, settings).split(SMALL_DOC, ChunkingMode.SEMANTIC))

@@ -1,11 +1,14 @@
 """색인 작업 관리 헬퍼: 접수·실행·기록과 Backend 알림 (REQ-RAG-10.8)."""
 
 import asyncio
+import contextlib
 import json
 import sqlite3
+import time
 import uuid
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import partial
@@ -14,6 +17,7 @@ from typing import Any, Protocol
 import httpx
 
 from minerva_rag.core import (
+    BatchIndexingError,
     FailureLocation,
     JobFailureCode,
     JobNotFoundError,
@@ -21,6 +25,7 @@ from minerva_rag.core import (
     ShuttingDownError,
     get_logger,
 )
+from minerva_rag.resource import ModelHub
 
 log = get_logger(__name__)
 
@@ -33,11 +38,13 @@ _INTERNAL_ERROR_MESSAGE = (
     "색인 중 예상하지 못한 오류가 발생했습니다. 서버 로그를 확인한 뒤 다시 색인해 주세요"
 )
 _SERVER_RESTARTED_MESSAGE = "작업이 끝나기 전에 RAG Server가 다시 시작했습니다. 다시 색인해 주세요"
+_DISPATCH_RETRY_SECONDS = 1.0  # 배정 쓰기가 실패했을 때 스케줄러를 다시 깨우는 간격
 
 
 # ── 공개 타입 ─────────────────────────────────────────────────────
 
-IndexRunner = Callable[["ProgressReporter"], Awaitable["IndexOutcome"]]
+EmbedRunner = Callable[["ProgressReporter"], Awaitable["IndexOutcome"]]  # 임베딩·저장
+IndexRunner = Callable[["ProgressReporter"], Awaitable[EmbedRunner]]  # 분할 → EmbedRunner 반환
 RecoverFn = Callable[
     [str, str], Awaitable[bool]
 ]  # (doc_id, job_id) → 그 작업의 결과가 검색에 쓰이는가
@@ -57,6 +64,7 @@ class JobStage(StrEnum):
     """색인 중 단계다."""
 
     CHUNKING = "chunking"  # 분할
+    EMBEDDING_PENDING = "embedding_pending"  # 분할을 마치고 임베딩 단계를 기다림
     EMBEDDING = "embedding"  # 임베딩
     STORING = "storing"  # 저장
 
@@ -124,6 +132,18 @@ class JobQueue(Protocol):
         """그 문서의 색인 중 작업이 끝날 때까지 기다린다."""
         ...
 
+    def caption_slot(self) -> AbstractAsyncContextManager[None]:
+        """요약·캡션 생성 구간이다. 일괄 색인을 시작하고, 모델을 내린 뒤 들어간다."""
+        ...
+
+    def note_index_request(self) -> None:
+        """색인 요청이 왔음을 알린다. 일괄 색인을 끝내는 시간만 다시 잰다. ★ 동기 메서드다."""
+        ...
+
+    async def reject_during_batch(self) -> None:
+        """일괄 색인 중이면 BatchIndexingError를 낸다."""
+        ...
+
 
 @dataclass(frozen=True)
 class JobFailureInfo:
@@ -183,15 +203,41 @@ class _Change:
     index_state: IndexStateView  # 트랜잭션이 끝나는 시점의 값
 
 
-@dataclass
-class _Pending:
-    """이 프로세스가 러너를 가진 작업이다."""
+@dataclass(frozen=True)
+class _JobRef:
+    """작업 식별 정보다."""
 
     job_id: str
     doc_id: str
     version: str
     accepted_order: int
+
+
+@dataclass
+class _Pending:
+    """대기 중이고 이 프로세스가 IndexRunner를 가진 작업이다."""
+
+    ref: _JobRef
     run: IndexRunner
+
+
+class _Phase(StrEnum):
+    """색인 중 작업의 실행 위치다."""
+
+    CHUNK = "chunk"  # IndexRunner 실행 중
+    PENDING = "pending"  # EmbedRunner를 쥐고 임베딩 단계를 기다림
+    EMBED = "embed"  # EmbedRunner 실행 중
+
+
+@dataclass
+class _Active:
+    """색인 중(RUNNING)인 작업이다. 임베딩 대기를 포함한다."""
+
+    ref: _JobRef
+    phase: _Phase
+    task: asyncio.Task[None] | None  # PENDING이면 None
+    embed: EmbedRunner | None  # ★ 분할 결과를 쥔 클로저다. 끝나면 None으로 놓는다
+    finished: asyncio.Future[None]  # 이 프로세스에서 작업이 끝나면(기록·취소·포기) 결과를 세운다
 
 
 _RecordFn = Callable[[sqlite3.Connection], list[_Change]]  # 결과를 기록하는 트랜잭션 함수
@@ -202,9 +248,9 @@ class _Reporter:
 
     def __init__(
         self,
-        job: _Pending,
-        on_stage: Callable[[_Pending, JobStage], None],
-        on_prepared: Callable[[_Pending, IndexOutcome], Awaitable[None]],
+        job: _JobRef,
+        on_stage: Callable[[_JobRef, JobStage], None],
+        on_prepared: Callable[[_JobRef, IndexOutcome], Awaitable[None]],
     ) -> None:
         """작업과 기록 함수를 받는다."""
         self._job = job
@@ -515,6 +561,12 @@ def _read_current(conn: sqlite3.Connection, doc_id: str) -> CurrentIndex | None:
     return None if row is None else CurrentIndex(row["job_id"], row["version"], row["checksum"])
 
 
+def _read_open_count(conn: sqlite3.Connection) -> int:
+    """대기·색인 중 작업의 수를 읽는다."""
+    row = conn.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'running')").fetchone()
+    return int(row[0])
+
+
 def _read_running(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """색인 중으로 남은 작업을 접수 순서대로 읽는다."""
     return conn.execute(
@@ -560,12 +612,30 @@ def _log_orphan_error(step: str, job_id: str, doc_id: str, task: asyncio.Task[An
         )
 
 
-class JobManager:
-    """작업을 접수·실행·기록하고 Backend에 알린다."""
+_REAL_SLEEP = (
+    asyncio.sleep
+)  # ★ import 시점에 잡는다 — 테스트가 asyncio.sleep을 바꿔도 영향받지 않는다
 
-    def __init__(self, settings: Settings) -> None:
-        """설정을 받는다. I/O는 하지 않는다."""
+
+async def _idle_wait(seconds: float) -> None:
+    """일괄 색인 끝 타이머의 대기다. ★ 테스트 대체 경계: 알림 재전송의 sleep과 따로 바꾼다."""
+    await _REAL_SLEEP(seconds)
+
+
+def _discard(waiters: deque[asyncio.Future[None]], waiter: asyncio.Future[None]) -> None:
+    """대기열에 있으면 뺀다."""
+    with contextlib.suppress(ValueError):
+        waiters.remove(waiter)
+
+
+class JobManager:
+    """작업을 접수·실행·기록하고 Backend에 알리며, 일괄 색인의 단계와 모델 교체를 정한다."""
+
+    def __init__(self, settings: Settings, model_hub: ModelHub) -> None:
+        """설정과 모델 허브를 받는다. I/O는 하지 않는다."""
         self._settings = settings
+        self._hub = model_hub
+        self._idle_seconds = settings.batch_idle_seconds
         self._path = settings.jobs_db_path
         self._concurrency = settings.job_concurrency
         self._lock = asyncio.Lock()  # 쓰기와 알림 큐 넣기를 한 순서로 묶는다
@@ -574,13 +644,32 @@ class JobManager:
         self._stopping = False
         self._http: httpx.AsyncClient | None = None
         self._pending: dict[str, _Pending] = {}
-        self._running: dict[str, asyncio.Task[None]] = {}
+        self._active: dict[str, _Active] = {}
         self._running_docs: dict[str, str] = {}  # doc_id → 색인 중인 job_id
         self._stages: dict[str, JobStage] = {}
         self._record_tasks: set[asyncio.Task[None]] = set()
         self._background: set[asyncio.Task[Any]] = set()
         self._outbox: dict[str, deque[tuple[_Change, dict[str, Any]]]] = {}
         self._senders: dict[str, asyncio.Task[None]] = {}
+        # ★ 단계 전환·배정·모델 교체는 스케줄러 태스크 하나만 한다. 나머지는 상태만 바꾸고 깨운다
+        self._wake = asyncio.Event()
+        self._scheduler: asyncio.Task[None] | None = None
+        self._halted = False  # stop 마지막 단계에서 참. 스케줄러가 더 아무것도 시작하지 않는다
+        # 일괄 색인
+        self._batch = False  # 일괄 색인 중 (start 직후에는 거짓)
+        self._batch_started_at = 0.0
+        self._phase_embedding = False  # 임베딩 단계 중 (일괄 색인 중일 때만 참)
+        self._ending = False  # 일괄 색인을 끝내는 모델 교체 중
+        self._local_dirty = True  # ★ 마지막 올리기·임베딩 단계 뒤 release_local_models를 아직 안 함
+        self._embedding_started_at = 0.0
+        self._embedding_jobs = 0
+        self._caption_inside = 0  # caption_slot 안의 요청 수
+        self._caption_waiters: deque[asyncio.Future[None]] = deque()
+        # 끝 타이머
+        self._idle_gen = 0  # 활동마다 1씩 오른다
+        self._idle_fired = -1  # 타이머가 다 잰 세대
+        self._idle_task: asyncio.Task[None] | None = None
+        self._retry_handle: asyncio.TimerHandle | None = None
 
     # ── 수명 ──
 
@@ -608,7 +697,7 @@ class JobManager:
             if failed or recovered:
                 log.warning("service.job_restart_resolved", failed=failed, recovered=recovered)
             self._started = True
-            await self._dispatch()
+            self._scheduler = asyncio.create_task(self._schedule_loop())
         except BaseException:
             # ★ 기동 실패 시 연 자원을 닫고 다시 start할 수 있게 되돌린다
             self._started = False
@@ -618,13 +707,18 @@ class JobManager:
 
     async def stop(self, timeout_seconds: float) -> None:
         """새 접수를 막고 색인 중인 작업을 기다린다. 끝나지 않은 작업은 취소해 둔다."""
-        self._stopping = True  # ★ 첫 줄. 이후 submit은 ShuttingDownError, 새 배정은 없다
-        running = set(self._running.values())
-        if running:
-            _, unfinished = await asyncio.wait(running, timeout=timeout_seconds)
-            for task in unfinished:
-                task.cancel()
-            await asyncio.gather(*unfinished, return_exceptions=True)
+        self._stopping = True  # ★ 첫 줄. 이후 submit은 ShuttingDownError, 분할 배정은 없다
+        self._wake.set()
+        # 임베딩 대기 작업도 기다린다. 기다리는 동안 임베딩 단계에서 처리될 수 있다
+        futures = {active.finished for active in self._active.values()}
+        if futures:
+            await asyncio.wait(futures, timeout=timeout_seconds)
+        await self._halt_scheduler()
+        tasks = [a.task for a in self._active.values() if a.task is not None and not a.task.done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        self._abandon_leftovers()
         # 경계에서 끝난 결과 기록과 단계 저장은 마저 마친다
         await asyncio.gather(*self._record_tasks, *self._background, return_exceptions=True)
         # ★ 닫기 전에 방금 끝난 작업의 알림이 첫 전송을 시도할 짬을 준다. 상한이 있다
@@ -632,6 +726,25 @@ class JobManager:
         if senders:
             await asyncio.wait(senders, timeout=_NOTIFY_FLUSH_SECONDS)
         await self._close_notifier()
+
+    async def _halt_scheduler(self) -> None:
+        """스케줄러·끝 타이머·재시도를 멈춘다. ★ 모델 호출 중이면 그 호출이 취소된다."""
+        self._halted = True
+        if self._retry_handle is not None:
+            self._retry_handle.cancel()
+            self._retry_handle = None
+        stopped = [t for t in (self._idle_task, self._scheduler) if t is not None]
+        for task in stopped:
+            task.cancel()
+        self._idle_task = None
+        await asyncio.gather(*stopped, return_exceptions=True)
+
+    def _abandon_leftovers(self) -> None:
+        """기록 없이 남은 색인 중 작업과 대기 캡션을 풀어 기다리는 쪽이 걸리지 않게 한다."""
+        for active in list(self._active.values()):
+            active.embed = None  # ★ 분할 결과를 쥔 클로저를 놓는다. DB는 RUNNING으로 남는다
+            self._finish(active)
+        self._admit_waiters()
 
     async def _close_notifier(self) -> None:
         """알림 전송 작업을 멈추고 HTTP 클라이언트를 닫는다."""
@@ -662,7 +775,7 @@ class JobManager:
     async def _submit_unit(
         self, job_id: str, doc_id: str, version: str, checksum: str, run: IndexRunner
     ) -> None:
-        """접수 트랜잭션, 메모리 반영, 알림 큐 넣기, 배정을 이어서 한다."""
+        """접수 트랜잭션, 메모리 반영, 알림 큐 넣기를 이어서 한다. 스케줄러가 배정한다."""
         async with self._lock:
             self._require_open()  # 잠금을 기다리는 사이 stop이 불렸을 수 있다
             order, changes = await asyncio.to_thread(
@@ -671,9 +784,10 @@ class JobManager:
                     _tx_submit, job_id=job_id, doc_id=doc_id, version=version, checksum=checksum
                 ),
             )
+            self._pending[job_id] = _Pending(_JobRef(job_id, doc_id, version, order), run)
+            # ★ 커밋한 뒤 잠금 안에서 일괄 색인을 시작한다. 배정은 기다리지 않는다
+            self._begin_batch("job")
             self._after_commit(changes)
-            self._pending[job_id] = _Pending(job_id, doc_id, version, order, run)
-        await self._dispatch_locked()
 
     async def find_open(self, doc_id: str, checksum: str) -> str | None:
         """같은 문서·체크섬의 대기·색인 중 작업 ID를 돌려준다. 없으면 None이다."""
@@ -698,13 +812,61 @@ class JobManager:
             self._after_commit(changes)
 
     async def wait_running(self, doc_id: str) -> None:
-        """그 문서의 색인 중 작업이 끝날 때까지 기다린다. 없으면 바로 돌아온다."""
+        """그 문서의 색인 중 작업(임베딩 대기 포함)이 끝날 때까지 기다린다. 없으면 바로 돌아온다."""
         self._require_started()
         job_id = self._running_docs.get(doc_id)
-        task = None if job_id is None else self._running.get(job_id)
-        if task is not None:
-            # ★ wait는 기다리는 쪽이 취소돼도 작업을 취소하지 않는다
-            await asyncio.wait({task})
+        active = None if job_id is None else self._active.get(job_id)
+        if active is not None:
+            # ★ wait는 기다리는 쪽이 취소돼도 future를 취소하지 않는다
+            await asyncio.wait({active.finished})
+
+    @asynccontextmanager
+    async def caption_slot(self) -> AsyncIterator[None]:
+        """일괄 색인을 시작하고, 임베딩 단계가 끝나 임베딩·재정렬 모델을 내린 뒤 들어간다."""
+        self._require_started()
+        if self._halted:  # stop이 끝난 뒤: 모델 관리 없이 바로 들어간다
+            yield
+            return
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._caption_waiters.append(waiter)
+        self._begin_batch("caption")
+        self._touch()
+        self._wake.set()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            if waiter.done() and not waiter.cancelled():
+                self._leave_caption()  # ★ 허가와 취소가 겹쳤다 — 이미 센 것을 되돌린다
+            else:
+                waiter.cancel()
+                _discard(self._caption_waiters, waiter)
+                self._touch()
+                self._wake.set()
+            raise
+        try:
+            yield
+        finally:
+            self._leave_caption()
+
+    def _leave_caption(self) -> None:
+        """caption_slot에서 나온 것을 세고 스케줄러를 깨운다."""
+        self._caption_inside -= 1
+        self._touch()
+        self._wake.set()
+
+    def note_index_request(self) -> None:
+        """색인 요청이 왔음을 알린다. 일괄 색인을 시작하지 않고 끝 타이머만 다시 잰다."""
+        self._require_started()
+        self._touch()
+
+    async def reject_during_batch(self) -> None:
+        """일괄 색인 중이면 남은 작업 수를 담아 BatchIndexingError를 낸다."""
+        self._require_started()
+        if not self._batch:
+            return
+        remaining = await asyncio.to_thread(self._read, _read_open_count)
+        if self._batch:  # 읽는 사이 끝났으면 거부하지 않는다
+            raise BatchIndexingError(remaining)
 
     async def forget_document(self, doc_id: str) -> None:
         """그 문서의 검색되는 버전을 비운다. 알림 순번은 그대로 둔다."""
@@ -877,16 +1039,252 @@ class JobManager:
             self._after_commit(changes)
         return searchable and prepared is not None
 
-    # ── 실행 배정 ──
+    # ── 메모리 상태 계산 ──
 
-    def _next_runnable(self, blocked_docs: frozenset[str] = frozenset()) -> _Pending | None:
-        """색인 중이거나 배정에 실패한 문서를 뺀 대기 작업 중 가장 먼저 접수된 것을 고른다."""
-        candidates = [
-            j
-            for j in self._pending.values()
-            if j.doc_id not in self._running_docs and j.doc_id not in blocked_docs
-        ]
-        return min(candidates, key=lambda job: job.accepted_order, default=None)
+    def _chunk_running(self) -> int:
+        """IndexRunner를 실행 중인 작업 수다."""
+        return sum(a.phase is _Phase.CHUNK for a in self._active.values())
+
+    def _embed_running(self) -> int:
+        """EmbedRunner를 실행 중인 작업 수다."""
+        return sum(a.phase is _Phase.EMBED for a in self._active.values())
+
+    def _embed_pending(self) -> list[_Active]:
+        """임베딩 단계를 기다리는 작업이다."""
+        return [a for a in self._active.values() if a.phase is _Phase.PENDING]
+
+    def _live_waiters(self) -> list[asyncio.Future[None]]:
+        """취소되지 않은 caption_slot 대기 요청이다."""
+        return [w for w in self._caption_waiters if not w.done()]
+
+    def _chunk_waiting(self) -> list[_Pending]:
+        """분할을 기다리는 작업이다. ★ 같은 문서의 앞 작업을 기다리는 작업은 뺀다.
+
+        (REQ-RAG-10.8.8.1) 넣으면 앞 작업이 EMBEDDING_PENDING일 때 두 작업이 서로를 기다려
+        멈춘다. stop 뒤에는 없다.
+        """
+        if self._stopping:
+            return []
+        return [p for p in self._pending.values() if p.ref.doc_id not in self._running_docs]
+
+    def _is_idle(self) -> bool:
+        """대기·색인 중 작업과 caption_slot 요청이 모두 없는지 본다."""
+        return (
+            not self._pending
+            and not self._active
+            and self._caption_inside == 0
+            and not self._live_waiters()
+        )
+
+    # ── 일괄 색인 시작·끝 타이머 ──
+
+    def _begin_batch(self, trigger: str) -> None:
+        """일괄 색인 중이 아니면 시작한다. ★ 끝내는 도중에는 이미 중이므로 아무것도 하지 않는다."""
+        if self._batch:
+            return
+        self._batch = True
+        self._batch_started_at = time.perf_counter()
+        log.info("service.batch_started", trigger=trigger)
+
+    def _touch(self) -> None:
+        """활동이 있었음을 기록하고 끝 타이머를 다시 건다."""
+        self._idle_gen += 1
+        if self._idle_task is not None:
+            self._idle_task.cancel()
+            self._idle_task = None
+        if self._batch and not self._stopping and not self._halted and self._is_idle():
+            self._idle_task = asyncio.create_task(self._idle_timer(self._idle_gen))
+
+    async def _idle_timer(self, gen: int) -> None:
+        """한가한 시간을 다 재면 스케줄러를 깨운다. 그 사이 활동이 있었으면 무효다."""
+        await _idle_wait(self._idle_seconds)
+        if gen == self._idle_gen:
+            self._idle_fired = gen
+            self._wake.set()
+
+    # ── 스케줄러 ──
+
+    async def _schedule_loop(self) -> None:
+        """★ 단계 전환·배정·모델 교체를 하는 유일한 태스크다. 예외로 죽지 않는다."""
+        while not self._halted:
+            await self._wake.wait()
+            self._wake.clear()  # ★ 처리 전에 지운다 — 처리 중의 깨움은 다음 바퀴에서 받는다
+            try:
+                await self._schedule_once()
+            except Exception as exc:
+                log.exception(
+                    "service.job_error",
+                    job_id="",
+                    doc_id="",
+                    step="schedule",
+                    error_type=type(exc).__name__,
+                )
+
+    async def _schedule_once(self) -> None:
+        """할 일이 없을 때까지 판단을 되풀이한다. 매 await 뒤에는 처음부터 다시 본다."""
+        while not self._halted:
+            if self._phase_embedding:
+                if not self._embed_pending() and self._embed_running() == 0:
+                    self._end_embedding()
+                    continue
+                self._start_embed_runners()
+                return
+            if self._should_end_batch():
+                await self._end_batch()
+                continue
+            if self._should_start_embedding():
+                await self._start_embedding()
+                continue
+            if await self._run_llm_work():
+                continue
+            return
+
+    def _should_start_embedding(self) -> bool:
+        """임베딩 단계를 시작할 조건이다. ★ 대기 중인 요약·캡션 요청도 막는다."""
+        return (
+            self._batch
+            and not self._ending
+            and bool(self._embed_pending())
+            and self._chunk_running() == 0
+            and not self._chunk_waiting()
+            and self._caption_inside == 0
+            and not self._live_waiters()
+        )
+
+    def _should_end_batch(self) -> bool:
+        """일괄 색인을 끝낼 조건이다."""
+        return (
+            self._batch
+            and not self._ending
+            and not self._phase_embedding
+            and self._idle_fired == self._idle_gen
+            and self._is_idle()
+        )
+
+    async def _switch(self, action: str, target: str, call: Callable[[], Awaitable[None]]) -> None:
+        """★ 모델 내리기·올리기가 실패하면 경고만 남기고 진행한다. 취소는 그대로 전파한다."""
+        try:
+            await call()
+        except Exception as exc:
+            log.warning(
+                "service.batch_model_failed",
+                action=action,
+                target=target,
+                error_type=type(exc).__name__,
+            )
+
+    async def _start_embedding(self) -> None:
+        """분할·요약·캡션 모델(Ollama)을 내리고 임베딩 단계를 연다."""
+        self._phase_embedding = (
+            True  # ★ await 전에 세운다 — 내리는 동안 분할·캡션이 시작되지 않는다
+        )
+        self._embedding_started_at = time.perf_counter()
+        self._embedding_jobs = 0
+        pending = len(self._embed_pending())
+        await self._switch("release", "ollama", self._hub.release_ollama_models)
+        log.info("service.batch_embedding_started", pending_jobs=pending)
+
+    def _start_embed_runners(self) -> None:
+        """동시 처리 상한까지 접수 순서대로 EmbedRunner를 띄운다."""
+        if self._halted:
+            return
+        while self._embed_running() < self._concurrency:
+            waiting = self._embed_pending()
+            if not waiting:
+                return
+            active = min(waiting, key=lambda a: a.ref.accepted_order)
+            active.phase = _Phase.EMBED
+            active.task = asyncio.create_task(self._execute_embed(active))
+            self._embedding_jobs += 1
+
+    def _end_embedding(self) -> None:
+        """임베딩 단계를 끝낸다. 임베딩 모델이 GPU에 있으므로 다음 LLM 단계에서 내려야 한다."""
+        self._phase_embedding = False
+        self._local_dirty = True
+        log.info(
+            "service.batch_embedding_ended",
+            jobs=self._embedding_jobs,
+            elapsed_ms=round((time.perf_counter() - self._embedding_started_at) * 1000),
+        )
+
+    async def _end_batch(self) -> None:
+        """Ollama 모델을 내리고 임베딩·재정렬 모델을 올려 일괄 색인을 끝낸다."""
+        self._ending = True
+        try:
+            await self._switch("release", "ollama", self._hub.release_ollama_models)
+            await self._switch("load", "local", self._hub.load_local_models)
+            self._local_dirty = True  # ★ 다음 분할·캡션 전에 다시 내린다 (REQ-RAG-10.8.8.5)
+        finally:
+            self._ending = False
+        self._batch = False  # ★ 올린 뒤에 내린다 — 그 전의 reject_during_batch는 거부한다
+        log.info(
+            "service.batch_ended",
+            elapsed_ms=round((time.perf_counter() - self._batch_started_at) * 1000),
+        )
+        if not self._is_idle():  # 끝내는 동안 접수·캡션이 왔다 — 새 일괄 색인으로 잇는다
+            busy = self._caption_inside or self._live_waiters()
+            self._begin_batch("caption" if busy else "job")
+        self._touch()
+
+    async def _run_llm_work(self) -> bool:
+        """LLM 단계의 일을 한다: 임베딩·재정렬 모델 내리기, 대기 캡션 허가, 분할 배정.
+
+        상태가 바뀌어 다시 판단해야 하면 참이다.
+        """
+        if self._ending:
+            return False
+        concurrency = self._concurrency
+        startable = (
+            not self._stopping
+            and bool(self._chunk_waiting())
+            and self._chunk_running() < concurrency
+        )
+        if not startable and not self._live_waiters():
+            return False
+        if self._local_dirty:
+            self._local_dirty = False
+            await self._switch("release", "local", self._hub.release_local_models)
+            return True
+        self._admit_waiters()
+        failed_docs: set[str] = set()
+        while not self._stopping and not self._halted and self._chunk_running() < concurrency:
+            candidates = [p for p in self._chunk_waiting() if p.ref.doc_id not in failed_docs]
+            if not candidates:
+                break
+            job = min(candidates, key=lambda p: p.ref.accepted_order)
+            started = await self._detached(
+                self._start_unit(job),
+                step="dispatch",
+                job_id=job.ref.job_id,
+                doc_id=job.ref.doc_id,
+            )
+            if not started:
+                failed_docs.add(job.ref.doc_id)
+        if failed_docs:
+            self._schedule_retry()
+        return False
+
+    def _admit_waiters(self) -> None:
+        """기다리는 caption_slot 요청을 모두 허가한다. ★ 허가와 동시에 센다."""
+        while self._caption_waiters:
+            waiter = self._caption_waiters.popleft()
+            if waiter.done():  # 취소된 요청
+                continue
+            self._caption_inside += 1
+            waiter.set_result(None)
+
+    def _schedule_retry(self) -> None:
+        """배정 쓰기가 실패했으니 잠시 뒤 스케줄러를 다시 깨운다. 이미 걸려 있으면 그대로 둔다."""
+        if self._retry_handle is not None or self._halted:
+            return
+        self._retry_handle = asyncio.get_running_loop().call_later(
+            _DISPATCH_RETRY_SECONDS, self._fire_retry
+        )
+
+    def _fire_retry(self) -> None:
+        """재시도 시간이 됐다."""
+        self._retry_handle = None
+        self._wake.set()
 
     async def _detached[T](
         self, work: Coroutine[Any, Any, T], *, step: str, job_id: str = "", doc_id: str = ""
@@ -902,112 +1300,138 @@ class JobManager:
             task.add_done_callback(partial(_log_orphan_error, step, job_id, doc_id))
             raise
 
-    async def _dispatch(self) -> None:
-        """배정을 호출자 취소와 떼어 끝까지 한다."""
-        await self._detached(self._dispatch_locked(), step="dispatch")
-
-    async def _dispatch_locked(self) -> None:
-        """★ 상한과 문서별 순차 조건을 만족하는 대기 작업을 접수 순서대로 시작한다."""
+    async def _start_unit(self, job: _Pending) -> bool:
+        """대기 작업을 색인 중으로 바꾸고 IndexRunner를 띄운다. 배정 쓰기에 실패하면 거짓이다."""
+        ref = job.ref
         async with self._lock:
-            # ★ 배정에 실패한 문서는 이번 호출에서 건너뛴다(같은 문서의 뒤 작업이 앞지르지 않게)
-            failed_docs: set[str] = set()
-            while not self._stopping and len(self._running) < self._concurrency:
-                job = self._next_runnable(frozenset(failed_docs))
-                if job is None:
-                    return
-                if not await self._start_job(job):
-                    failed_docs.add(job.doc_id)
-
-    async def _start_job(self, job: _Pending) -> bool:
-        """대기 작업을 색인 중으로 바꾸고 러너를 띄운다. 배정에 실패하면 거짓이다."""
-        try:
-            changes = await asyncio.to_thread(self._write_tx, partial(_tx_start, job_id=job.job_id))
-        except Exception as exc:
-            # 작업은 대기로 남고, 다음 배정 계기(다른 작업의 종료·새 접수)에 다시 배정한다
-            log.exception(
-                "service.job_error",
-                job_id=job.job_id,
-                doc_id=job.doc_id,
-                step="dispatch",
-                error_type=type(exc).__name__,
-            )
-            return False
-        self._pending.pop(job.job_id, None)  # ★ 러너 참조는 여기서만 꺼낸다. 다시 실행하지 않는다
-        if self._stopping:
-            # ★ stop이 `_running`을 이미 떠 간 뒤에 커밋이 끝난 경합이다. 여기서 태스크를 만들면
-            #   stop의 대기·취소 대상 밖에서 닫힌 자원 위에 실행돼 FAILED로 잘못 기록될 수 있다.
-            #   그래서 실행하지 않고 RUNNING으로 남긴다 — 다음 start의 재시작 처리가 끝맺는다
-            #   (REQ-RAG-10.1.3, REQ-RAG-10.8.5)
-            self._after_commit(changes)
-            return True
-        if changes:
-            self._stages[job.job_id] = JobStage.CHUNKING
-            self._running_docs[job.doc_id] = job.job_id
-            self._running[job.job_id] = asyncio.create_task(self._execute(job))
-            self._after_commit(changes)
-        return True
-
-    async def _execute(self, job: _Pending) -> None:
-        """러너를 실행하고 결과를 기록한 뒤 다음 작업을 배정한다."""
-        reporter = _Reporter(job, self._on_stage, self._on_prepared)
-        try:
+            if ref.job_id not in self._pending:  # 그 사이 대체·실패됐다
+                return True
             try:
-                outcome = await job.run(reporter)
-            except JobFailure as failure:
-                record = partial(
-                    _tx_fail_running,
-                    job_id=job.job_id,
-                    code=str(failure.code),
-                    message=failure.message,
-                    location=failure.location,
+                changes = await asyncio.to_thread(
+                    self._write_tx, partial(_tx_start, job_id=ref.job_id)
                 )
             except Exception as exc:
+                # 작업은 대기로 남고, 스케줄러가 잠시 뒤 다시 배정한다
                 log.exception(
                     "service.job_error",
-                    job_id=job.job_id,
-                    doc_id=job.doc_id,
-                    step="run",
+                    job_id=ref.job_id,
+                    doc_id=ref.doc_id,
+                    step="dispatch",
                     error_type=type(exc).__name__,
                 )
-                record = partial(
-                    _tx_fail_running,
-                    job_id=job.job_id,
-                    code=JobFailureCode.INTERNAL_ERROR.value,
-                    message=_INTERNAL_ERROR_MESSAGE,
-                    location=None,
+                return False
+            self._pending.pop(
+                ref.job_id, None
+            )  # ★ 러너 참조는 여기서만 꺼낸다. 다시 실행하지 않는다
+            if self._stopping:
+                # ★ stop과 경합한 배정 커밋이다. 실행하지 않고 RUNNING으로 남긴다.
+                #   다음 start의 재시작 처리가 끝맺는다 (REQ-RAG-10.1.3, REQ-RAG-10.8.5)
+                self._after_commit(changes)
+                return True
+            if changes:
+                active = _Active(
+                    ref, _Phase.CHUNK, None, None, asyncio.get_running_loop().create_future()
                 )
+                self._active[ref.job_id] = active
+                self._running_docs[ref.doc_id] = ref.job_id
+                self._stages[ref.job_id] = JobStage.CHUNKING
+                active.task = asyncio.create_task(self._execute_chunk(active, job.run))
+                self._after_commit(changes)
             else:
-                record = partial(_tx_succeed, job_id=job.job_id, outcome=outcome)
-            await self._shielded_record(job, record)
+                # ★ 이미 대기가 아니었다. 마지막 작업이었을 수 있으니 끝 타이머를 다시 건다
+                self._touch()
+                self._wake.set()
+            return True
+
+    # ── 러너 실행 ──
+
+    def _failure_record(self, ref: _JobRef, exc: Exception) -> _RecordFn:
+        """러너가 낸 예외를 실패 기록으로 바꾼다. JobFailure가 아니면 로그를 남긴다."""
+        if isinstance(exc, JobFailure):
+            return partial(
+                _tx_fail_running,
+                job_id=ref.job_id,
+                code=str(exc.code),
+                message=exc.message,
+                location=exc.location,
+            )
+        log.error(
+            "service.job_error",
+            job_id=ref.job_id,
+            doc_id=ref.doc_id,
+            step="run",
+            error_type=type(exc).__name__,
+            exc_info=exc,
+        )
+        return partial(
+            _tx_fail_running,
+            job_id=ref.job_id,
+            code=JobFailureCode.INTERNAL_ERROR.value,
+            message=_INTERNAL_ERROR_MESSAGE,
+            location=None,
+        )
+
+    async def _execute_chunk(self, active: _Active, run: IndexRunner) -> None:
+        """IndexRunner를 실행한다. 성공하면 기록 없이 임베딩 단계를 기다리고, 실패하면 기록한다."""
+        ref = active.ref
+        reporter = _Reporter(ref, self._on_stage, self._on_prepared)
+        finish = True
+        try:
+            try:
+                embed = await run(reporter)
+            except Exception as exc:
+                await self._shielded_record(ref, self._failure_record(ref, exc))
+            else:
+                finish = False
+                active.embed = embed
+                active.phase = _Phase.PENDING
+                active.task = None
+                self._on_stage(ref, JobStage.EMBEDDING_PENDING)
         finally:
             # ★ 취소(CancelledError)면 아무것도 기록하지 않아 RUNNING으로 남는다 (REQ-RAG-10.1.3)
-            self._running.pop(job.job_id, None)
-            self._running_docs.pop(job.doc_id, None)
-            self._stages.pop(job.job_id, None)
-        if not self._stopping:
-            await self._dispatch_safely(job)
+            if finish:
+                self._finish(active)
+            self._wake.set()
 
-    async def _dispatch_safely(self, job: _Pending) -> None:
-        """다음 배정의 예외가 작업 태스크 밖으로 새지 않게 한다."""
+    async def _execute_embed(self, active: _Active) -> None:
+        """EmbedRunner를 실행하고 결과를 기록한다."""
+        ref = active.ref
+        embed = active.embed
+        reporter = _Reporter(ref, self._on_stage, self._on_prepared)
         try:
-            await self._dispatch()
-        except Exception as exc:
-            log.exception(
-                "service.job_error",
-                job_id=job.job_id,
-                doc_id=job.doc_id,
-                step="dispatch",
-                error_type=type(exc).__name__,
-            )
+            if embed is None:  # 방어: 임베딩 대기 작업은 항상 러너를 쥔다
+                raise RuntimeError("EmbedRunner가 없습니다")
+            try:
+                outcome = await embed(reporter)
+            except Exception as exc:
+                record = self._failure_record(ref, exc)
+            else:
+                record = partial(_tx_succeed, job_id=ref.job_id, outcome=outcome)
+            await self._shielded_record(ref, record)
+        finally:
+            active.embed = None  # ★ 청크를 쥔 클로저를 놓는다
+            self._finish(active)
+            self._wake.set()
 
-    async def _shielded_record(self, job: _Pending, record: _RecordFn) -> None:
+    def _finish(self, active: _Active) -> None:
+        """작업이 이 프로세스에서 끝났다. 메모리 상태를 정리하고 기다리는 쪽을 깨운다."""
+        ref = active.ref
+        self._active.pop(ref.job_id, None)
+        if self._running_docs.get(ref.doc_id) == ref.job_id:
+            del self._running_docs[ref.doc_id]
+        self._stages.pop(ref.job_id, None)
+        if not active.finished.done():
+            active.finished.set_result(None)
+        self._touch()
+
+    async def _shielded_record(self, ref: _JobRef, record: _RecordFn) -> None:
         """★ 취소돼도 결과 기록은 끝까지 한다."""
-        task = asyncio.create_task(self._record(job, record))
+        task = asyncio.create_task(self._record(ref, record))
         self._record_tasks.add(task)
         task.add_done_callback(self._record_tasks.discard)
         await asyncio.shield(task)
 
-    async def _record(self, job: _Pending, record: _RecordFn) -> None:
+    async def _record(self, ref: _JobRef, record: _RecordFn) -> None:
         """결과를 기록하고 알린다. 실패하면 바로 몇 번 더 시도하고, 안 되면 로그만 남긴다."""
         error: Exception | None = None
         for _ in range(_RECORD_ATTEMPTS):
@@ -1021,44 +1445,44 @@ class JobManager:
                 return
         log.error(
             "service.job_error",
-            job_id=job.job_id,
-            doc_id=job.doc_id,
+            job_id=ref.job_id,
+            doc_id=ref.doc_id,
             step="record",
             error_type=type(error).__name__,
             exc_info=error,
         )
-        # ★ DB에는 RUNNING이 남는다. 슬롯은 반납하고, 남은 RUNNING은 재시작 recover가 끝맺는다
+        # ★ DB에는 RUNNING이 남는다. 메모리에서는 빠지고, 남은 RUNNING은 재시작 recover가 끝맺는다
 
-    def _on_stage(self, job: _Pending, stage: JobStage) -> None:
+    def _on_stage(self, ref: _JobRef, stage: JobStage) -> None:
         """러너가 알린 단계를 메모리에 두고 SQLite에 백그라운드로 저장한다."""
-        if job.job_id not in self._running:
+        if ref.job_id not in self._active:
             return
-        self._stages[job.job_id] = stage
-        task = asyncio.create_task(self._save_stage(job, stage))
+        self._stages[ref.job_id] = stage
+        task = asyncio.create_task(self._save_stage(ref, stage))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def _save_stage(self, job: _Pending, stage: JobStage) -> None:
+    async def _save_stage(self, ref: _JobRef, stage: JobStage) -> None:
         """단계를 저장한다. 이미 끝난 작업은 바꾸지 않는다."""
         async with self._lock:
             try:
                 await asyncio.to_thread(
-                    self._write_tx, partial(_tx_stage, job_id=job.job_id, stage=stage.value)
+                    self._write_tx, partial(_tx_stage, job_id=ref.job_id, stage=stage.value)
                 )
             except Exception as exc:
                 log.exception(
                     "service.job_error",
-                    job_id=job.job_id,
-                    doc_id=job.doc_id,
+                    job_id=ref.job_id,
+                    doc_id=ref.doc_id,
                     step="stage",
                     error_type=type(exc).__name__,
                 )
 
-    async def _on_prepared(self, job: _Pending, outcome: IndexOutcome) -> None:
+    async def _on_prepared(self, ref: _JobRef, outcome: IndexOutcome) -> None:
         """★ 활성화 전에 결과를 기록한다. 실패하면 예외를 러너에 그대로 전한다."""
         async with self._lock:
             await asyncio.to_thread(
-                self._write_tx, partial(_tx_prepared, job_id=job.job_id, outcome=outcome)
+                self._write_tx, partial(_tx_prepared, job_id=ref.job_id, outcome=outcome)
             )
 
     def _with_stage(self, view: IndexStateView) -> IndexStateView:
@@ -1085,6 +1509,9 @@ class JobManager:
                 failure_code=change.failure_code,
             )
             self._enqueue(change)
+        # 상태 변경도 활동이다. 스케줄러가 새 상태를 보게 깨운다
+        self._touch()
+        self._wake.set()
 
     def _enqueue(self, change: _Change) -> None:
         """그 문서의 알림 큐에 넣는다. 전송 작업이 없으면 띄운다."""

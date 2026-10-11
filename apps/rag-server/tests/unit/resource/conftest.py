@@ -9,7 +9,14 @@ import pytest
 
 from minerva_rag.core import Settings, get_settings
 
-from .fakes import FakeModels, FakeOllama, install_fake_models, install_fake_ollama
+from .fakes import (
+    CudaSpy,
+    FakeModels,
+    FakeOllama,
+    install_cuda,
+    install_fake_models,
+    install_fake_ollama,
+)
 
 # 필수 키 5개의 테스트용 값이다. 호스트 `*.test`는 실제로 연결되지 않는다
 REQUIRED_ENV = {
@@ -58,3 +65,10 @@ def fake_models(monkeypatch: pytest.MonkeyPatch) -> FakeModels:
     models = FakeModels()
     install_fake_models(monkeypatch, models)
     return models
+
+
+@pytest.fixture(autouse=True)
+def cuda_off(monkeypatch: pytest.MonkeyPatch) -> CudaSpy:
+    """GPU를 못 쓰는 것으로 둔다. ★ CUDA 휠이 깔린 PC에서도 기존 테스트가 CPU 경로로 결정적으로
+    돈다."""
+    return install_cuda(monkeypatch, available=False, strict=False)

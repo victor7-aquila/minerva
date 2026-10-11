@@ -130,7 +130,7 @@ describe('REQ-BE-3.2.2', () => {
     );
   });
 
-  it.each(['chunking', 'embedding', 'storing'])(
+  it.each(['chunking', 'embedding_pending', 'embedding', 'storing'])(
     'T-DTO-7c latest_job_stage %s는 허용한다',
     async (stage) => {
       expect(await validateBody(withState({ latest_job_stage: stage }))).toEqual([]);

@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { RequestMethod } from '@nestjs/common';
 import { EventEmitterModule } from '@nestjs/event-emitter';
-import type { RagJobState as RagWireJobState } from '../rag';
+import type { RagJobStage, RagJobState as RagWireJobState } from '../rag';
 import { RagModule } from '../rag';
 import { StorageModule } from '../storage';
 import * as barrel from './index';
@@ -78,9 +78,8 @@ function signatureChecks(svc: IndexingService): unknown[] {
   const notify: (notification: RagEventNotification) => Promise<void> =
     svc.handleNotification.bind(svc);
   const reconcile: (docIds: readonly string[]) => Promise<void> = svc.reconcile.bind(svc);
-  const stages: (
-    docIds: readonly string[],
-  ) => Promise<ReadonlyMap<string, 'chunking' | 'embedding' | 'storing'>> = svc.getStages.bind(svc);
+  const stages: (docIds: readonly string[]) => Promise<ReadonlyMap<string, RagJobStage>> =
+    svc.getStages.bind(svc);
   const metadata: (
     docId: string,
     name: string,

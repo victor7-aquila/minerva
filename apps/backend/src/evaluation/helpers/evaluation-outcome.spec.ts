@@ -1,4 +1,4 @@
-import { RagUnavailableError } from '../../common';
+import { BatchIndexingError, RagUnavailableError } from '../../common';
 import { RagRequestError } from '../../rag';
 import { ragEvalResult, ragMetrics, missMetrics } from '../../../test/support/evaluation-fixtures';
 import { EVALUATION_MESSAGES } from '../interfaces/evaluation.types';
@@ -48,5 +48,16 @@ describe('REQ-BE-5.2.3', () => {
       expect(message).not.toContain('boom');
       expect(message).not.toMatch(/INTERNAL_ERROR|CAPTION_FAILED|INVALID_REQUEST|UNAUTHORIZED/);
     }
+  });
+});
+
+describe('REQ-BE-5.2.9', () => {
+  it('T-OUT-3 일괄 색인 거부는 전용 사유이고 남은 수·코드를 싣지 않는다', () => {
+    const message = failureMessageOf(new BatchIndexingError(7));
+    expect(message).toBe('RAG Server가 일괄 색인 중이라 평가하지 못했습니다');
+    expect(message).not.toContain('7');
+    expect(message).not.toContain('BATCH_INDEXING');
+    // ★ 연결 불가와 사유가 다르다
+    expect(message).not.toBe(failureMessageOf(new RagUnavailableError()));
   });
 });

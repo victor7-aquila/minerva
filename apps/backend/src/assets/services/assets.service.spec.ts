@@ -2,7 +2,6 @@ import { Test } from '@nestjs/testing';
 import type { TestingModule } from '@nestjs/testing';
 import MarkdownIt from 'markdown-it';
 import { AssetNotFoundError, InvalidRequestError, RagUnavailableError } from '../../common';
-import { LogsService } from '../../logs';
 import { RagClient, RagRequestError } from '../../rag';
 import { FILE_STORE, MONGO_DB } from '../../storage';
 import { createFakeDb } from '../../../test/support/fake-mongo';
@@ -11,7 +10,12 @@ import { createLogCapture } from '../../../test/support/log-capture';
 import { createTestCommonModule } from '../../../test/support/test-common.module';
 import { AssetsCrudService } from './assets-crud.service';
 import { AssetsService } from './assets.service';
-import type { HintContext, UploadedImage } from '../interfaces/assets.types';
+import type {
+  HintContext,
+  HintKind,
+  HintRunResult,
+  UploadedImage,
+} from '../interfaces/assets.types';
 import { extractAssets } from '../helpers/markdown-assets';
 
 // ★ nestjs-pino는 루트 로거를 파일당 하나만 만든다. 캡처는 파일 맨 위에서 한 번만 만든다
@@ -23,7 +27,6 @@ const SENTINELS = {
   alt: 'ALT-SENT-72',
   path: 'path-sent-73.png',
   caption: 'CAP-SENT-74',
-  name: 'NAME-SENT-75',
 };
 
 const TABLE1 = '| 키 | 값 |\n| --- | --- |\n| a | b |';
@@ -60,7 +63,6 @@ const fakeRag = {
   summarizeTable: jest.fn<Promise<string>, [tableMarkdown: string]>(),
   captionImage: jest.fn<Promise<string>, [image: Buffer, fileName: string]>(),
 };
-const fakeLogs = { record: jest.fn<Promise<void>, [input: unknown]>() };
 
 beforeEach(async () => {
   db = createFakeDb();
@@ -72,7 +74,6 @@ beforeEach(async () => {
   fakeFiles.deletePrefix.mockClear();
   fakeRag.summarizeTable.mockReset();
   fakeRag.captionImage.mockReset();
-  fakeLogs.record.mockReset();
   const updates = (): number => db.calls.filter((call) => call.op === 'updateOne').length;
   fakeRag.summarizeTable.mockImplementation(async () => {
     updatesAtRagCall.push(updates());
@@ -82,7 +83,6 @@ beforeEach(async () => {
     updatesAtRagCall.push(updates());
     return '이미지 캡션';
   });
-  fakeLogs.record.mockResolvedValue(undefined);
   moduleRef = await Test.createTestingModule({
     imports: [createTestCommonModule({}, capture.stream)],
     providers: [
@@ -91,7 +91,6 @@ beforeEach(async () => {
       { provide: MONGO_DB, useValue: db },
       { provide: FILE_STORE, useValue: fakeFiles },
       { provide: RagClient, useValue: fakeRag },
-      { provide: LogsService, useValue: fakeLogs },
     ],
   }).compile();
   service = moduleRef.get(AssetsService);
@@ -113,10 +112,38 @@ function up(fileName: string, data: Buffer, contentType = 'image/png'): Uploaded
 function ctx(answers: boolean[] = []): HintContext & { shouldContinue: jest.Mock } {
   const queue = [...answers];
   return {
-    name: '설계서',
-    editionLabel: 'v1',
     shouldContinue: jest.fn(async () => (queue.length > 0 ? (queue.shift() as boolean) : true)),
   };
+}
+
+/**
+ * 이미지 → 표 순서로 요약·캡션을 만든다(예약 색인의 3·4단계와 같다). 합계를 돌려준다.
+ * ★ 이미지 단계가 멈추면 표 단계를 부르지 않는다. remaining은 마지막 호출의 값이다
+ */
+async function runAll(
+  docId: string,
+  version: string,
+  context: HintContext = ctx(),
+): Promise<HintRunResult> {
+  const image = await service.generateHints(docId, version, 'image', context);
+  if (image.stopped) return image;
+  const table = await service.generateHints(docId, version, 'table', context);
+  return {
+    generated: image.generated + table.generated,
+    temporary: image.temporary + table.temporary,
+    stopped: table.stopped,
+    remaining: table.remaining,
+  };
+}
+
+/** 한 종류만 만든다. */
+function runKind(
+  kind: HintKind,
+  context: HintContext = ctx(),
+  docId = 'doc-1',
+  version = '1',
+): Promise<HintRunResult> {
+  return service.generateHints(docId, version, kind, context);
 }
 
 /** HINT_MD 문서를 준비한다. */
@@ -396,13 +423,20 @@ describe('REQ-BE-2.2.1', () => {
 });
 
 describe('REQ-BE-2.3.1', () => {
-  it('T-HINT-1 RAG 호출은 원본 순서이고 각 호출은 앞 호출의 저장 뒤에 일어난다', async () => {
+  /** 표 하나(t1)와 짝 있는 이미지 둘(i1, i2)이 든 문서를 준비한다. */
+  async function prepareTwoImageDoc(): Promise<void> {
+    const md = [TABLE1, '![A](a.png)', '![B](b.png)'].join('\n\n');
+    await service.prepareVersion('doc-1', '1', md, [up('a.png', PNG_A), up('b.png', PNG_B)]);
+  }
+
+  it('T-HINT-1 RAG 호출은 이미지 → 표 순서이고 각 호출은 앞 호출의 저장 뒤에 일어난다', async () => {
     await prepareHintDoc();
-    const result = await service.generateHints('doc-1', '1', ctx());
-    expect(result).toEqual({ generated: 3, temporary: 0, stopped: false });
+    const result = await runAll('doc-1', '1', ctx());
+    expect(result).toEqual({ generated: 3, temporary: 0, stopped: false, remaining: 0 });
+    // ★ 종류별 호출이라 원본 순서(t1, i1, t2)가 아니라 이미지(i1) 뒤에 표(t1, t2)다
     const order = [
-      fakeRag.summarizeTable.mock.invocationCallOrder[0],
       fakeRag.captionImage.mock.invocationCallOrder[0],
+      fakeRag.summarizeTable.mock.invocationCallOrder[0],
       fakeRag.summarizeTable.mock.invocationCallOrder[1],
     ];
     expect([...order].sort((a, b) => a - b)).toEqual(order);
@@ -412,7 +446,7 @@ describe('REQ-BE-2.3.1', () => {
 
   it('T-HINT-2 summarizeTable에는 표 원문을, captionImage에는 저장 바이트와 키의 마지막 조각을 넘긴다', async () => {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     expect(fakeRag.summarizeTable.mock.calls.map((call) => call[0])).toEqual([TABLE1, TABLE2]);
     expect(fakeRag.captionImage).toHaveBeenCalledTimes(1);
     const [data, fileName] = fakeRag.captionImage.mock.calls[0];
@@ -422,8 +456,9 @@ describe('REQ-BE-2.3.1', () => {
 
   it('T-HINT-3 shouldContinue가 false가 되면 멈추고 남은 레코드는 pending이다', async () => {
     await prepareHintDoc();
-    const result = await service.generateHints('doc-1', '1', ctx([true, true, false]));
-    expect(result).toEqual({ generated: 2, temporary: 0, stopped: true });
+    // 이미지 i1(true) → 표 t1(true) → 표 t2(false)
+    const result = await runAll('doc-1', '1', ctx([true, true, false]));
+    expect(result).toEqual({ generated: 2, temporary: 0, stopped: true, remaining: 1 });
     expect(fakeRag.summarizeTable).toHaveBeenCalledTimes(1);
     expect(fakeRag.captionImage).toHaveBeenCalledTimes(1);
     expect(record('t2').hintStatus).toBe('pending');
@@ -432,20 +467,53 @@ describe('REQ-BE-2.3.1', () => {
   it('T-HINT-3 첫 항목 전에도 shouldContinue를 묻는다', async () => {
     await prepareHintDoc();
     const context = ctx([false]);
-    const result = await service.generateHints('doc-1', '1', context);
+    const result = await runKind('image', context);
     expect(context.shouldContinue).toHaveBeenCalledTimes(1);
-    expect(result).toEqual({ generated: 0, temporary: 0, stopped: true });
+    expect(result).toEqual({ generated: 0, temporary: 0, stopped: true, remaining: 3 });
     expect(fakeRag.summarizeTable).not.toHaveBeenCalled();
     expect(fakeRag.captionImage).not.toHaveBeenCalled();
   });
 
   it('T-PR3-SVC-5 인용문 안 표는 블록 접두를 뗀 모양으로 요약을 요청하고 표 안 이미지는 캡션을 요청하지 않는다', async () => {
     await prepareQuoteDoc();
-    const result = await service.generateHints('doc-1', '1', ctx());
-    expect(result).toEqual({ generated: 1, temporary: 0, stopped: false });
+    const result = await runAll('doc-1', '1', ctx());
+    expect(result).toEqual({ generated: 1, temporary: 0, stopped: false, remaining: 0 });
     expect(fakeRag.summarizeTable).toHaveBeenCalledTimes(1);
     expect(fakeRag.summarizeTable.mock.calls[0][0]).toBe(QUOTE_TABLE_DISPLAY);
     expect(fakeRag.captionImage).not.toHaveBeenCalled();
+  });
+
+  it('T-HINT-K1 image 호출은 이미지만 order 순으로 요청하고 표는 pending 그대로다', async () => {
+    await prepareTwoImageDoc();
+    const result = await runKind('image');
+    expect(result).toEqual({ generated: 2, temporary: 0, stopped: false, remaining: 1 });
+    expect(fakeRag.captionImage).toHaveBeenCalledTimes(2);
+    expect(fakeRag.captionImage.mock.calls.map((call) => call[1])).toEqual(['i1.png', 'i2.png']);
+    expect(fakeRag.summarizeTable).toHaveBeenCalledTimes(0);
+    expect(record('t1').hintStatus).toBe('pending');
+    expect(record('t1').hint).toBeNull();
+  });
+
+  it('T-HINT-K2 image 호출은 첫 이미지 뒤 shouldContinue가 거짓이면 둘째 이미지를 요청하지 않고 stopped다', async () => {
+    await prepareTwoImageDoc();
+    const result = await runKind('image', ctx([true, false]));
+    expect(result.stopped).toBe(true);
+    expect(result.generated).toBe(1);
+    expect(fakeRag.captionImage).toHaveBeenCalledTimes(1);
+    expect(fakeRag.captionImage.mock.calls[0][1]).toBe('i1.png');
+    expect(record('i1').hintStatus).toBe('done');
+    expect(record('i2').hintStatus).toBe('pending');
+  });
+
+  it('T-HINT-K3 table 호출은 표만 요청하고 이미지는 건드리지 않는다', async () => {
+    await prepareTwoImageDoc();
+    const result = await runKind('table');
+    expect(result).toEqual({ generated: 1, temporary: 0, stopped: false, remaining: 2 });
+    expect(fakeRag.summarizeTable).toHaveBeenCalledTimes(1);
+    expect(fakeRag.summarizeTable.mock.calls[0][0]).toBe(TABLE1);
+    expect(fakeRag.captionImage).toHaveBeenCalledTimes(0);
+    expect(record('i1').hintStatus).toBe('pending');
+    expect(record('i2').hintStatus).toBe('pending');
   });
 });
 
@@ -456,7 +524,7 @@ describe('REQ-BE-2.3.2', () => {
   ])('T-HINT-4 %s는 임시 설명으로 저장하고 경고 로그를 남긴다', async (_label, error, code) => {
     await prepareHintDoc();
     fakeRag.captionImage.mockRejectedValue(error);
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const i1 = record('i1');
     expect(i1.hint).toBe(i1.description);
     expect(i1.isTemporary).toBe(true);
@@ -472,7 +540,7 @@ describe('REQ-BE-2.3.2', () => {
   it('T-HINT-5 저장소에 파일이 없으면 FILE_MISSING 임시 설명이다', async () => {
     await prepareHintDoc();
     store.delete('doc-1/1/i1.png');
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const i1 = record('i1');
     expect(i1.hint).toBe(i1.description);
     expect(i1.isTemporary).toBe(true);
@@ -483,7 +551,7 @@ describe('REQ-BE-2.3.2', () => {
   it.each(['', '   '])('T-HINT-5 응답이 %j이면 EMPTY_RESULT 임시 설명이다', async (empty) => {
     await prepareHintDoc();
     fakeRag.captionImage.mockResolvedValue(empty);
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const i1 = record('i1');
     expect(i1.hint).toBe(i1.description);
     expect(i1.isTemporary).toBe(true);
@@ -493,7 +561,7 @@ describe('REQ-BE-2.3.2', () => {
   it('T-HINT-11 RAG가 일반 Error를 던지면 임시 설명으로 바꾸지 않고 그 오류로 실패한다', async () => {
     await prepareHintDoc();
     fakeRag.captionImage.mockRejectedValue(new Error('plain-failure'));
-    await expect(service.generateHints('doc-1', '1', ctx())).rejects.toThrow('plain-failure');
+    await expect(runAll('doc-1', '1', ctx())).rejects.toThrow('plain-failure');
     expect(record('i1').hintStatus).toBe('pending');
   });
 });
@@ -504,7 +572,8 @@ describe('REQ-BE-2.3.3', () => {
     ['대체 텍스트가 없으면 파일 이름', '![](gone.png)', 'gone.png'],
   ])('T-HINT-6 짝 없는 이미지는 RAG 호출 없이 임시 설명이다(%s)', async (_label, md, expected) => {
     await service.prepareVersion('doc-1', '1', md, []);
-    await service.generateHints('doc-1', '1', ctx());
+    const result = await runKind('image');
+    expect(result).toEqual({ generated: 1, temporary: 1, stopped: false, remaining: 0 });
     const i1 = record('i1');
     expect(i1.hint).toBe(expected);
     expect(i1.isTemporary).toBe(true);
@@ -519,8 +588,8 @@ describe('REQ-BE-2.3.4', () => {
   it('T-HINT-7 가운데가 실패해도 나머지를 요청하고 예외 없이 끝난다', async () => {
     await prepareHintDoc();
     fakeRag.captionImage.mockRejectedValue(new RagRequestError(502, 'CAPTION_FAILED'));
-    const result = await service.generateHints('doc-1', '1', ctx());
-    expect(result).toEqual({ generated: 3, temporary: 1, stopped: false });
+    const result = await runAll('doc-1', '1', ctx());
+    expect(result).toEqual({ generated: 3, temporary: 1, stopped: false, remaining: 0 });
     expect(fakeRag.summarizeTable).toHaveBeenCalledTimes(2);
   });
 });
@@ -528,7 +597,8 @@ describe('REQ-BE-2.3.4', () => {
 describe('REQ-BE-2.3.5', () => {
   it('T-HINT-8 끝나면 모든 레코드가 done이고 hintsFor가 모든 자리표시 ID를 order 순으로 준다', async () => {
     const indexing = await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    const result = await runAll('doc-1', '1', ctx());
+    expect(result).toMatchObject({ stopped: false, remaining: 0 });
     for (const row of records()) expect(row.hintStatus).toBe('done');
     const hints = await service.hintsFor('doc-1', '1');
     expect(hints.map((hint) => hint.placeholderId)).toEqual(['t1', 'i1', 't2']);
@@ -540,7 +610,7 @@ describe('REQ-BE-2.3.5', () => {
 
   it('T-PR3-SVC-6 hintsFor는 표 안 이미지를 빼고 자리표시가 있는 항목만 준다', async () => {
     await prepareNestDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const hints = await service.hintsFor('doc-1', '1');
     expect(hints.map((hint) => hint.placeholderId)).toEqual(['t1']);
   });
@@ -552,13 +622,59 @@ describe('REQ-BE-2.3.5', () => {
   });
 });
 
+describe('REQ-BE-2.3.5', () => {
+  it('T-HINT-R1 이미지만 pending인 버전에 image를 부르면 remaining 0이고 hintsFor가 모든 문장을 준다', async () => {
+    const md = ['![A](a.png)', '![B](b.png)'].join('\n\n');
+    await service.prepareVersion('doc-1', '1', md, [up('a.png', PNG_A), up('b.png', PNG_B)]);
+    const result = await runKind('image');
+    expect(result).toEqual({ generated: 2, temporary: 0, stopped: false, remaining: 0 });
+    const hints = await service.hintsFor('doc-1', '1');
+    expect(hints.map((hint) => hint.placeholderId)).toEqual(['i1', 'i2']);
+    expect(hints.map((hint) => hint.text)).toEqual(['이미지 캡션', '이미지 캡션']);
+  });
+
+  it('T-HINT-R2 표도 pending인 버전의 image 호출은 남은 표 수를 주고 이어서 table이면 0이다', async () => {
+    await prepareHintDoc();
+    const image = await runKind('image');
+    expect(image).toEqual({ generated: 1, temporary: 0, stopped: false, remaining: 2 });
+    const table = await runKind('table');
+    expect(table).toEqual({ generated: 2, temporary: 0, stopped: false, remaining: 0 });
+  });
+
+  it('T-HINT-R3 멈춘 호출의 remaining은 저장하지 못한 것까지 센 수이고 표 안 이미지는 세지 않는다', async () => {
+    // 표 t1, 표 안 이미지 i1(세지 않는다), 최상위 이미지 i2
+    const md = `${NEST_MD}\n\n![o](o.png)`;
+    await service.prepareVersion('doc-1', '1', md, [up('z.png', PNG_A), up('o.png', PNG_B)]);
+    const stoppedFirst = await runKind('image', ctx([false]));
+    expect(stoppedFirst).toEqual({ generated: 0, temporary: 0, stopped: true, remaining: 2 });
+    // 종류와 무관하다 - 표 호출이 멈춰도 남은 이미지까지 센다
+    const stoppedTable = await runKind('table', ctx([false]));
+    expect(stoppedTable).toEqual({ generated: 0, temporary: 0, stopped: true, remaining: 2 });
+    // 이미지 하나를 저장한 뒤 표에서 멈추면 남은 것은 표 하나다
+    await runKind('image');
+    const stoppedAgain = await runKind('table', ctx([false]));
+    expect(stoppedAgain).toEqual({ generated: 0, temporary: 0, stopped: true, remaining: 1 });
+  });
+});
+
 describe('REQ-BE-2.3.6', () => {
+  it('T-HINT-K4 image만 멈춘 뒤 다시 image를 부르면 남은 이미지부터만 요청한다', async () => {
+    const md = ['![A](a.png)', '![B](b.png)'].join('\n\n');
+    await service.prepareVersion('doc-1', '1', md, [up('a.png', PNG_A), up('b.png', PNG_B)]);
+    await runKind('image', ctx([true, false]));
+    expect(fakeRag.captionImage).toHaveBeenCalledTimes(1);
+    const result = await runKind('image');
+    expect(result).toEqual({ generated: 1, temporary: 0, stopped: false, remaining: 0 });
+    expect(fakeRag.captionImage).toHaveBeenCalledTimes(2);
+    expect(fakeRag.captionImage.mock.calls[1][1]).toBe('i2.png');
+  });
+
   it('T-HINT-9 멈춘 버전에 다시 실행하면 남은 것부터만 요청한다', async () => {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx([true, true, false]));
+    await runAll('doc-1', '1', ctx([true, true, false]));
     const before =
       fakeRag.summarizeTable.mock.calls.length + fakeRag.captionImage.mock.calls.length;
-    const result = await service.generateHints('doc-1', '1', ctx());
+    const result = await runAll('doc-1', '1', ctx());
     const after = fakeRag.summarizeTable.mock.calls.length + fakeRag.captionImage.mock.calls.length;
     expect(after - before).toBe(1);
     expect(result.generated).toBe(1);
@@ -566,31 +682,31 @@ describe('REQ-BE-2.3.6', () => {
 
   it('T-HINT-9 이어서 해도 이미 저장된 문장은 그대로다', async () => {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx([true, true, false]));
+    await runAll('doc-1', '1', ctx([true, true, false]));
     const saved = [record('t1').hint, record('i1').hint];
     fakeRag.summarizeTable.mockResolvedValue('다른 요약');
     fakeRag.captionImage.mockResolvedValue('다른 캡션');
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     expect([record('t1').hint, record('i1').hint]).toEqual(saved);
   });
 
   it('T-HINT-10 저장이 실패하면 예외가 그대로 나오고 그 전 항목의 저장은 남는다', async () => {
     await prepareHintDoc();
-    // 이미지 캡션을 만든 뒤 그 저장(updateOne)이 실패하게 한다
-    fakeRag.captionImage.mockImplementationOnce(async () => {
+    // 이미지 → 표 순서라 첫 표 요약을 만든 뒤 그 저장(updateOne)이 실패하게 한다
+    fakeRag.summarizeTable.mockImplementationOnce(async () => {
       db.failNext('updateOne', new Error('boom'));
-      return '이미지 캡션';
+      return '표 요약';
     });
-    await expect(service.generateHints('doc-1', '1', ctx())).rejects.toThrow('boom');
-    expect(record('t1').hintStatus).toBe('done');
-    expect(record('t1').hint).toBe('표 요약');
-    expect(record('i1').hintStatus).toBe('pending');
+    await expect(runAll('doc-1', '1', ctx())).rejects.toThrow('boom');
+    expect(record('i1').hintStatus).toBe('done');
+    expect(record('i1').hint).toBe('이미지 캡션');
+    expect(record('t1').hintStatus).toBe('pending');
   });
 
   it('T-INH-1 이어받은 버전은 ID·order가 같고 바꾼 문장만 새 값이며 파일은 복사하지 않는다', async () => {
     await prepareHintDoc();
     fakeRag.captionImage.mockRejectedValue(new RagRequestError(502, 'CAPTION_FAILED'));
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const v1Before = records('1');
     fakeFiles.put.mockClear();
 
@@ -613,11 +729,11 @@ describe('REQ-BE-2.3.6', () => {
 
   it('T-INH-1 이어받은 버전에서는 문장을 다시 만들지 않는다', async () => {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     await service.inheritVersion('doc-1', '1', '2', new Map());
     fakeRag.summarizeTable.mockClear();
     fakeRag.captionImage.mockClear();
-    const result = await service.generateHints('doc-1', '2', ctx());
+    const result = await runAll('doc-1', '2', ctx());
     expect(result.generated).toBe(0);
     expect(fakeRag.summarizeTable).not.toHaveBeenCalled();
     expect(fakeRag.captionImage).not.toHaveBeenCalled();
@@ -630,7 +746,7 @@ describe('REQ-BE-2.3.6', () => {
     'T-INH-3 %s는 InvalidRequestError이고 새 버전 레코드를 만들지 않는다',
     async (_label, hints) => {
       await prepareHintDoc();
-      await service.generateHints('doc-1', '1', ctx());
+      await runAll('doc-1', '1', ctx());
       await expect(service.inheritVersion('doc-1', '1', '2', hints)).rejects.toBeInstanceOf(
         InvalidRequestError,
       );
@@ -640,7 +756,7 @@ describe('REQ-BE-2.3.6', () => {
 
   it('T-INH-3 같은 인자로 두 번 부르면 한 번 부른 것과 결과가 같다', async () => {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const changed = new Map([['t1', '새 요약']]);
     await service.inheritVersion('doc-1', '1', '2', changed);
     const once = records('2');
@@ -649,20 +765,61 @@ describe('REQ-BE-2.3.6', () => {
     expect(once).toHaveLength(3);
   });
 
-  it('T-INH-3 이전 버전에 pending이 남았으면 새 버전에서는 description을 임시 설명으로 done 처리한다', async () => {
+  it('T-INH-5 이전 버전에서 pending이던 것은 새 버전에서도 pending이고 값이 그대로다', async () => {
     await prepareHintDoc();
-    await service.inheritVersion('doc-1', '1', '2', new Map());
-    for (const row of records('2')) {
-      expect(row.hint).toBe(row.description);
-      expect(row.isTemporary).toBe(true);
-      expect(row.hintStatus).toBe('done');
+    // i1은 캡션 실패로 임시 설명이 된 뒤 재생성 표시로 hint를 가진 채 pending이 되고, t1·t2는 hint 없는 pending이다
+    fakeRag.captionImage.mockRejectedValue(new RagRequestError(502, 'CAPTION_FAILED'));
+    await runKind('image');
+    expect(await service.markTemporaryForRegeneration('doc-1', '1')).toBe(1);
+    expect([record('t1'), record('i1'), record('t2')].map((row) => row.hintStatus)).toEqual([
+      'pending',
+      'pending',
+      'pending',
+    ]);
+    expect(record('i1').isTemporary).toBe(true);
+
+    await service.inheritVersion('doc-1', '1', '2', new Map([['t1', '새 요약']]));
+
+    // 바꾼 문장만 done·isTemporary false·새 문장이다
+    expect(record('t1', '2').hintStatus).toBe('done');
+    expect(record('t1', '2').hint).toBe('새 요약');
+    expect(record('t1', '2').isTemporary).toBe(false);
+    // 나머지는 이전 버전의 값 그대로다(pending 유지)
+    for (const id of ['i1', 't2']) {
+      expect(record(id, '2')).toEqual({ ...record(id, '1'), version: '2' });
+      expect(record(id, '2').hintStatus).toBe('pending');
     }
+    expect(record('i1', '2').hint).toBe(record('i1', '1').hint);
+    expect(record('i1', '2').isTemporary).toBe(true);
+    expect(record('t2', '2').hint).toBeNull();
+    expect(record('t2', '2').isTemporary).toBe(false);
+    // 이어받기는 요약을 요청하지 않는다
+    expect(fakeRag.summarizeTable).not.toHaveBeenCalled();
+  });
+
+  it('T-PEND-1 pendingHints는 그 버전의 최상위 pending 수이고 다른 버전·문서를 세지 않으며 RAG를 부르지 않는다', async () => {
+    await prepareHintDoc('doc-1', '1');
+    await service.prepareVersion('doc-1', '2', '![x](x.png)', []);
+    await prepareHintDoc('doc-2', '1');
+    await service.prepareVersion('doc-3', '1', NEST_MD, [up('z.png', PNG_A)]);
+    expect(await service.pendingHints('doc-1', '1')).toBe(3);
+    expect(await service.pendingHints('doc-1', '2')).toBe(1);
+    expect(await service.pendingHints('doc-2', '1')).toBe(3);
+    // 표 안 이미지는 세지 않는다
+    expect(await service.pendingHints('doc-3', '1')).toBe(1);
+    expect(await service.pendingHints('doc-9', '1')).toBe(0);
+    expect(fakeRag.summarizeTable).not.toHaveBeenCalled();
+    expect(fakeRag.captionImage).not.toHaveBeenCalled();
+    // 만든 만큼 줄어든다
+    await runKind('image');
+    expect(await service.pendingHints('doc-1', '1')).toBe(2);
+    expect(await service.pendingHints('doc-2', '1')).toBe(3);
   });
 
   it('T-PR3-SVC-7 표 안 이미지는 이어받아도 그대로이고 재생성 표시·편집 대상이 아니다', async () => {
     await prepareNestDoc();
     fakeRag.summarizeTable.mockRejectedValueOnce(new RagRequestError(502, 'SUMMARY_FAILED'));
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     await service.inheritVersion('doc-1', '1', '2', new Map());
     // ★ 바꾸지 않고 그대로 복사한다 — hint를 채우거나 isTemporary를 바꾸지 않는다
     expect(record('i1', '2')).toEqual({ ...record('i1', '1'), version: '2' });
@@ -689,10 +846,111 @@ describe('REQ-BE-2.3.6', () => {
   });
 });
 
+describe('REQ-BE-2.3.7', () => {
+  it('T-NORAG-1 generateHints 밖의 공개 메서드는 RAG를 부르지 않고 추출 직후 최상위는 모두 pending이다', async () => {
+    await prepareHintDoc();
+    for (const row of records()) {
+      expect(row.hintStatus).toBe('pending');
+      expect(row.hint).toBeNull();
+    }
+    await service.rebuildVersion('doc-1', '1', HINT_MD);
+    for (const row of records()) expect(row.hintStatus).toBe('pending');
+    await service.inheritVersion('doc-1', '1', '2', new Map([['t1', '새 요약']]));
+    expect(await service.markTemporaryForRegeneration('doc-1', '2')).toBe(0);
+    expect(await service.pendingHints('doc-1', '1')).toBe(3);
+    await service.hintsFor('doc-1', '1');
+    await service.listViews('doc-1', '1');
+    expect(fakeRag.summarizeTable).toHaveBeenCalledTimes(0);
+    expect(fakeRag.captionImage).toHaveBeenCalledTimes(0);
+    // 이어받은 버전에서 바꾸지 않은 항목은 pending 그대로다
+    expect(record('t2', '2').hintStatus).toBe('pending');
+    expect(record('i1', '2').hintStatus).toBe('pending');
+  });
+
+  it('T-NORAG-2 AssetsService는 LogsService 없이 만들어지고 요약·캡션 생성이 logs를 쓰지 않는다', async () => {
+    // ★ 이 파일은 LogsService를 provide하지 않는다 - 의존이 남아 있으면 beforeEach에서 모듈 생성이 실패한다
+    await prepareHintDoc();
+    await runAll('doc-1', '1', ctx());
+    expect(db.dump('logs')).toEqual([]);
+  });
+});
+
+describe('REQ-BE-1.9.9', () => {
+  const REBUILD_MD = [TABLE1, '![A](a.png)', '![C](gone.png)', NEST_MD].join('\n\n');
+  const rebuildUploads = (): UploadedImage[] => [up('a.png', PNG_A), up('z.png', PNG_B)];
+
+  it('T-REB-1 같은 원본으로 rebuildVersion하면 같은 색인용 MD와 같은 레코드 집합이고 최상위는 모두 pending이다', async () => {
+    const prepared = await service.prepareVersion('doc-1', '1', REBUILD_MD, rebuildUploads());
+    const before = records();
+    expect(before.map((row) => row.placeholderId)).toEqual(['t1', 'i1', 'i2', 't2', 'i3']);
+
+    const rebuilt = await service.rebuildVersion('doc-1', '1', REBUILD_MD);
+
+    expect(rebuilt.indexingMarkdown).toBe(prepared.indexingMarkdown);
+    expect(rebuilt.assetCount).toBe(prepared.assetCount);
+    const after = records();
+    // placeholderId·kind·order·fileKey·contentType·description·tableId·pathInTable을 포함한 전체가 같다
+    expect(after).toEqual(before);
+    for (const row of after.filter((r) => r.tableId === null)) {
+      expect(row.hintStatus).toBe('pending');
+      expect(row.hint).toBeNull();
+      expect(row.isTemporary).toBe(false);
+    }
+  });
+
+  it('T-REB-2 요약·캡션을 만든 버전을 rebuildVersion하면 다시 모두 pending이다', async () => {
+    await service.prepareVersion('doc-1', '1', HINT_MD, [up('a.png', PNG_A)]);
+    await runAll('doc-1', '1', ctx());
+    for (const row of records()) expect(row.hintStatus).toBe('done');
+
+    await service.rebuildVersion('doc-1', '1', HINT_MD);
+
+    for (const row of records()) {
+      expect(row.hintStatus).toBe('pending');
+      expect(row.hint).toBeNull();
+      expect(row.isTemporary).toBe(false);
+    }
+    expect(await service.pendingHints('doc-1', '1')).toBe(3);
+  });
+
+  it('T-REB-3 rebuildVersion은 파일을 쓰거나 지우지 않고 기존 레코드의 fileKey로 짝을 정한다', async () => {
+    await service.prepareVersion('doc-1', '1', REBUILD_MD, rebuildUploads());
+    const storeBefore = new Map(store);
+    const fileKeys = records().map((row) => row.fileKey);
+    fakeFiles.put.mockClear();
+    fakeFiles.deletePrefix.mockClear();
+
+    const rebuilt = await service.rebuildVersion('doc-1', '1', REBUILD_MD);
+
+    expect(fakeFiles.put).not.toHaveBeenCalled();
+    expect(fakeFiles.deletePrefix).not.toHaveBeenCalled();
+    expect(store).toEqual(storeBefore);
+    // ★ 짝은 기존 레코드의 fileKey다
+    expect(records().map((row) => row.fileKey)).toEqual(fileKeys);
+    expect(record('i1').fileKey).toBe('doc-1/1/i1.png');
+    // 기존 레코드에 짝이 없던 이미지는 unmatchedImages에 들어간다
+    expect(rebuilt.unmatchedImages).toEqual(['gone.png']);
+    expect(record('i2').fileKey).toBeNull();
+  });
+
+  it('T-REB-4 기존 레코드가 없는 버전의 rebuildVersion은 모든 이미지가 짝 없음이고 예외가 없다', async () => {
+    const rebuilt = await service.rebuildVersion('doc-9', '1', REBUILD_MD);
+    expect([...rebuilt.unmatchedImages].sort()).toEqual(['a.png', 'gone.png', 'z.png']);
+    const rows = records('1', 'doc-9');
+    expect(rows.map((row) => row.placeholderId)).toEqual(['t1', 'i1', 'i2', 't2', 'i3']);
+    for (const row of rows.filter((r) => r.kind === 'image')) {
+      expect(row.fileKey).toBeNull();
+      expect(row.contentType).toBeNull();
+    }
+    expect(fakeFiles.put).not.toHaveBeenCalled();
+    expect(fakeRag.captionImage).not.toHaveBeenCalled();
+  });
+});
+
 describe('REQ-BE-1.6.3', () => {
   it('T-INH-2 이어받은 이미지는 원래 버전의 파일 키를 가리키고 읽으면 원래 바이트다', async () => {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     await service.inheritVersion('doc-1', '1', '2', new Map());
     expect(record('i1', '2').fileKey).toBe('doc-1/1/i1.png');
     const image = await service.readImage('doc-1', '2', 'i1');
@@ -707,7 +965,7 @@ describe('REQ-BE-1.7.1', () => {
     // t1 요약 실패, 이미지 캡션 실패, 짝 없는 이미지는 임시 설명이다. t2는 성공
     fakeRag.summarizeTable.mockRejectedValueOnce(new RagRequestError(502, 'SUMMARY_FAILED'));
     fakeRag.captionImage.mockRejectedValueOnce(new RagRequestError(502, 'CAPTION_FAILED'));
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     expect(['t1', 'i1', 'i2', 't2'].map((id) => record(id).isTemporary)).toEqual([
       true,
       true,
@@ -727,47 +985,10 @@ describe('REQ-BE-1.7.1', () => {
 
     const summarizeBefore = fakeRag.summarizeTable.mock.calls.length;
     const captionBefore = fakeRag.captionImage.mock.calls.length;
-    const result = await service.generateHints('doc-1', '1', ctx());
+    const result = await runAll('doc-1', '1', ctx());
     expect(result.generated).toBe(2);
     expect(fakeRag.summarizeTable.mock.calls.length - summarizeBefore).toBe(1);
     expect(fakeRag.captionImage.mock.calls.length - captionBefore).toBe(1);
-  });
-});
-
-describe('REQ-BE-6.1.1', () => {
-  it('T-LOG-1 끝까지 하나 이상 저장하면 captioning 기록을 정확히 한 번 남긴다', async () => {
-    await prepareHintDoc();
-    fakeRag.captionImage.mockRejectedValue(new RagRequestError(502, 'CAPTION_FAILED'));
-    await service.generateHints('doc-1', '1', ctx());
-    expect(fakeLogs.record).toHaveBeenCalledTimes(1);
-    expect(fakeLogs.record).toHaveBeenCalledWith({
-      kind: 'captioning',
-      docId: 'doc-1',
-      name: '설계서',
-      editionLabel: 'v1',
-      outcome: 'success',
-      detail: { count: 3, failedCount: 1 },
-    });
-    const arg = fakeLogs.record.mock.calls[0][0] as Record<string, unknown>;
-    expect(Object.keys(arg).sort()).toEqual([
-      'detail',
-      'docId',
-      'editionLabel',
-      'kind',
-      'name',
-      'outcome',
-    ]);
-    expect(Object.keys(arg.detail as object).sort()).toEqual(['count', 'failedCount']);
-  });
-
-  it('T-LOG-1 stopped이거나 저장한 것이 없으면 기록을 남기지 않는다', async () => {
-    await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx([true, false]));
-    expect(fakeLogs.record).not.toHaveBeenCalled();
-
-    await service.prepareVersion('doc-2', '1', '그냥 문단', []);
-    await service.generateHints('doc-2', '1', ctx());
-    expect(fakeLogs.record).not.toHaveBeenCalled();
   });
 });
 
@@ -790,27 +1011,59 @@ describe('REQ-BE-2.3', () => {
     });
     expect(prepared[0].level).toBe(30);
 
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
+    // 종류별 호출이라 줄이 둘이다: 이미지(짝 없는 하나는 임시 설명) -> 표
     const done = eventLines('assets.hints_done');
-    expect(done).toHaveLength(1);
-    expect(fieldKeys(done[0])).toEqual(['docId', 'generated', 'stopped', 'temporary', 'version']);
+    expect(done).toHaveLength(2);
+    for (const line of done) {
+      expect(fieldKeys(line)).toEqual([
+        'docId',
+        'generated',
+        'kind',
+        'remaining',
+        'stopped',
+        'temporary',
+        'version',
+      ]);
+      expect(line.level).toBe(30);
+    }
     expect(done[0]).toMatchObject({
       docId: 'doc-1',
       version: '1',
-      generated: 5,
+      kind: 'image',
+      generated: 3,
       temporary: 1,
       stopped: false,
+      remaining: 2,
     });
-    expect(done[0].level).toBe(30);
+    expect(done[1]).toMatchObject({
+      docId: 'doc-1',
+      version: '1',
+      kind: 'table',
+      generated: 2,
+      temporary: 0,
+      stopped: false,
+      remaining: 0,
+    });
   });
 
   it('T-LOG-2 멈춘 실행의 hints_done은 stopped true와 저장한 개수를 남긴다', async () => {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx([true, true, false]));
+    await runAll('doc-1', '1', ctx([true, true, false]));
     const done = eventLines('assets.hints_done');
-    expect(done).toHaveLength(1);
-    expect(fieldKeys(done[0])).toEqual(['docId', 'generated', 'stopped', 'temporary', 'version']);
-    expect(done[0]).toMatchObject({ generated: 2, stopped: true });
+    expect(done).toHaveLength(2);
+    for (const line of done) {
+      expect(fieldKeys(line)).toEqual([
+        'docId',
+        'generated',
+        'kind',
+        'remaining',
+        'stopped',
+        'temporary',
+        'version',
+      ]);
+    }
+    expect(done[1]).toMatchObject({ kind: 'table', generated: 1, stopped: true, remaining: 1 });
   });
 });
 
@@ -818,7 +1071,7 @@ describe('REQ-BE-1.4.4', () => {
   it('T-VIEW-1 listViews는 order 순으로 조회용 모양을 준다', async () => {
     const md = [TABLE1, '![A](a.png)', '![C](missing.png)'].join('\n\n');
     await service.prepareVersion('doc-1', '1', md, [up('a.png', PNG_A)]);
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const views = await service.listViews('doc-1', '1');
     expect(views.map((view) => view.placeholderId)).toEqual(['t1', 'i1', 'i2']);
     for (const view of views) {
@@ -857,9 +1110,32 @@ describe('REQ-BE-1.4.4', () => {
     });
   });
 
+  it('T-VIEW-2 pending 항목은 text null·isTemporary false이고 재생성 표시로 pending이 된 임시 설명도 같다', async () => {
+    await prepareHintDoc();
+    // 이미지만 만들고 표 둘은 pending으로 둔다
+    await runKind('image');
+    const views = await service.listViews('doc-1', '1');
+    expect(views.map((view) => [view.placeholderId, view.text, view.isTemporary])).toEqual([
+      ['t1', null, false],
+      ['i1', '이미지 캡션', false],
+      ['t2', null, false],
+    ]);
+
+    // 임시 설명이 pending으로 돌아가면 hint가 남아 있어도 null·false다
+    fakeRag.captionImage.mockRejectedValue(new RagRequestError(502, 'CAPTION_FAILED'));
+    await service.prepareVersion('doc-2', '1', HINT_MD, [up('a.png', PNG_A)]);
+    await runKind('image', ctx(), 'doc-2');
+    const temp = await service.listViews('doc-2', '1');
+    expect(temp[1]).toMatchObject({ placeholderId: 'i1', isTemporary: true });
+    expect(temp[1].text).not.toBeNull();
+    expect(await service.markTemporaryForRegeneration('doc-2', '1')).toBe(1);
+    const again = await service.listViews('doc-2', '1');
+    expect(again[1]).toMatchObject({ placeholderId: 'i1', text: null, isTemporary: false });
+  });
+
   it('T-PR3-SVC-8 listViews는 표 안 이미지를 빼고 표를 접두 없이 짝 있는 경로만 주소로 바꿔 준다', async () => {
     await prepareQuoteDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const views = await service.listViews('doc-1', '1');
     expect(views.map((view) => view.placeholderId)).toEqual(['t1']);
     // ★ z.png만 주소로 바뀐다. 짝 없는 w.png와 표 밖 정의를 쓰는 참조형은 그대로다
@@ -948,7 +1224,7 @@ describe('REQ-BE-2.4.1', () => {
 describe('REQ-BE-2.5.1', () => {
   it('T-RST-1 색인용 MD를 복원하면 표 자리에 원본 표가 들어간다', async () => {
     const indexing = await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const restored = await service.restore('doc-1', '1', indexing);
     expect(restored).toContain(TABLE1);
     expect(restored).toContain(TABLE2);
@@ -960,7 +1236,7 @@ describe('REQ-BE-2.5.2', () => {
   it('T-RST-2 짝 있는 이미지는 이스케이프한 ![캡션](주소)이고 이미지 하나로 파싱된다', async () => {
     const indexing = await prepareHintDoc();
     fakeRag.captionImage.mockResolvedValue('a [b] c');
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const restored = await service.restore('doc-1', '1', indexing);
     const url = '/v1/documents/doc-1/versions/1/assets/i1';
     expect(restored).toContain(`![a \\[b\\] c](${url})`);
@@ -969,7 +1245,7 @@ describe('REQ-BE-2.5.2', () => {
 
   it('T-RST-2 짝 없는 이미지는 캡션 문장만으로 복원된다', async () => {
     const prepared = await service.prepareVersion('doc-1', '1', '앞 ![대체](gone.png) 뒤', []);
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     expect(await service.restore('doc-1', '1', prepared.indexingMarkdown)).toBe('앞 대체 뒤');
   });
 });
@@ -978,7 +1254,7 @@ describe('REQ-BE-2.5.3', () => {
   it('T-RST-3 같은 본문·버전은 같은 결과이고 버전마다 그 버전의 캡션·주소를 쓴다', async () => {
     const indexing = await prepareHintDoc();
     fakeRag.captionImage.mockResolvedValue('첫 캡션');
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const first = await service.restore('doc-1', '1', indexing);
     expect(await service.restore('doc-1', '1', indexing)).toBe(first);
 
@@ -996,7 +1272,7 @@ describe('REQ-BE-2.5.3', () => {
 
   it('T-PR3-SVC-10 표 안 이미지가 있는 표를 두 번 복원하면 결과가 같다', async () => {
     await prepareNestDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const text = '앞 [[minerva:table:t1 | 키, 값]] 뒤';
     const first = await service.restore('doc-1', '1', text);
     expect(await service.restore('doc-1', '1', text)).toBe(first);
@@ -1007,7 +1283,7 @@ describe('REQ-BE-2.5.3', () => {
 describe('REQ-BE-2.5.4', () => {
   it('T-PR3-SVC-9 복원한 표는 접두를 유지한 채 짝 있는 경로만 그 버전의 주소로 바뀐다', async () => {
     await prepareQuoteDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const text = '> [[minerva:table:t1 | 키, 값, 참조]]';
     const expected = (version: string): string =>
       [
@@ -1028,7 +1304,7 @@ describe('REQ-BE-1.4.5', () => {
   /** 표 둘과 이미지가 든 문서를 버전 1로 준비하고 캡션까지 만든다. */
   async function prepareRestorable(): Promise<void> {
     await prepareHintDoc();
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
   }
 
   const T1 = '[[minerva:table:t1 | x]]';
@@ -1138,7 +1414,7 @@ describe('REQ-BE-2.2.2', () => {
   it('T-RST-4 원본에 있던 자리표시 모양 문자열은 복원하면 원문 그대로다', async () => {
     const md = ['문단 [[minerva:table:x | y]] 끝', '![a](a.png)'].join('\n\n');
     const prepared = await service.prepareVersion('doc-1', '1', md, [up('a.png', PNG_A)]);
-    await service.generateHints('doc-1', '1', ctx());
+    await runAll('doc-1', '1', ctx());
     const restored = await service.restore('doc-1', '1', prepared.indexingMarkdown);
     expect(restored).toContain('문단 [[minerva:table:x | y]] 끝');
     expect(restored).not.toContain(ZWSP);
@@ -1165,7 +1441,7 @@ describe('REQ-BE-1.8.5', () => {
 });
 
 describe('REQ-BE-8.2.1', () => {
-  it('T-LOG-3 표 칸·대체 텍스트·경로·캡션·문서 이름이 로그에 나오지 않는다', async () => {
+  it('T-LOG-3 표 칸·대체 텍스트·경로·캡션이 로그에 나오지 않는다', async () => {
     const md = [
       `| h |\n| --- |\n| ${SENTINELS.cell} |`,
       `![${SENTINELS.alt}](${SENTINELS.path})`,
@@ -1175,19 +1451,12 @@ describe('REQ-BE-8.2.1', () => {
     // 표는 성공(캡션 센티널 응답), 이미지는 RAG 실패로 임시 설명
     fakeRag.summarizeTable.mockResolvedValue(SENTINELS.caption);
     fakeRag.captionImage.mockRejectedValue(new RagRequestError(502, 'CAPTION_FAILED'));
-    const context: HintContext = { ...ctx(), name: SENTINELS.name };
-    await service.generateHints('doc-1', '1', context);
+    await runAll('doc-1', '1', ctx());
     await service.restore('doc-1', '1', prepared.indexingMarkdown);
 
     expect(capture.lines.length).toBeGreaterThan(0);
     const all = capture.lines.join('\n');
-    for (const sentinel of [
-      SENTINELS.cell,
-      SENTINELS.alt,
-      'path-sent-73',
-      SENTINELS.caption,
-      SENTINELS.name,
-    ]) {
+    for (const sentinel of [SENTINELS.cell, SENTINELS.alt, 'path-sent-73', SENTINELS.caption]) {
       expect(all).not.toContain(sentinel);
     }
   });

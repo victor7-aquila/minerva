@@ -7,6 +7,7 @@ from typing import cast
 import pytest
 
 from minerva_rag.core import (
+    BatchIndexingError,
     GlossaryError,
     ModelLoadError,
     ServerNotReadyError,
@@ -32,7 +33,9 @@ from .fakes import (
     build_lifecycle,
     eval_case,
     go,
+    hold_caption,
     index_request,
+    make_manager,
     run_logged,
     submit,
     until,
@@ -135,7 +138,7 @@ def test_start_calls_recover_for_running(settings: Settings) -> None:
 
     async def scenario() -> None:
         # 이전 프로세스: 색인 중인 작업을 남기고 멈춘다
-        first = JobManager(settings)
+        first = make_manager(settings)
         await first.start(RecoverSpy(False))
         runner = ScriptedRunner(WAIT)
         job_id = await submit(first, "doc-a", runner)
@@ -143,7 +146,7 @@ def test_start_calls_recover_for_running(settings: Settings) -> None:
         await first.stop(0)
 
         # 다시 시작: 진짜 작업 관리자와 가짜 indexer로 startup한다
-        second = JobManager(settings)
+        second = make_manager(settings)
         indexer = FakeIndexer()
         indexer.recover_result = False
         service = LifecycleService(
@@ -275,6 +278,32 @@ def test_build_services_single_indexer(monkeypatch: pytest.MonkeyPatch, settings
     assert isinstance(services.lifecycle, LifecycleService)
     # ★ 만들기만 하고 prepare·connect·start는 부르지 않는다
     assert parts.timeline == []
+
+
+@pytest.mark.req("REQ-RAG-10.1.1")
+def test_build_services_shares_one_job_manager(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings
+) -> None:
+    """[REQ-RAG-10.1.1] build_services는 모든 서비스에 같은 JobManager를 넘긴다 — 한 서비스에서
+    잡은 캡션 슬롯이 검색·평가 서비스의 거부에 보인다."""
+    services, parts = wire(monkeypatch, settings)
+    # ★ 일괄 색인 상태는 JobManager 인스턴스 하나의 메모리에 있다
+    assert len(parts.managers) == 1
+    manager = parts.managers[0]
+
+    async def scenario() -> None:
+        await services.lifecycle.startup()
+        try:
+            holder = await hold_caption(manager)
+            with pytest.raises(BatchIndexingError):
+                await services.search.search(SearchQuery("질의"))
+            with pytest.raises(BatchIndexingError):
+                await services.evaluation.evaluate(eval_case())
+            await holder.release()
+        finally:
+            await services.lifecycle.shutdown()
+
+    go(scenario())
 
 
 @pytest.mark.req("REQ-RAG-10.1.1")
