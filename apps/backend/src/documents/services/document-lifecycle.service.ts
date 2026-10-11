@@ -57,6 +57,8 @@ function activeKey(docId: string, version: string): string {
 
 /** 예약 색인 한 번의 결과다. */
 export interface ScheduledIndexSummary {
+  /** 시작 때 요약·캡션 생성 중에서 색인 대기로 되돌린 문서 수 */
+  requeued: number;
   /** 요약·캡션 생성 중으로 바꾼 문서 수 */
   captioned: number;
   /** 색인을 요청한 문서 수 */
@@ -333,7 +335,10 @@ export class DocumentLifecycle {
     return this.markQueued(docId, version);
   }
 
-  /** 기동 때 captioning 문서를 queued로 되돌리고 대기열에 넣는다. 바꿨으면 참이다. (REQ-BE-1.9.12) */
+  /**
+   * 남은 captioning 문서를 queued로 되돌리고 대기열에 넣는다. 바꿨으면 참이다.
+   * 기동 때(REQ-BE-1.9.12)와 예약 색인 시작 때(REQ-BE-1.10.10) 쓴다.
+   */
   async requeueCaptioning(doc: DocumentRecord): Promise<boolean> {
     // ★ 이 프로세스의 예약 색인이 다루는 문서는 건드리지 않는다
     if (this.isCaptioningInRun(doc.docId)) return false;
@@ -352,11 +357,27 @@ export class DocumentLifecycle {
   }
 
   /**
-   * 예약 색인을 한 번 돌린다. 대상 읽기 → 요약·캡션 생성 중으로 바꾸기 → 이미지 캡션 → 표 요약 → 색인 요청
+   * 예약 색인을 한 번 돌린다. 남은 요약·캡션 생성 중 되돌리기 → 대상 읽기 → 요약·캡션 생성 중으로 바꾸기 → 이미지 캡션 → 표 요약 → 색인 요청
    * → 못 마친 문서 되돌리기 순이다.
    */
   async runScheduledIndex(): Promise<ScheduledIndexSummary> {
-    const summary: ScheduledIndexSummary = { captioned: 0, requested: 0, unreachable: 0 };
+    const summary: ScheduledIndexSummary = {
+      requeued: 0,
+      captioned: 0,
+      requested: 0,
+      unreachable: 0,
+    };
+    // 0. 앞 실행이 되돌리지 못한 captioning 문서를 대기열로 되돌린다 (REQ-BE-1.10.10)
+    // ★ 예약 색인은 겹쳐 돌지 않으므로 지금 captioning인 문서는 앞 실행이 남긴 문서다. 대상 읽기보다 먼저 한다
+    for (const doc of await this.repo.findInProcessingStates(['captioning'])) {
+      if (this.tasks.stopping) break;
+      try {
+        if (await this.requeueCaptioning(doc)) summary.requeued += 1;
+      } catch (error) {
+        // 한 문서의 실패가 실행을 막지 않는다. 그 문서는 다음 실행이 다시 되돌린다
+        this.logTaskFailed(doc.docId, error);
+      }
+    }
     // 1. 대상 읽기 — ★ 이 뒤에 대기열에 들어온 문서·버전은 이번 실행에서 보지 않는다
     const targets: RunTarget[] = [];
     for (const doc of await this.repo.findQueued()) {

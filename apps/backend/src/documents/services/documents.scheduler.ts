@@ -66,8 +66,12 @@ export class DocumentsScheduler implements OnApplicationBootstrap {
     }
     this.scheduledIndexing = true;
     try {
-      const { captioned, requested, unreachable } = await this.lifecycle.runScheduledIndex();
-      this.logger.info({ captioned, requested, unreachable }, 'documents.index_scheduled');
+      const { requeued, captioned, requested, unreachable } =
+        await this.lifecycle.runScheduledIndex();
+      this.logger.info(
+        { requeued, captioned, requested, unreachable },
+        'documents.index_scheduled',
+      );
     } finally {
       this.scheduledIndexing = false;
     }
