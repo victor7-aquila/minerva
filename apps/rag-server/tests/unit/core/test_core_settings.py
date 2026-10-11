@@ -406,6 +406,24 @@ def test_env_file_read_and_env_wins(
 
 
 @pytest.mark.req("REQ-RAG-11.1.1")
+def test_env_file_utf8_with_bom_is_read(
+    required_env: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """[REQ-RAG-11.1.1] BOM이 붙은 UTF-8 .env도 첫 키부터 읽는다."""
+    for key in required_env:
+        monkeypatch.delenv(key)
+    lines = [f"{key}={value}" for key, value in required_env.items()]
+    env_file = tmp_path / ".env"
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    monkeypatch.setitem(Settings.model_config, "env_file", env_file)
+    settings = get_settings()
+    assert settings.qdrant_url == required_env["RAG_QDRANT_URL"]
+    assert settings.api_token.get_secret_value() == required_env["RAG_API_TOKEN"]
+
+
+@pytest.mark.req("REQ-RAG-11.1.1")
 @pytest.mark.parametrize("encoding", ["utf-16", "cp949"])
 def test_env_file_wrong_encoding_fails_cleanly(
     required_env: dict[str, str],

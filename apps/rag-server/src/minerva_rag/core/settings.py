@@ -30,7 +30,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="RAG_",
         env_file=_APP_DIR / ".env",  # ★ 환경 변수가 .env보다 우선한다
-        env_file_encoding="utf-8",
+        # ★ utf-8-sig는 BOM이 있든 없든 UTF-8로 읽는다(PowerShell 5.1 -Encoding UTF8은 BOM을 붙인다)
+        env_file_encoding="utf-8-sig",
         env_ignore_empty=True,  # ★ 값을 비운 키는 지정하지 않은 것으로 본다
         extra="ignore",
         frozen=True,  # 캐시해 공유하는 객체라 바꾸지 못하게 한다

@@ -168,6 +168,39 @@ def test_cp949_stream_keeps_event_and_hides_forbidden(
     assert "\\ud83d\\ude00" in written
 
 
+class _UnknownEncodingStream:
+    """이름을 알 수 없는 인코딩을 내세우는 출력 스트림이다."""
+
+    encoding = "x-minerva-unknown"  # codecs가 모르는 이름
+
+    def __init__(self) -> None:
+        self._buffer = io.StringIO()
+
+    def write(self, text: str) -> int:
+        """받은 문자열을 그대로 모은다."""
+        return self._buffer.write(text)
+
+    def flush(self) -> None:
+        """할 일이 없다."""
+
+    def getvalue(self) -> str:
+        """모은 출력을 돌려준다."""
+        return self._buffer.getvalue()
+
+
+@pytest.mark.req("REQ-RAG-11.2.1")
+def test_unknown_stream_encoding_stays_valid_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[REQ-RAG-11.2.1] 알 수 없는 출력 인코딩이어도 JSON 이스케이프로 써 다시 읽을 수 있다."""
+    stream = _UnknownEncodingStream()
+    monkeypatch.setattr(sys, "stdout", stream)
+    configure_logging()
+    get_logger("tests.core").info("core.test", doc_id="doc-é😀")
+    written = stream.getvalue()
+    assert written.isascii()
+    record = json.loads(written.strip().splitlines()[-1])
+    assert record["doc_id"] == "doc-é😀"
+
+
 @pytest.mark.req("REQ-RAG-11.2.1")
 def test_handler_failure_prints_no_original(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch

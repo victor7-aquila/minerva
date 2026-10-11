@@ -111,7 +111,11 @@ def _escape_unencodable(text: str, encoding: str) -> str:
     except UnicodeEncodeError:
         pass
     except LookupError:
-        return text.encode("ascii", "backslashreplace").decode("ascii")
+        # ★ 알 수 없는 인코딩은 ascii로 보고 같은 \uXXXX 이스케이프를 쓴다
+        #   (JSON으로 다시 읽을 수 있게)
+        encoding = "ascii"
+        if text.isascii():
+            return text
     else:
         return text
     parts: list[str] = []
