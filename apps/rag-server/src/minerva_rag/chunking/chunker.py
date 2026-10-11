@@ -377,7 +377,6 @@ class Chunker:
         self, doc: MarkdownDocument, draft: _Draft, order: int, text_start: int, asset_start: int
     ) -> list[Chunk]:
         """초안 하나의 본문 조각과, 조각 바로 뒤에 둘 표·이미지 청크를 만든다."""
-        path = doc.heading_path_for(draft.span)
         pieces = resplit(doc, draft.span, self._fits_chunk)
         total = len(pieces)
         made: list[Chunk] = []
@@ -390,7 +389,8 @@ class Chunker:
                     chunk_key=f"text-{text_number}",
                     kind=ChunkKind.TEXT,
                     order=order,
-                    heading_path=path,
+                    # ★ 재분할 조각은 절 경계를 넘을 수 있어 조각마다 자기 첫 본문 줄의 경로를 쓴다
+                    heading_path=doc.heading_path_for(piece.span),
                     title=draft.title,
                     summary=draft.summary,
                     text=piece.text,
