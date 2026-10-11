@@ -34,7 +34,7 @@ DEFAULT_CASES: list[tuple[str, str, Any]] = [
     ("RAG_CHUNKING_LLM", "chunking_llm", "qwen3:14b"),
     ("RAG_TABLE_LLM", "table_llm", "qwen3:14b"),
     ("RAG_CAPTION_VLM", "caption_vlm", "qwen3-vl:8b"),
-    ("RAG_EMBEDDING_MODEL", "embedding_model", "Qwen/Qwen3-Embedding-4B"),
+    ("RAG_EMBEDDING_MODEL", "embedding_model", "Qwen/Qwen3-Embedding-0.6B"),
     ("RAG_RERANKER_MODEL", "reranker_model", "BAAI/bge-reranker-v2-m3"),
     ("RAG_CHUNK_MAX_TOKENS", "chunk_max_tokens", 512),
     ("RAG_CHUNKING_LLM_MAX_INPUT_TOKENS", "chunking_llm_max_input_tokens", 8000),

@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     chunking_llm: str = "qwen3:14b"  # 청킹용 Ollama 모델
     table_llm: str = "qwen3:14b"  # 표 요약용 Ollama 모델
     caption_vlm: str = "qwen3-vl:8b"  # 이미지 캡션용 Ollama 모델
-    embedding_model: str = "Qwen/Qwen3-Embedding-4B"  # sentence-transformers 임베딩 모델
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"  # sentence-transformers 임베딩 모델
     reranker_model: str = "BAAI/bge-reranker-v2-m3"  # sentence-transformers 재정렬 모델
 
     # 청킹·LLM 토큰 (RAG_EMBEDDING_MODEL의 토크나이저로 센다)
