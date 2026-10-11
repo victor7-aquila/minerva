@@ -185,6 +185,36 @@ def test_rewritten_is_query_when_no_term(example: Glossary) -> None:
     assert result.rewritten == query
 
 
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_canonical_and_synonym_together(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 같은 묶음의 대표어와 동의어가 함께 든 질의는 둘 다 대표어로 바뀐다."""
+    assert example.expand("인증서 cert 갱신").rewritten == "인증서 인증서 갱신"
+    assert example.expand("cert와 certificate").rewritten == "인증서와 인증서"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_replaces_every_occurrence(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 한 말이 질의에 여러 번 나오면 나온 곳 모두 대표어로 바뀐다."""
+    assert example.expand("cert 갱신 cert 폐기 cert").rewritten == "인증서 갱신 인증서 폐기 인증서"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_follows_ascii_boundary(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 경계에 걸리는 곳(concert)은 두고 조사가 붙은 말(cert를)은 바꾼다."""
+    assert example.expand("concert cert를 갱신").rewritten == "concert 인증서를 갱신"
+    # ★ 바뀔 곳이 없으면 matched 판정과 같이 질의 원문 그대로다
+    assert example.expand("concert certs").rewritten == "concert certs"
+
+
+@pytest.mark.req("REQ-RAG-4.9.1")
+def test_rewritten_each_group_own_canonical(example: Glossary) -> None:
+    """[REQ-RAG-4.9.1] 서로 다른 묶음의 말은 각각 자기 묶음의 대표어로 바뀐다."""
+    assert example.expand("cert 와 crl").rewritten == "인증서 와 폐기 목록"
+    assert example.expand("certificate revocation list 와 certificate").rewritten == (
+        "폐기 목록 와 인증서"
+    )
+
+
 @pytest.mark.req("REQ-RAG-4.9.2")
 def test_glossary_change_no_store_writes(settings: Settings, glossary_path: Path) -> None:
     """[REQ-RAG-4.9.2] 용어집을 고쳐도 저장소에 쓰기가 없고 다음 검색의 확장 결과만 달라진다."""

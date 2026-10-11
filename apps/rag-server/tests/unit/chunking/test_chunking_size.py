@@ -143,6 +143,37 @@ def test_piece_path_unchanged_within_section(small: Settings) -> None:
     assert {p.heading_path for p in pieces} == {("절",)}
 
 
+@pytest.mark.req("REQ-RAG-2.5.1.2")
+@pytest.mark.req("REQ-RAG-2.5.1.4")
+def test_piece_path_code_block_pieces_share_section(small: Settings) -> None:
+    """[REQ-RAG-2.5.1.2] 큰 코드 블록이 줄 경계로 나뉜 조각은 모두 코드 블록이 속한 절의 경로다."""
+    code = [f"w{i} = {i}" for i in range(1, 26)]
+    markdown = "## 가\n\n### 코드 절\n\n```python\n" + "\n".join(code) + "\n```\n"
+
+    result = _split(small, markdown, ChunkingMode.RULE)
+
+    pieces = text_chunks(result)
+    assert len(pieces) >= 3
+    assert {p.heading_path for p in pieces} == {("가", "코드 절")}
+    assert {p.title for p in pieces} == {pieces[0].title}
+
+
+@pytest.mark.req("REQ-RAG-2.5.1.2")
+def test_piece_path_paragraph_sentence_pieces_share_section(small: Settings) -> None:
+    """[REQ-RAG-2.5.1.2] 하위 헤딩 없이 문단·문장 경계로 나뉜 조각은 모두 같은 절의 경로다."""
+    markdown = (
+        "## 가\n\n### 본문 절\n\n"
+        "문단 하나 w1 w2 w3 w4 w5 w6.\n\n"
+        "문장 하나 w7 w8 w9 w10. 문장 둘 w11 w12 w13 w14. 문장 셋 w15 w16 w17 w18.\n"
+    )
+
+    result = _split(small, markdown, ChunkingMode.RULE)
+
+    pieces = text_chunks(result)
+    assert len(pieces) >= 3
+    assert {p.heading_path for p in pieces} == {("가", "본문 절")}
+
+
 @pytest.mark.req("REQ-RAG-2.5.1.3")
 def test_split_index_and_total(small: Settings) -> None:
     """[REQ-RAG-2.5.1.3] 조각은 1부터 split_total까지 번호를 갖고, 안 나뉜 청크는 None이다."""
