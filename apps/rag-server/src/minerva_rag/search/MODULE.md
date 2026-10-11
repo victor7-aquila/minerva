@@ -191,6 +191,7 @@ terms:
 | :--- | :--- | :--- | :--- |
 | `matched` | `tuple[str, ...]` | 필수 | 질의에서 찾은 용어집의 말 |
 | `terms` | `tuple[str, ...]` | 필수 | 찾은 말이 속한 묶음들의 대표어와 동의어 전부. 질의에 이미 있는 말은 뺀다 |
+| `rewritten` | `str` | 필수 | 질의 안의 용어집 말을 그 묶음의 대표어로 바꾼 질의(정규화한 형태). 찾은 말이 겹치면 긴 말을 먼저 바꾼다. 찾은 말이 없으면 질의 그대로다 |
 
 ## 기능 그룹별 요구사항
 
@@ -223,8 +224,8 @@ resource의 `StoreUnavailableError`·`VectorDimensionMismatchError`는 그대로
 
 **`REQ-RAG-4.1.1`** dense와 키워드 검색을 함께
 
-- 처리 계약: 확장한 질의(「핵심 흐름」 1)로 `embed_query`·`encode_sparse_query`를 만들어 `search_dense`·`search_sparse`를 모두 부른다
-- 충족 기준: 검색 한 번에 두 조회가 모두 불리고, 키워드 검색에만 나온 청크도 결과 후보에 든다
+- 처리 계약: 「핵심 흐름」 1의 키워드 질의로 `encode_sparse_query`를, 문장 질의로 `embed_query`를 만들어 `search_dense`·`search_sparse`를 모두 부른다(`REQ-RAG-4.9.1`)
+- 충족 기준: 검색 한 번에 두 조회가 모두 불리고, 키워드 검색에만 나온 청크도 결과 후보에 든다. 용어집의 말이 든 질의는 키워드 질의에만 동의어가 붙고, dense 질의는 대표어로 바꾼 문장이다
 
 **`REQ-RAG-4.1.2`** 하나의 순위로 합치기
 
@@ -243,7 +244,7 @@ resource의 `StoreUnavailableError`·`VectorDimensionMismatchError`는 그대로
 
 **`REQ-RAG-4.2.1`** 재정렬 모델 점수로 다시 정렬
 
-- 처리 계약: 합친 후보의 원문으로 `rerank`를 불러, 그 점수 내림차순으로 다시 정렬한다. 재정렬의 질의도 확장한 질의(「핵심 흐름」 1)다
+- 처리 계약: 합친 후보의 원문(`chunk.text`, 색인 텍스트의 머리글은 붙이지 않는다)으로 `rerank`를 불러, 그 점수 내림차순으로 다시 정렬한다. 재정렬의 질의는 「핵심 흐름」 1의 문장 질의다(`REQ-RAG-4.9.1`)
 - 충족 기준: 재정렬 점수가 합친 순위와 다르면 결과가 재정렬 점수 순이다
 
 **`REQ-RAG-4.2.2`** 재정렬 실패 시 합친 순위
@@ -378,19 +379,20 @@ class Glossary:
 ```python
 @dataclass(frozen=True)
 class Expansion:
-    """질의에서 찾은 말과 넣을 말이다."""
+    """질의에서 찾은 말, 넣을 말, 대표어로 바꾼 질의다."""
     matched: tuple[str, ...]
     terms: tuple[str, ...]
+    rewritten: str
 
 
 class Glossary:
     def expand(self, query: str) -> Expansion: ...
 ```
 
-**`REQ-RAG-4.9.1`** 묶음의 대표어와 동의어까지 확장
+**`REQ-RAG-4.9.1`** 키워드 검색은 묶음 전체로 넓히고, dense·재정렬은 대표어로 바꾼 질의
 
-- 처리 계약: 질의에 대표어나 동의어가 나오면 그 묶음의 대표어와 동의어 전부를 `terms`에 담는다. 영문은 대소문자를 가리지 않는다. 용어집의 말이 없으면 `matched`와 `terms`가 비어 있다. 질의와 용어집의 말은 NFKC 정규화와 소문자 변환을 하고 연속 공백을 하나로 줄인 뒤 비교한다. 말이 질의 안에 부분 문자열로 나오면 찾은 것으로 본다. 다만 말이 영문·숫자로 시작하면 바로 앞 글자가, 영문·숫자로 끝나면 바로 뒤 글자가 영문·숫자가 아니어야 한다(한글 조사는 붙어도 된다). 「질의에 이미 있는 말」도 같은 규칙으로 판정한다
-- 충족 기준: 동의어 하나가 든 질의가 그 묶음의 대표어와 다른 동의어로 확장되고, 용어집의 말이 없는 질의는 빈 확장이 된다. `cert`는 `cert를`에서는 찾고 `concert`에서는 찾지 않는다
+- 처리 계약: 질의에 대표어나 동의어가 나오면 그 묶음의 대표어와 동의어 전부를 `terms`에 담고, 질의 안의 그 말을 묶음의 대표어로 바꾼 질의를 `rewritten`에 담는다. 영문은 대소문자를 가리지 않는다. 용어집의 말이 없으면 `matched`와 `terms`가 비어 있다. 질의와 용어집의 말은 NFKC 정규화와 소문자 변환을 하고 연속 공백을 하나로 줄인 뒤 비교한다. 말이 질의 안에 부분 문자열로 나오면 찾은 것으로 본다. 다만 말이 영문·숫자로 시작하면 바로 앞 글자가, 영문·숫자로 끝나면 바로 뒤 글자가 영문·숫자가 아니어야 한다(한글 조사는 붙어도 된다). 「질의에 이미 있는 말」도 같은 규칙으로 판정한다
+- 충족 기준: 동의어 하나가 든 질의가 그 묶음의 대표어와 다른 동의어로 확장되고 `rewritten`은 그 동의어를 대표어로 바꾼 질의다. 용어집의 말이 없는 질의는 빈 확장이고 `rewritten`이 질의 그대로다. `cert`는 `cert를`에서는 찾고 `concert`에서는 찾지 않는다
 
 **`REQ-RAG-4.9.2`** 용어집 변경 시 재색인 없음
 
@@ -411,7 +413,7 @@ flowchart TB
     N --> E["판 정보와 다른 판 표시"]
 ```
 
-1. **질의 확장** — `Glossary.expand`의 말을 질의에 더한다. 용어집 파일이 바뀌었으면 이때 다시 읽는다. 용어집의 말이 없으면 질의 그대로다. (`REQ-RAG-4.8.3`, `REQ-RAG-4.9.1`)
+1. **질의 확장** — `Glossary.expand`로 두 질의를 만든다. 키워드 질의는 원래 질의 뒤에 `terms`를 이어 붙인 것이고, 문장 질의(dense·재정렬)는 `rewritten`이다. ★ 동의어를 이어 붙인 질의를 dense·재정렬에 넣지 않는다 — 문장의 뜻이 흐려져 순위가 나빠진다. 용어집 파일이 바뀌었으면 이때 다시 읽는다. 용어집의 말이 없으면 두 질의 모두 원래 질의다. (`REQ-RAG-4.8.3`, `REQ-RAG-4.9.1`)
 2. **하이브리드 검색** — 판 범위·문서 ID로 만든 `ChunkFilter`로 두 조회를 하고 RRF로 합친다. (`REQ-RAG-4.1`, `REQ-RAG-4.5.3`, `REQ-RAG-4.5.4`)
 3. **재정렬** — 합친 후보를 재정렬하고, 실패하면 합친 순위를 쓴다. 그다음 최신판 가중치를 더해 정렬한다. (`REQ-RAG-4.2`, `REQ-RAG-4.5.5`)
 4. **분할 조각 합치기와 N개** — 같은 `split_group`을 결과 하나로 합치고 상위 N개를 고른다. 합친 뒤에 N개를 골라야 결과 개수가 맞다. (`REQ-RAG-4.4.1`~`REQ-RAG-4.4.3`, `REQ-RAG-4.3.1`)
@@ -449,11 +451,11 @@ flowchart TB
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-4.1.1` | unit | 두 조회 모두 호출, 키워드 전용 후보 포함, 확장한 질의 사용 | resource (가짜), 임시 용어집 파일 | `tests/unit/search/` |
+| `REQ-RAG-4.1.1` | unit | 두 조회 모두 호출, 키워드 전용 후보 포함, 키워드 질의에만 동의어, dense 질의는 대표어로 바꾼 문장 | resource (가짜), 임시 용어집 파일 | `tests/unit/search/` |
 | `REQ-RAG-4.1.2` | unit | RRF 순위, 중복 없음 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.1.3` | unit | 문서 ID 필터 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.1.4` | unit | `ASSET` 청크 결과 포함 | resource (가짜) | `tests/unit/search/` |
-| `REQ-RAG-4.2.1` | unit | 재정렬 점수 순 | resource (가짜) | `tests/unit/search/` |
+| `REQ-RAG-4.2.1` | unit | 재정렬 점수 순, 재정렬 입력은 청크 원문과 대표어로 바꾼 문장 질의 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.2.2` | unit | 재정렬 예외 시 합친 순위·점수와 경고 로그 | resource (가짜, 재정렬 예외) | `tests/unit/search/` |
 | `REQ-RAG-4.3.1` | unit | N개, 조각 합친 뒤 개수, 후보 부족 | resource (가짜) | `tests/unit/search/` |
 | `REQ-RAG-4.3.2` | unit | 기본 N | resource (가짜) | `tests/unit/search/` |
@@ -478,5 +480,5 @@ flowchart TB
 | `REQ-RAG-4.8.1` | unit | 묶음 읽기, 형식 오류(빈 문자열·문자열 아닌 말·구조 오류 포함) 시 `GlossaryError`(`Searcher.load_glossary` 포함), 파일 없음은 빈 용어집 | 임시 용어집 파일 | `tests/unit/search/` |
 | `REQ-RAG-4.8.2` | unit | 두 묶음의 같은 말(대소문자 차이 포함) 거부 | 임시 용어집 파일 | `tests/unit/search/` |
 | `REQ-RAG-4.8.3` | unit | 파일 변경 후 다음 확장에 반영, 잘못된 변경 시 직전 유지와 경고 | 임시 용어집 파일 | `tests/unit/search/` |
-| `REQ-RAG-4.9.1` | unit | 동의어·대표어로 묶음 전체 확장, 대소문자 무시, 영문·숫자 경계 판정, 없는 말은 빈 확장 | 임시 용어집 파일 | `tests/unit/search/` |
+| `REQ-RAG-4.9.1` | unit | 동의어·대표어로 묶음 전체 확장, 대표어로 바꾼 질의(겹치는 말은 긴 말 우선), 대소문자 무시, 영문·숫자 경계 판정, 없는 말은 빈 확장 | 임시 용어집 파일 | `tests/unit/search/` |
 | `REQ-RAG-4.9.2` | unit | 용어집 변경 시 저장소 쓰기 없음 | 임시 용어집 파일, resource (가짜) | `tests/unit/search/` |

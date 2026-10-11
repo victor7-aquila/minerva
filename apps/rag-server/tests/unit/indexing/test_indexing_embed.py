@@ -3,6 +3,8 @@
 모델은 가짜, 저장소는 쓰이지 않는다.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from minerva_rag.core import (
@@ -78,7 +80,7 @@ def test_index_text_replaces_placeholders(settings: Settings) -> None:
         assert expected_index_text(chunks[0], ASSETS) in texts
         assert ASSETS["t1"] in expected_index_text(chunks[0], ASSETS)
         assert ASSETS["i1"] in expected_index_text(chunks[0], ASSETS)
-        assert chunks[1].text in texts
+        assert expected_index_text(chunks[1], ASSETS) in texts
 
 
 @pytest.mark.req("REQ-RAG-3.1.1")
@@ -93,6 +95,97 @@ def test_asset_index_text_is_sentence(settings: Settings) -> None:
         assert sentence in hub.all_sparse_texts()
         assert embedded.dense[index[key]] == tuple(dense_of(sentence))
         assert embedded.sparse[index[key]] == sparse_of(sentence)
+
+
+def _index_texts(settings: Settings, chunk: Chunk) -> tuple[EmbeddedChunks, list[str]]:
+    """청크 하나를 embed하고 모델에 넘긴 dense 텍스트를 함께 돌려준다."""
+    embedded, hub = _embed(settings, [chunk])
+    return embedded, list(hub.all_dense_texts())
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+def test_text_header_format(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] TEXT 청크의 색인 텍스트는 경로 줄, 제목 줄, 빈 줄, 본문 순서다."""
+    chunk = replace(text_chunk("k", "본문이다."), heading_path=("큰 절", "작은 절"))
+
+    embedded, texts = _index_texts(settings, chunk)
+
+    assert texts == ["큰 절 > 작은 절\n제목\n\n본문이다."]
+    assert embedded.dense[0] == tuple(dense_of(texts[0]))
+    assert embedded.sparse[0] == sparse_of(texts[0])
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+def test_text_header_path_only(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] 제목이 비면 제목 줄을 빼고 경로 줄만 머리글로 쓴다."""
+    chunk = replace(text_chunk("k", "본문이다."), title=None)
+
+    _embedded, texts = _index_texts(settings, chunk)
+
+    assert texts == ["절\n\n본문이다."]
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+def test_text_header_title_only(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] 헤딩 경로가 비면 경로 줄을 빼고 제목 줄만 머리글로 쓴다."""
+    chunk = replace(text_chunk("k", "본문이다."), heading_path=())
+
+    _embedded, texts = _index_texts(settings, chunk)
+
+    assert texts == ["제목\n\n본문이다."]
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+def test_text_without_header_is_body_only(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] 경로와 제목이 모두 비면 머리글도 빈 줄도 없이 본문만이다."""
+    chunk = replace(text_chunk("k", "본문이다."), heading_path=(), title=None)
+
+    _embedded, texts = _index_texts(settings, chunk)
+
+    assert texts == ["본문이다."]
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+def test_summary_not_in_index_text(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] 요약은 색인 텍스트에 넣지 않는다."""
+    chunk = replace(text_chunk("k", "본문이다."), summary="고유요약문장")
+
+    _embedded, texts = _index_texts(settings, chunk)
+
+    assert texts
+    assert all("고유요약문장" not in t for t in texts)
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+def test_header_with_placeholders_replaced(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] 머리글은 치환한 본문 앞에 붙고 자리표시는 남지 않는다."""
+    chunk = text_chunk("k", "표는 [[minerva:table:t1 | 환경 변수 표]] 다.")
+
+    _embedded, texts = _index_texts(settings, chunk)
+
+    assert texts == ["절\n제목\n\n표는 환경 변수별 타입과 기본값 다."]
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+def test_asset_has_no_header(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] ASSET 청크의 색인 텍스트에는 머리글이 없다(경로가 있어도 문장 그대로)."""
+    chunk = asset_chunk("k-t1", "table", "t1", "환경 변수 표")
+    assert chunk.heading_path
+
+    _embedded, texts = _index_texts(settings, chunk)
+
+    assert texts == [ASSETS["t1"]]
+
+
+@pytest.mark.req("REQ-RAG-3.1.3")
+@pytest.mark.req("REQ-RAG-3.1.2")
+def test_header_not_stored_in_chunk_text(settings: Settings) -> None:
+    """[REQ-RAG-3.1.3] 머리글은 색인 텍스트에만 붙고 저장하는 chunk.text는 그대로다."""
+    chunk = text_chunk("k", "표는 [[minerva:table:t1 | 환경 변수 표]] 다.")
+
+    embedded, _texts = _index_texts(settings, chunk)
+
+    assert embedded.records[0].chunk.text == chunk.text
 
 
 @pytest.mark.req("REQ-RAG-3.1.2")

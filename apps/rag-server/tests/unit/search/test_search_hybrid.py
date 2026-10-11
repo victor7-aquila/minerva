@@ -47,17 +47,35 @@ def test_sparse_only_candidate_in_results(settings: Settings) -> None:
 
 @pytest.mark.req("REQ-RAG-4.1.1", "REQ-RAG-4.9.1")
 def test_expanded_query_used(settings: Settings, glossary_path: Path) -> None:
-    """[REQ-RAG-4.1.1] 두 질의 벡터는 원래 질의와 확장한 말을 담은 질의로 만든다."""
+    """[REQ-RAG-4.1.1] 키워드 질의는 동의어를 붙이고 dense 질의는 대표어로 바꾼 질의다."""
     write_glossary(glossary_path, EXAMPLE_GLOSSARY)
     hub = FakeSearchHub()
     searcher = make_searcher(scripted_store([rec("a")]), hub, settings)
 
     run(searcher.search(SearchQuery("cert 갱신")))
 
-    # ★ 확장 질의 문자열의 정확한 형식은 구현 재량이라 단언하지 않는다
+    # ★ 키워드 질의 문자열의 정확한 형식은 구현 재량이라 들어 있는지만 본다
     for expected in ("cert 갱신", "인증서", "certificate", "인증 문서"):
-        assert expected in hub.embed_inputs[0]
         assert expected in hub.sparse_inputs[0]
+    assert hub.embed_inputs[0] == "인증서 갱신"
+
+
+@pytest.mark.req("REQ-RAG-4.1.1", "REQ-RAG-4.2.1", "REQ-RAG-4.9.1")
+def test_synonyms_only_in_sparse_query(settings: Settings, glossary_path: Path) -> None:
+    """[REQ-RAG-4.1.1] 동의어는 키워드 질의에만 붙고 dense·재정렬 질의는 대표어로 바꾼 질의다."""
+    write_glossary(glossary_path, EXAMPLE_GLOSSARY)
+    hub = FakeSearchHub()
+    record = rec("a", heading_path=("절",))
+    searcher = make_searcher(scripted_store([record]), hub, settings)
+
+    run(searcher.search(SearchQuery("cert 갱신")))
+
+    for expected in ("cert 갱신", "인증서", "certificate", "인증 문서"):
+        assert expected in hub.sparse_inputs[0]
+    assert hub.embed_inputs[0] == "인증서 갱신"
+    assert hub.rerank_calls[0][0] == "인증서 갱신"
+    # ★ 재정렬 입력 본문은 머리글 없는 chunk.text 그대로다
+    assert hub.rerank_calls[0][1] == [record.chunk.text]
 
 
 @pytest.mark.req("REQ-RAG-4.1.1", "REQ-RAG-4.9.1")

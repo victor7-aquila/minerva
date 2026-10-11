@@ -54,17 +54,15 @@ def test_rerank_passages_are_chunk_text(settings: Settings) -> None:
 
 @pytest.mark.req("REQ-RAG-4.2.1")
 def test_rerank_query_is_expanded(settings: Settings, glossary_path: Path) -> None:
-    """[REQ-RAG-4.2.1] 재정렬의 질의도 확장한 질의다."""
+    """[REQ-RAG-4.2.1] 재정렬의 질의는 용어집 말을 대표어로 바꾼 질의다(동의어를 붙이지 않는다)."""
     write_glossary(glossary_path, EXAMPLE_GLOSSARY)
     hub = FakeSearchHub()
     searcher = make_searcher(scripted_store([rec("A")]), hub, settings)
 
     run(searcher.search(SearchQuery("cert")))
 
-    # ★ 확장 질의 문자열의 형식은 구현 재량이라 원래 질의와 확장한 말이 들어 있는지만 본다
     assert hub.rerank_calls
-    for expected in ("cert", "인증서", "certificate", "인증 문서"):
-        assert expected in hub.rerank_calls[0][0]
+    assert hub.rerank_calls[0][0] == "인증서"
 
 
 def _failing_search(
