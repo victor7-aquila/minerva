@@ -789,23 +789,23 @@ describe('REQ-BE-1.10.1', () => {
     expect(requested).toHaveLength(2);
     const lines = logLines('documents.index_scheduled');
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({ captioned: 0, requested: 2, unreachable: 0 });
+    expect(lines[0]).toMatchObject({ requeued: 0, captioned: 0, requested: 2, unreachable: 0 });
   });
 
   it('T-SCH-TIMER-3 앞 실행이 막혀 있는 동안 다시 부르면 요청이 늘지 않고 건너뜀 로그 한 줄에 그때의 대기열·captioning 문서 수가 담긴다', async () => {
     await seedQueued(DOC_A);
     await seedQueued(DOC_B);
-    // captioning으로 남은 문서 하나 (대기열 밖)
-    await seed(
-      h.db,
-      [docRecord({ docId: DOC_C, name: 'c', processingState: 'captioning' })],
-      [versionRecord({ docId: DOC_C, jobId: null })],
-    );
     const gate = deferred<IndexRequestOutcome>();
     releaseHints = () => gate.resolve({ kind: 'accepted', jobId: 'job-x' });
     h.indexing.requestIndex.mockReturnValueOnce(gate.promise);
     const first = h.scheduler.runScheduledIndex();
     await waitUntil(() => h.indexing.requestIndex.mock.calls.length === 1);
+    // captioning인 문서 하나 (대기열 밖) — ★ 시작 때 되돌리기(REQ-BE-1.10.10)가 지난 뒤에 넣는다
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_C, name: 'c', processingState: 'captioning' })],
+      [versionRecord({ docId: DOC_C, jobId: null })],
+    );
     // ★ 앞 실행이 첫 문서에서 멈춰 있는 동안 다시 불러도 아무것도 하지 않는다
     await h.scheduler.runScheduledIndex();
     expect(h.indexing.requestIndex).toHaveBeenCalledTimes(1);
@@ -828,10 +828,12 @@ describe('REQ-BE-1.10.1', () => {
     expect(new Set(h.indexing.requestIndex.mock.calls.map(([input]) => input.docId))).toEqual(
       new Set([DOC_A, DOC_B]),
     );
-    // 앞 실행이 끝난 뒤 다음 호출은 남은 문서를 요청한다
+    // 앞 실행이 끝난 뒤 다음 호출은 남은 문서를 요청한다 — captioning으로 남은 DOC_C도 되돌려 함께 요청한다 (REQ-BE-1.10.10)
     await h.scheduler.runScheduledIndex();
-    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(3);
-    expect(h.indexing.requestIndex.mock.calls.at(-1)?.[0].docId).toBe(DOC_D);
+    expect(h.indexing.requestIndex).toHaveBeenCalledTimes(4);
+    expect(
+      new Set(h.indexing.requestIndex.mock.calls.slice(2).map(([input]) => input.docId)),
+    ).toEqual(new Set([DOC_C, DOC_D]));
   });
 
   it('T-SCH-TIMER-7 실행이 예외로 끝나도 겹침 방지 표시가 풀려 다음 호출이 건너뛰지 않고 실행된다', async () => {

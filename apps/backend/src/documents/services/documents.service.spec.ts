@@ -234,6 +234,7 @@ function recordCount(docId: string, kind: string): number {
 
 /** 예약 색인을 한 번 돌리고 백그라운드 작업을 기다린다. */
 async function runScheduled(): Promise<{
+  requeued: number;
   captioned: number;
   requested: number;
   unreachable: number;
@@ -2418,7 +2419,7 @@ describe('REQ-BE-1.7.1', () => {
     // pendingHints 2 (이미지 1·표 1)
     fakePending(h, { [DOC_A]: { image: 1, table: 1 } });
     const result = await runScheduled();
-    expect(result).toEqual({ captioned: 1, requested: 1, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 1, requested: 1, unreachable: 0 });
     // ★ 요약·캡션(이미지 → 표)을 만든 뒤 색인을 요청한다
     expect(callOrder(h)).toEqual([
       ['image', DOC_A],
@@ -2439,7 +2440,7 @@ describe('REQ-BE-1.7.1', () => {
 
     h.assets.pendingHints.mockResolvedValue(0);
     const result = await runScheduled();
-    expect(result).toEqual({ captioned: 0, requested: 1, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 1, unreachable: 0 });
     expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(requestsOf(DOC_A)[0]).toMatchObject({ version: '2', force: true });
   });
@@ -2487,6 +2488,7 @@ describe('REQ-BE-1.7.1', () => {
 
     // ★ 선점 표시가 남아 있어 대상에서 빠진다 — 요약·캡션·색인 요청이 없고 대기열은 그대로다
     expect(await h.lifecycle.runScheduledIndex()).toEqual({
+      requeued: 0,
       captioned: 0,
       requested: 0,
       unreachable: 0,
@@ -2503,7 +2505,12 @@ describe('REQ-BE-1.7.1', () => {
     expect(docOf(h.db, DOC_A).queuedVersion).toBe('2');
     expect(transitionsOf(DOC_A)).toEqual([['completed', 'queued']]);
     // 선점 표시가 풀린 뒤의 예약 색인은 요약·캡션을 만들고 강제 색인을 요청한다
-    expect(await runScheduled()).toEqual({ captioned: 1, requested: 1, unreachable: 0 });
+    expect(await runScheduled()).toEqual({
+      requeued: 0,
+      captioned: 1,
+      requested: 1,
+      unreachable: 0,
+    });
     expect(requestsOf(DOC_A)).toHaveLength(1);
     expect(requestsOf(DOC_A)[0]).toMatchObject({ version: '2', force: true });
   });
@@ -3553,7 +3560,7 @@ describe('REQ-BE-8.2.1', () => {
     'documents.processing_stopped': ['docId', 'version', 'reason'],
     'documents.resume': ['captioning', 'reconciled', 'recovered', 'uploaded'],
     'documents.task_failed': ['task', 'docId', 'errorName'],
-    'documents.index_scheduled': ['captioned', 'requested', 'unreachable'],
+    'documents.index_scheduled': ['requeued', 'captioned', 'requested', 'unreachable'],
     // ★ 앞 실행이 끝나지 않아 건너뛴 일정의 경고는 두 개수만 담는다
     'documents.index_schedule_skipped': ['queued', 'captioning'],
     // ★ 오지 않는 일정의 경고는 키 이름만 담는다 — 표현식 값은 넣지 않는다 (P-3)

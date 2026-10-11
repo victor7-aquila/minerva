@@ -249,7 +249,7 @@ describe('REQ-BE-1.9.2', () => {
         return real(filter, set);
       });
       const result = await h.lifecycle.runScheduledIndex();
-      expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+      expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
       expect(docOf(h.db, DOC_A).processingState).not.toBe('captioning');
       expect(transitionsOf(DOC_A).filter(([, to]) => to === 'captioning')).toEqual([]);
       expect(h.assets.generateHints).not.toHaveBeenCalled();
@@ -574,7 +574,7 @@ describe('REQ-BE-1.9.11', () => {
     await seedQueued(DOC_A, { deleted: true });
     await seedQueued(DOC_B, { searchState: 'replaced' });
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
     expect(h.assets.pendingHints).not.toHaveBeenCalled();
     expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
@@ -842,7 +842,7 @@ describe('REQ-BE-1.10.1', () => {
     await seedQueued(DOC_A, {}, { origin: 'reindex' });
     await seedQueued(DOC_B, {}, { origin: 'upload' });
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 2, requested: 2, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 2, requested: 2, unreachable: 0 });
     const forces = new Map(
       h.indexing.requestIndex.mock.calls.map(([input]) => [input.docId, input.force]),
     );
@@ -940,7 +940,7 @@ describe('REQ-BE-1.10.1', () => {
       return real(filter, set);
     });
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 1, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 1, unreachable: 0 });
     expect(requestedDocIds()).toEqual([DOC_B]);
     expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(docOf(h.db, DOC_A)).toMatchObject({ processingState: 'queued', queuedVersion: '1' });
@@ -952,7 +952,7 @@ describe('REQ-BE-1.10.1', () => {
     h.lifecycle.beginClaim(DOC_A, '2');
     try {
       const result = await h.lifecycle.runScheduledIndex();
-      expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+      expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
       expect(h.assets.pendingHints).not.toHaveBeenCalled();
       expect(h.assets.generateHints).not.toHaveBeenCalled();
       expect(h.indexing.requestIndex).not.toHaveBeenCalled();
@@ -973,7 +973,7 @@ describe('REQ-BE-1.10.1', () => {
       input.docId === DOC_C ? { kind: 'unreachable' } : { kind: 'accepted', jobId: 'job-x' },
     );
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 1, requested: 3, unreachable: 1 });
+    expect(result).toEqual({ requeued: 0, captioned: 1, requested: 3, unreachable: 1 });
   });
 
   it.each(['pendingHints', 'generateHints'] as const)(
@@ -1301,7 +1301,7 @@ describe('REQ-BE-1.10.1', () => {
       { placeholderId: 't1', text: `요약-${docId}-${version}` },
     ]);
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 3, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 3, unreachable: 0 });
     expect(h.indexing.requestIndex).toHaveBeenCalledTimes(3);
     const inputs = new Map(
       h.indexing.requestIndex.mock.calls.map(([input]) => [input.docId, input]),
@@ -1338,7 +1338,7 @@ describe('REQ-BE-1.10.1', () => {
       ],
     );
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });
 
@@ -1347,7 +1347,7 @@ describe('REQ-BE-1.10.1', () => {
     h.lifecycle.beginClaim(DOC_A, '2');
     try {
       const result = await h.lifecycle.runScheduledIndex();
-      expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+      expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
       expect(h.indexing.requestIndex).not.toHaveBeenCalled();
       expect(docOf(h.db, DOC_A).queuedVersion).toBe('1');
     } finally {
@@ -1366,7 +1366,7 @@ describe('REQ-BE-1.10.1', () => {
     });
     try {
       const result = await h.lifecycle.runScheduledIndex();
-      expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+      expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
       expect(h.indexing.requestIndex).not.toHaveBeenCalled();
       expect(docOf(h.db, DOC_A)).toMatchObject({ queuedVersion: '1', processingState: 'queued' });
     } finally {
@@ -1381,7 +1381,7 @@ describe('REQ-BE-1.10.1', () => {
     await seed(h.db, [docRecord({ docId: DOC_A, processingState: 'queued', queuedVersion: '1' })]);
     await seedQueued(DOC_B);
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 1, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 1, unreachable: 0 });
     expect(requestedDocIds()).toEqual([DOC_B]);
     expect(docOf(h.db, DOC_A).queuedVersion).toBe('1');
   });
@@ -1403,7 +1403,7 @@ describe('REQ-BE-1.10.1', () => {
     expect(docOf(h.db, DOC_B).queuedVersion).toBeNull();
   });
 
-  it('T-SCH-6 documents.index_scheduled 로그가 captioned·requested·unreachable 수만 담는다', async () => {
+  it('T-SCH-6 documents.index_scheduled 로그가 requeued·captioned·requested·unreachable 수만 담는다', async () => {
     await seedQueued(DOC_A);
     await seedQueued(DOC_B);
     h.indexing.requestIndex.mockImplementation(async (input) =>
@@ -1412,12 +1412,12 @@ describe('REQ-BE-1.10.1', () => {
     await h.scheduler.runScheduledIndex();
     const lines = logLines('documents.index_scheduled');
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatchObject({ captioned: 0, requested: 2, unreachable: 1 });
-    // ★ 필드는 captioned·requested·unreachable뿐이다 (pino 기본 필드는 뺀다)
+    expect(lines[0]).toMatchObject({ requeued: 0, captioned: 0, requested: 2, unreachable: 1 });
+    // ★ 필드는 requeued·captioned·requested·unreachable뿐이다 (pino 기본 필드는 뺀다)
     const keys = Object.keys(lines[0])
       .filter((key) => !PINO_BASE_KEYS.includes(key))
       .sort();
-    expect(keys).toEqual(['captioned', 'requested', 'unreachable']);
+    expect(keys).toEqual(['captioned', 'requested', 'requeued', 'unreachable']);
     const text = JSON.stringify(lines[0]);
     for (const sentinel of [NAME_SENT, MD_SENT, IDX_SENT]) expect(text).not.toContain(sentinel);
   });
@@ -1507,7 +1507,7 @@ describe('REQ-BE-1.9.4', () => {
     h.indexing.requestIndex.mockResolvedValue({ kind: 'unreachable' });
     const before = snapshot();
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 1, unreachable: 1 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 1, unreachable: 1 });
     expect(snapshot()).toEqual(before);
     const doc = docOf(h.db, DOC_A);
     expect(doc.processingState).toBe('queued');
@@ -1655,7 +1655,7 @@ describe('REQ-BE-1.9.11', () => {
     await seedQueued(DOC_A, { deleted: true });
     await seedQueued(DOC_B, { searchState: 'replaced' });
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });
 });
@@ -3050,7 +3050,80 @@ describe('REQ-BE-1.10.1', () => {
     );
     expect(docOf(h.db, DOC_A)).not.toHaveProperty('queuedVersion');
     const result = await h.lifecycle.runScheduledIndex();
-    expect(result).toEqual({ captioned: 0, requested: 0, unreachable: 0 });
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+  });
+});
+
+describe('REQ-BE-1.10.10', () => {
+  /** 앞 실행이 되돌리지 못해 captioning으로 남은 문서를 시드한다. */
+  async function seedCaptioning(docId: string, over: Partial<DocumentRecord> = {}): Promise<void> {
+    await seed(
+      h.db,
+      [
+        docRecord({
+          docId,
+          name: queuedName(docId),
+          processingState: 'captioning',
+          latestVersion: '1',
+          queuedVersion: null,
+          ...over,
+        }),
+      ],
+      [versionRecord({ docId, version: '1', jobId: null, result: null })],
+    );
+  }
+
+  it('T-REQ10-1 시작 때 남은 captioning 문서를 queued+대기열로 되돌려 그 실행에서 남은 것만 만들고 색인 요청까지 간다', async () => {
+    fakePending(h, { [DOC_A]: { image: 1, table: 1 } });
+    await seedCaptioning(DOC_A);
+    await seedQueued(DOC_B);
+    const result = await h.lifecycle.runScheduledIndex();
+    expect(result).toMatchObject({ requeued: 1, captioned: 1, requested: 2 });
+    expect(hintsOf(DOC_A)).toEqual(['image', 'table']);
+    expect([...requestedDocIds()].sort()).toEqual([DOC_A, DOC_B].sort());
+    // ★ 되돌림이 대상 읽기보다 먼저라 같은 실행에서 다시 captioning을 거친다
+    expect(transitionsOf(DOC_A)).toEqual([
+      ['captioning', 'queued'],
+      ['queued', 'captioning'],
+      ['captioning', 'queued'],
+    ]);
+  });
+
+  it('T-REQ10-2 삭제됨·교체됨인 captioning 문서는 되돌리지 않고 대상에도 없다', async () => {
+    fakePending(h, {
+      [DOC_A]: { image: 1, table: 0 },
+      [DOC_B]: { image: 1, table: 0 },
+    });
+    await seedCaptioning(DOC_A, { deleted: true });
+    await seedCaptioning(DOC_B, { searchState: 'replaced' });
+    const result = await h.lifecycle.runScheduledIndex();
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 0, unreachable: 0 });
+    expect(docOf(h.db, DOC_A).processingState).toBe('captioning');
+    expect(docOf(h.db, DOC_B).processingState).toBe('captioning');
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+  });
+
+  it('T-REQ10-3 되돌리는 갱신이 던지면 그 문서는 captioning으로 남고 오류 메시지 없이 기록되며 다른 문서는 처리된다', async () => {
+    fakePending(h, { [DOC_A]: { image: 1, table: 0 } });
+    await seedCaptioning(DOC_A);
+    await seedQueued(DOC_B);
+    const spy = jest.spyOn(h.repo, 'updateDocument');
+    spy.mockRejectedValueOnce(new Error(FAILMSG_SENT));
+    const result = await h.lifecycle.runScheduledIndex();
+    expect(result.requeued).toBe(0);
+    expect(docOf(h.db, DOC_A).processingState).toBe('captioning');
+    expect(requestedDocIds()).toEqual([DOC_B]);
+    expect(logLines('documents.task_failed')).toEqual([
+      expect.objectContaining({ task: 'scheduled_index', docId: DOC_A }),
+    ]);
+    expect(capture.lines.join('\n')).not.toContain(FAILMSG_SENT);
+  });
+
+  it('T-REQ10-4 남은 captioning 문서가 없으면 requeued는 0이고 다른 단계는 그대로다', async () => {
+    await seedQueued(DOC_A);
+    const result = await h.lifecycle.runScheduledIndex();
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 1, unreachable: 0 });
   });
 });
