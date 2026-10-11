@@ -109,16 +109,38 @@ def test_resplit_at_sentences_long_sentence_kept(small: Settings) -> None:
 @pytest.mark.req("REQ-RAG-2.5.1.2")
 @pytest.mark.req("REQ-RAG-2.1.2")
 @pytest.mark.req("REQ-RAG-2.1.4")
-def test_pieces_keep_path_title_order(small: Settings) -> None:
-    """[REQ-RAG-2.5.1.2] 같은 청크의 조각은 헤딩 경로·제목·요약·order를 그대로 갖는다."""
+def test_pieces_keep_title_summary_order(small: Settings) -> None:
+    """[REQ-RAG-2.5.1.2] 같은 청크의 조각은 제목·요약·order를 원래 청크 것 그대로 갖는다."""
     result = _split(small, BIG_DOC, ChunkingMode.SEMANTIC)
 
     pieces = text_chunks(result)
     assert len(pieces) >= 2
-    assert {p.heading_path for p in pieces} == {("큰 절",)}
     assert {p.title for p in pieces} == {"경계 제목 1"}
     assert {p.summary for p in pieces} == {"경계 요약 1"}
     assert len({p.order for p in pieces}) == 1
+
+
+@pytest.mark.req("REQ-RAG-2.5.1.2")
+def test_piece_path_follows_subheading(small: Settings) -> None:
+    """[REQ-RAG-2.5.1.2] 절에 걸친 청크가 하위 헤딩에서 나뉘면 뒤 조각 경로는 그 하위 헤딩이다."""
+    result = _split(small, BIG_DOC, ChunkingMode.SEMANTIC)
+
+    pieces = text_chunks(result)
+    assert len(pieces) >= 2
+    # ★ 첫 조각은 첫 본문 줄이 속한 절(큰 절), 뒤 조각은 자기 하위 헤딩(나) 경로다
+    assert pieces[0].heading_path == ("큰 절",)
+    assert pieces[-1].heading_path == ("큰 절", "나")
+    assert {p.title for p in pieces} == {"경계 제목 1"}
+
+
+@pytest.mark.req("REQ-RAG-2.5.1.2")
+def test_piece_path_unchanged_within_section(small: Settings) -> None:
+    """[REQ-RAG-2.5.1.2] 절 경계를 넘지 않는 조각은 모두 원래 청크의 헤딩 경로 그대로다."""
+    result = _split(small, PARA_DOC, ChunkingMode.RULE)
+
+    pieces = text_chunks(result)
+    assert len(pieces) >= 2
+    assert {p.heading_path for p in pieces} == {("절",)}
 
 
 @pytest.mark.req("REQ-RAG-2.5.1.3")

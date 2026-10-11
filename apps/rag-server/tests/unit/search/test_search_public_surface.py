@@ -249,4 +249,7 @@ def test_glossary_helper_signatures() -> None:
     assert [(p.name, p.annotation) for p in _params(Glossary.expand)[1:]] == [("query", str)]
     assert _returns(Glossary.expand) is Expansion
 
-    _assert_frozen_fields(Expansion, {"matched": tuple[str, ...], "terms": tuple[str, ...]})
+    _assert_frozen_fields(
+        Expansion,
+        {"matched": tuple[str, ...], "terms": tuple[str, ...], "rewritten": str},
+    )
