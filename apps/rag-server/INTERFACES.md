@@ -140,6 +140,6 @@ Qdrant 벡터:
 | 검증할 것 | 담당 단위 | 종류 | 대체 경계 |
 | :--- | :--- | :--- | :--- |
 | 자리표시 정확히 한 번·잘리지 않음, `Chunk` 필드 불변 조건, 분할 조각 겹침 없음 | chunking | unit | resource (분할 LLM) |
-| 색인 텍스트 치환, `chunk.text` 보존, `active` 전환 순서, 실패 시 이전 버전 유지, `is_latest_edition` 재계산, 같은 이름·판 다른 문서 레코드 유지 | indexing | unit | resource |
+| 색인 텍스트 치환과 머리글, `chunk.text` 보존, `active` 전환 순서, 실패 시 이전 버전 유지, `is_latest_edition` 재계산, 같은 이름·판 다른 문서 레코드 유지 | indexing | unit | resource |
 | 필드 왕복 보존, 차원 불일치 거부 | resource | integration | |
 | `active` 레코드만 반환, 결과 본문이 `chunk.text`, 연관 청크 찾기 | search | unit | resource |
