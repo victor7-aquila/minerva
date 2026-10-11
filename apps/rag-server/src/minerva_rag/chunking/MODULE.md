@@ -192,9 +192,10 @@ class Chunker:
 - 처리 계약: `text`의 토큰 수가 `RAG_CHUNK_MAX_TOKENS`를 넘는 본문 청크를 하위 헤딩 경계로 나누고, 그래도 넘는 조각은 문단 경계로, 그래도 넘으면 문장 경계로 나눈다. 앞 단계 경계로 상한을 맞출 수 있으면 뒤 단계 경계를 쓰지 않는다. 문장 하나가 상한을 넘으면 그 문장은 한 조각으로 둔다
 - 충족 기준: 하위 헤딩이 있는 큰 청크는 하위 헤딩 경계에서만 나뉘고, 하위 헤딩이 없으면 문단 경계에서 나뉘며, 문장 하나보다 긴 조각을 빼면 모든 조각이 상한 이하다
 
-**`REQ-RAG-2.5.1.2`** 조각의 헤딩 경로와 제목 유지
+**`REQ-RAG-2.5.1.2`** 조각의 제목 유지, 헤딩 경로는 조각마다
 
-- 충족 기준: 모든 분할 조각의 `heading_path`와 `title`이 원래 청크와 같다
+- 처리 계약: 분할 조각의 `title`·`summary`는 원래 청크의 것이다. `heading_path`는 조각 범위의 첫 본문 줄이 속한 절의 경로다(원래 청크가 절 경계를 넘어 하위 헤딩에서 나뉘면 조각마다 다를 수 있다)
+- 충족 기준: 모든 분할 조각의 `title`이 원래 청크와 같고, 두 절에 걸친 청크가 하위 헤딩에서 나뉘면 뒤 조각의 `heading_path`가 그 하위 헤딩의 경로다. 절 경계를 넘지 않는 조각은 원래 청크와 같은 `heading_path`다
 
 **`REQ-RAG-2.5.1.3`** 몇 번째 조각인지 표시
 
@@ -312,7 +313,7 @@ LLM 응답은 mock으로 대체하고, 실행마다 달라지는 값은 성질�
 | `REQ-RAG-2.4.3` | unit | `ASSET` 헤딩 경로 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.4.4` | unit | `ASSET` 순서가 담은 조각의 순서 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.5.1.1` | unit | 경계 단계 순서, 상한 이하, 긴 문장 하나 | resource (mock, 토큰 수 고정) | `tests/unit/chunking/` |
-| `REQ-RAG-2.5.1.2` | unit | 조각의 헤딩 경로·제목 유지 | resource (mock) | `tests/unit/chunking/` |
+| `REQ-RAG-2.5.1.2` | unit | 조각의 제목 유지, 절 경계를 넘는 조각의 헤딩 경로 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.5.1.3` | unit | 조각 번호·조각 수, 나뉘지 않은 청크는 `None` | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.5.1.4` | unit | 큰 코드 블록의 줄 경계 분할과 펜스·언어 표시 | resource (mock) | `tests/unit/chunking/` |
 | `REQ-RAG-2.5.1.5` | unit | 재분할 뒤 자리표시 잘림 없음 | resource (mock) | `tests/unit/chunking/` |
