@@ -81,7 +81,7 @@ def get_settings() -> Settings:
 
 - 입력·선행 조건: 「설정」 표의 키 이름이 곧 환경 변수 이름이다. 값은 환경 변수와 `apps/rag-server/.env`에서 읽고, 둘 다 있으면 환경 변수가 이긴다. 빈 값은 지정하지 않은 것으로 본다. 어디에도 없으면 기본값을 쓰고, 기본값이 없는 필수 키가 없으면 `get_settings()`가 실패한다
 - 처리 계약: `Settings`의 필드 이름은 키에서 `RAG_`를 뗀 소문자다(예: `RAG_QDRANT_URL` → `qdrant_url`). 상대 경로 값은 RAG Server 앱 폴더(`apps/rag-server`) 기준으로 푼다. `get_settings()`는 두 번째 호출부터 같은 객체를 돌려준다
-- 실패: 필수 키가 없거나 타입·검증이 맞지 않으면 `get_settings()`가 `RuntimeError`를 내고 기동하지 않는다. 메시지는 실패한 키 이름만 담고 값은 담지 않으며, 원래 검증 오류를 연쇄(`__cause__`·`__context__`)로 달지 않는다. `.env`가 UTF-8이 아니어서 읽지 못할 때도 같은 형태의 `RuntimeError`를 내고, 메시지에 `.env`를 UTF-8로 저장하라는 안내를 담는다
+- 실패: 필수 키가 없거나 타입·검증이 맞지 않으면 `get_settings()`가 `RuntimeError`를 내고 기동하지 않는다. 메시지는 실패한 키 이름만 담고 값은 담지 않으며, 원래 검증 오류를 연쇄(`__cause__`·`__context__`)로 달지 않는다. `.env`는 UTF-8로 읽으며 앞의 BOM은 무시한다. UTF-8이 아니어서 읽지 못할 때도 같은 형태의 `RuntimeError`를 내고, 메시지에 `.env`를 UTF-8로 저장하라는 안내를 담는다
 - 충족 기준: 「설정」 표의 각 키를 환경 변수로 주면 그 값이 `Settings`에 들어가고, 주지 않으면 표의 기본값이 들어간다
 
 ### 로그 — `REQ-RAG-11.2`
@@ -262,8 +262,8 @@ HTTP 상태는 `API.md` 「오류 코드」가 소유한다.
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-11.1.1` | unit | 키마다 환경 변수 반영과 기본값, 필드 이름, 빈 값은 미지정, 환경 변수가 `.env`보다 우선, 필수 키 누락·검증 실패·UTF-8이 아닌 `.env` 시 `RuntimeError`와 메시지·연쇄에 값 없음, 캐시 | 환경 변수 (monkeypatch) | `tests/unit/core/` |
-| `REQ-RAG-11.2.1` | unit | 금지 키 값 제거, 허용 키 유지, cp949 출력의 표현 불가 문자와 출력 실패 시 원문 비노출 | 로그 출력 캡처, cp949 스트림 | `tests/unit/core/` |
+| `REQ-RAG-11.1.1` | unit | 키마다 환경 변수 반영과 기본값, 필드 이름, 빈 값은 미지정, 환경 변수가 `.env`보다 우선, 필수 키 누락·검증 실패·UTF-8이 아닌 `.env` 시 `RuntimeError`와 메시지·연쇄에 값 없음, BOM 붙은 UTF-8 `.env` 읽기, 캐시 | 환경 변수 (monkeypatch) | `tests/unit/core/` |
+| `REQ-RAG-11.2.1` | unit | 금지 키 값 제거, 허용 키 유지, cp949·알 수 없는 인코딩 출력의 표현 불가 문자(JSON 이스케이프)와 출력 실패 시 원문 비노출 | 로그 출력 캡처, cp949 스트림 | `tests/unit/core/` |
 | `REQ-RAG-11.3.1` | unit | 모든 하위 클래스의 코드·한국어 메시지, 코드가 `API.md` 목록 또는 `JobFailureCode`에 있음, `ChunkingFailedError`의 `location` 보존, `BatchIndexingError`의 `details`와 그 밖의 클래스의 `details`가 `None` | | `tests/unit/core/` |
 | `REQ-RAG-11.3.2` | unit | 기본 메시지에 내부 표현 없음, 감싼 예외 문자열 비노출 | | `tests/unit/core/` |
 | `REQ-RAG-2.2.1` | unit | `find_placeholders`의 차례·위치·원문 일치, 형식에 맞지 않는 `[[...]]` 무시 (자리표시 읽기) | | `tests/unit/core/` |

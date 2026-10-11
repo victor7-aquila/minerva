@@ -40,8 +40,8 @@ minerva의 RAG Server 앱(Python)이다. Backend만 호출하는 내부 연산 �
 **Windows에서 주의할 점**
 
 - 주소는 `localhost` 대신 `127.0.0.1`을 쓴다. `localhost`는 IPv6(`::1`)를 먼저 시도해 Qdrant 호출마다 수백 ms 늦어진다
-- `.env`는 UTF-8로 저장한다. PowerShell 5.1의 `>`·`Set-Content` 기본값(UTF-16, cp949)으로 저장하면 기동하지 못한다
-- 서버 출력을 파일·파이프로 리디렉션할 때는 `$env:PYTHONUTF8="1"`을 준다. 한국어 Windows는 리디렉션 출력이 cp949라 일부 문자가 이스케이프돼 기록된다
+- `.env`는 UTF-8로 저장한다(BOM이 있어도 된다). PowerShell 5.1의 `>`·`Set-Content` 기본값(UTF-16, cp949)으로 저장하면 기동하지 못하고, 그 사실을 알리는 오류로 끝난다
+- 서버 출력을 파일·파이프로 리디렉션할 때는 `$env:PYTHONUTF8="1"`을 주는 것을 권장한다. 주지 않아도 로그 줄은 빠지지 않지만, 한국어 Windows의 리디렉션 출력은 cp949라 일부 문자가 `\uXXXX` 이스케이프로 기록된다
 - pytest 출력의 `Windows fatal exception: access violation` 스택 덤프는 네이티브 라이브러리 안에서 이미 처리된 예외를 faulthandler가 찍은 것이다. 테스트 결과(passed·failed)로 판정한다
 - 서버는 Ctrl+C로 정상 종료하고 종료 코드 0을 낸다. Ctrl+Break도 종료 처리는 같지만 종료 코드가 0이 아니다
 

@@ -101,7 +101,7 @@ minerva/
 │   ├── rag-server/         # Python — RAG 파이프라인
 │   └── console/            # Next.js — 관리용 웹 UI
 ├── data/                   # 앱이 쓰는 로컬 데이터 — 이미지 파일, 작업 목록, 모델 파일 (git 제외)
-├── docker-compose.yml      # 로컬 개발용 인프라 — MongoDB, Qdrant, Ollama (named volume)
+├── docker-compose.yml      # 로컬 개발용 인프라 — MongoDB, Qdrant, Ollama (named volume). Ollama는 profile이라 `docker compose --profile ollama up -d ollama`로 따로 띄운다(호스트 설치 Ollama와 같은 포트)
 ├── INTERFACES.md           # 앱 사이 계약
 ├── AGENTS.md               # AI 에이전트 작업 규칙
 ├── LICENSE
