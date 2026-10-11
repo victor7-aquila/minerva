@@ -100,14 +100,8 @@ def _rewrite(snapshot: "_Snapshot", query: str) -> str:
 
 def _occurs(word: str, query: str) -> bool:
     """정규화한 말이 정규화한 질의에 경계 규칙을 지키며 나오는지 본다."""
-    if not word:
-        return False
-    start = query.find(word)
-    while start != -1:
-        if _bounded(word, query, start):
-            return True
-        start = query.find(word, start + 1)
-    return False
+    # ★ 대표어 치환(_rewrite)과 같은 경계 판정을 쓰도록 _spans 하나로 판정한다
+    return bool(_spans(word, query))
 
 
 def _invalid(where: str) -> _InvalidGlossaryError:
