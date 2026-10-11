@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     chunking_llm: str = "qwen3:14b"  # 청킹용 Ollama 모델
     table_llm: str = "qwen3:14b"  # 표 요약용 Ollama 모델
     caption_vlm: str = "qwen3-vl:8b"  # 이미지 캡션용 Ollama 모델
-    embedding_model: str = "Qwen/Qwen3-Embedding-4B"  # sentence-transformers 임베딩 모델
+    embedding_model: str = "Qwen/Qwen3-Embedding-0.6B"  # sentence-transformers 임베딩 모델
     reranker_model: str = "BAAI/bge-reranker-v2-m3"  # sentence-transformers 재정렬 모델
 
     # 청킹·LLM 토큰 (RAG_EMBEDDING_MODEL의 토크나이저로 센다)
@@ -70,7 +70,10 @@ class Settings(BaseSettings):
     latest_edition_weight: float = 0.0  # 최신 판 가중치
 
     # 작업·종료
-    job_concurrency: int = Field(default=1, ge=1)  # 동시에 처리하는 색인 작업 수
+    # 동시에 분할하는 작업 수와 동시에 임베딩·저장하는 작업 수에 각각 적용
+    job_concurrency: int = Field(default=1, ge=1)
+    # 일괄 색인을 끝내기 전에 요약·캡션·색인 요청이 없어야 하는 시간(초)
+    batch_idle_seconds: float = Field(default=300.0, ge=0)
     notify_retries: int = Field(default=5, ge=0)  # Backend 알림 재시도 횟수
     shutdown_timeout_seconds: float = Field(default=30.0, ge=0)  # 종료 때 작업을 기다리는 시간
 

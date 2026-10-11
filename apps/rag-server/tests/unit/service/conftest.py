@@ -10,8 +10,9 @@ import httpx
 import pytest
 
 from minerva_rag.core import Settings, get_settings
+from minerva_rag.service import jobs as jobs_module
 
-from .fakes import FakeReceiver, SleepRecorder
+from .fakes import FakeReceiver, IdleClock, SleepRecorder
 
 # 필수 키 5개의 테스트용 값이다. 호스트 `*.test`는 실제로 연결되지 않는다
 REQUIRED_ENV = {
@@ -66,6 +67,18 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> SleepRecorder:
     return recorder
 
 
+@pytest.fixture(autouse=True)
+def idle_clock(monkeypatch: pytest.MonkeyPatch) -> IdleClock:
+    """일괄 색인 끝 타이머를 가짜 시계로 바꾼다. tick()을 부르기 전에는 타이머가 끝나지 않는다.
+
+    ★ 알림 재전송의 asyncio.sleep 기록 가짜(sleeps)와는 따로 바꿔 끼운다.
+    """
+    clock = IdleClock()
+    # 대체 경계가 아직 없어도 다른 테스트가 깨지지 않게 raising=False로 둔다
+    monkeypatch.setattr(jobs_module, "_idle_wait", clock, raising=False)
+    return clock
+
+
 @pytest.fixture
 def settings() -> Settings:
     """격리된 환경의 기본 설정을 돌려준다."""
@@ -74,13 +87,15 @@ def settings() -> Settings:
 
 @pytest.fixture
 def make_settings(monkeypatch: pytest.MonkeyPatch) -> Callable[..., Settings]:
-    """동시 실행 수·재시도 횟수·종료 대기 시간을 바꾼 설정을 만드는 함수를 돌려준다."""
+    """동시 실행 수·재시도 횟수·종료 대기 시간·일괄 색인 유휴 시간을 바꾼 설정을 만드는 함수를
+    돌려준다."""
 
     def _make(
         *,
         concurrency: int | None = None,
         retries: int | None = None,
         shutdown_timeout: float | None = None,
+        batch_idle: float | None = None,
     ) -> Settings:
         # ★ 설정 클래스를 직접 만들지 않고 환경 변수와 get_settings()로 얻는다
         if concurrency is not None:
@@ -89,6 +104,8 @@ def make_settings(monkeypatch: pytest.MonkeyPatch) -> Callable[..., Settings]:
             monkeypatch.setenv("RAG_NOTIFY_RETRIES", str(retries))
         if shutdown_timeout is not None:
             monkeypatch.setenv("RAG_SHUTDOWN_TIMEOUT_SECONDS", str(shutdown_timeout))
+        if batch_idle is not None:
+            monkeypatch.setenv("RAG_BATCH_IDLE_SECONDS", str(batch_idle))
         get_settings.cache_clear()
         return get_settings()
 

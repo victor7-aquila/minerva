@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mappi
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import httpx
 import pytest
@@ -30,6 +30,7 @@ from minerva_rag.indexing import EmbeddedChunks, Indexer, IndexInput
 from minerva_rag.resource import ChunkStore, LlmRole, ModelHub
 from minerva_rag.search import DocumentChunks, Searcher, SearchHit, SearchQuery
 from minerva_rag.service import IndexRequest, IndexStateView, JobStage, JobView
+from minerva_rag.service import jobs as jobs_module
 from minerva_rag.service import lifecycle_service as lifecycle_module
 from minerva_rag.service.jobs import (
     CurrentIndex,
@@ -43,6 +44,9 @@ from minerva_rag.service.lifecycle_service import LifecycleService, Services, bu
 
 from ..evaluation.fakes import hit, searchable_doc
 from ..resource.fakes import events_named, run
+
+if TYPE_CHECKING:
+    from minerva_rag.service.jobs import EmbedRunner
 
 Timeline = list[tuple[Any, ...]]
 
@@ -64,7 +68,12 @@ def go[T](coro: Coroutine[Any, Any, T], limit: float = TEST_LIMIT) -> T:
 
 
 async def settle(rounds: int = 50) -> None:
-    """이벤트 루프를 여러 번 양보해 대기 중인 작업이 갈 수 있는 데까지 가게 한다."""
+    """이벤트 루프를 여러 번 양보해 대기 중인 작업이 갈 수 있는 데까지 가게 한다.
+
+    ★ 처음에 스레드를 한 번 왕복한다. 작업 큐가 SQLite를 `asyncio.to_thread`로 읽으면 실제 시간이
+    걸려서, 양보만으로는 그 호출이 일어나기 전에 settle이 끝나 부정 단언이 공허하게 통과한다.
+    """
+    await asyncio.to_thread(lambda: None)
     for _ in range(rounds):
         await asyncio.sleep(0)
 
@@ -252,8 +261,25 @@ class _Wait:
 WAIT = _Wait()
 
 
+def _split_steps(
+    steps: tuple[JobStage | IndexOutcome | _Wait, ...],
+) -> tuple[
+    tuple[JobStage | IndexOutcome | _Wait, ...], tuple[JobStage | IndexOutcome | _Wait, ...]
+]:
+    """단계를 처음 나오는 EMBEDDING·STORING·IndexOutcome 앞에서 분할과 임베딩 몫으로 나눈다."""
+    for i, step in enumerate(steps):
+        if isinstance(step, IndexOutcome) or step in (JobStage.EMBEDDING, JobStage.STORING):
+            return steps[:i], steps[i:]
+    return steps, ()
+
+
 class ScriptedRunner:
-    """정해 둔 단계를 차례로 알리고 결과를 돌려주거나 예외를 내는 가짜 IndexRunner다."""
+    """정해 둔 단계를 차례로 알리는 가짜 IndexRunner다. 호출하면 가짜 EmbedRunner를 돌려준다.
+
+    ★ steps를 처음 나오는 EMBEDDING·STORING·IndexOutcome 앞에서 나눈다. 앞은 분할(IndexRunner)에서,
+    뒤는 임베딩(EmbedRunner)에서 실행한다. WAIT는 release가 세워질 때까지 멈춘다.
+    result가 예외면 fail_in이 가리키는 부분의 끝에서 낸다. "index"면 EmbedRunner를 돌려주지 않는다.
+    """
 
     def __init__(
         self,
@@ -261,35 +287,132 @@ class ScriptedRunner:
         result: IndexOutcome | BaseException | None = None,
         name: str = "",
         trace: list[str] | None = None,
+        fail_in: Literal["index", "embed"] = "embed",
+        timeline: Timeline | None = None,
     ) -> None:
         self.steps = steps
+        self.index_steps, self.embed_steps = _split_steps(steps)
         self.result = result if result is not None else IndexOutcome(1, False)
         self.name = name
         self.trace = trace
-        self.calls = 0
+        self.fail_in = fail_in
+        self.timeline = timeline
+        self.calls = 0  # IndexRunner 호출 수
+        self.embed_calls = 0  # EmbedRunner 호출 수
         self.reporter: ProgressReporter | None = None
-        self.started = asyncio.Event()
-        self.waiting = asyncio.Event()
+        self.started = asyncio.Event()  # 분할 시작
+        self.embed_started = asyncio.Event()  # 임베딩 시작
+        self.waiting = asyncio.Event()  # 어느 부분이든 WAIT에 섰다
+        self.index_waiting = asyncio.Event()
+        self.embed_waiting = asyncio.Event()
         self.release = asyncio.Event()
 
-    async def __call__(self, reporter: ProgressReporter) -> IndexOutcome:
+    def _mark(self, kind: str) -> None:
+        """공유 timeline이 있으면 (kind, name)을 남긴다."""
+        if self.timeline is not None:
+            self.timeline.append((kind, self.name))
+
+    async def _play(
+        self,
+        steps: tuple[JobStage | IndexOutcome | _Wait, ...],
+        reporter: ProgressReporter,
+        waiting: asyncio.Event,
+    ) -> None:
         """단계를 차례로 실행한다. WAIT에서는 release가 세워질 때까지 멈춘다."""
-        self.calls += 1
-        self.reporter = reporter
-        if self.trace is not None:
-            self.trace.append(self.name)
-        self.started.set()
-        for step in self.steps:
+        for step in steps:
             if isinstance(step, JobStage):
                 reporter.stage(step)
             elif isinstance(step, IndexOutcome):
                 await reporter.prepared(step)
             else:
+                waiting.set()
                 self.waiting.set()
                 await self.release.wait()
-        if isinstance(self.result, BaseException):
-            raise self.result
-        return self.result
+
+    async def __call__(self, reporter: ProgressReporter) -> "EmbedRunner":
+        """분할 몫을 실행하고 EmbedRunner를 돌려준다."""
+        self.calls += 1
+        self.reporter = reporter
+        if self.trace is not None:
+            self.trace.append(self.name)
+        self._mark("index_runner")
+        self.started.set()
+        try:
+            await self._play(self.index_steps, reporter, self.index_waiting)
+            if self.fail_in == "index" and isinstance(self.result, BaseException):
+                raise self.result
+        finally:
+            self._mark("index_runner_end")
+        return self._embed
+
+    async def _embed(self, reporter: ProgressReporter) -> IndexOutcome:
+        """임베딩 몫을 실행하고 결과를 돌려주거나 예외를 낸다."""
+        self.embed_calls += 1
+        self.reporter = reporter
+        if self.trace is not None:
+            self.trace.append(f"{self.name}:embed")
+        self._mark("embed_runner")
+        self.embed_started.set()
+        try:
+            await self._play(self.embed_steps, reporter, self.embed_waiting)
+            if isinstance(self.result, BaseException):
+                raise self.result
+            return self.result
+        finally:
+            self._mark("embed_runner_end")
+
+
+class IdleClock:
+    """일괄 색인 끝 타이머(`jobs._idle_wait`)를 대신하는 가짜 시계다. 실제로 기다리지 않는다.
+
+    대기마다 타이머 하나를 만든다. `tick()`이 불릴 때까지 기다리고, 취소되면 pending에서 빠진다.
+    """
+
+    @dataclass
+    class Timer:
+        """대기 하나다."""
+
+        seconds: float
+        event: asyncio.Event = field(default_factory=asyncio.Event)
+        cancelled: bool = False
+        released: bool = False
+
+    def __init__(self) -> None:
+        self.timers: list[IdleClock.Timer] = []
+
+    @property
+    def requested(self) -> list[float]:
+        """대기를 요청받은 초를 요청 순서대로 돌려준다."""
+        return [timer.seconds for timer in self.timers]
+
+    @property
+    def pending(self) -> int:
+        """지금 기다리는 타이머 수다(취소되거나 풀린 것은 뺀다)."""
+        return sum(1 for t in self.timers if not t.cancelled and not t.released)
+
+    async def __call__(self, seconds: float) -> None:
+        """tick()이 풀어 줄 때까지 기다린다."""
+        timer = IdleClock.Timer(seconds)
+        self.timers.append(timer)
+        try:
+            await timer.event.wait()
+        except asyncio.CancelledError:
+            timer.cancelled = True
+            raise
+
+    def release(self, timer: "IdleClock.Timer") -> None:
+        """타이머 하나만 푼다."""
+        timer.released = True
+        timer.event.set()
+
+    def tick(self) -> None:
+        """지금 기다리는 모든 타이머를 푼다."""
+        for timer in self.timers:
+            if not timer.cancelled and not timer.released:
+                self.release(timer)
+
+
+REAL_IDLE_WAIT = vars(jobs_module).get("_idle_wait")
 
 
 class FakeReporter:
@@ -338,23 +461,101 @@ class RecoverSpy:
         return self.result
 
 
-async def new_manager(settings: Settings, recover: RecoverFn = no_recover) -> JobManager:
-    """작업 관리자를 만들어 start까지 한다."""
-    manager = JobManager(settings)
+def make_manager(settings: Settings, hub: "FakeHub | SwitchOnlyHub | None" = None) -> JobManager:
+    """start 전의 작업 관리자를 만든다. hub가 없으면 새 FakeHub를 쓴다."""
+    return JobManager(settings, cast(ModelHub, hub if hub is not None else FakeHub()))
+
+
+async def new_manager(
+    settings: Settings,
+    recover: RecoverFn = no_recover,
+    hub: "FakeHub | SwitchOnlyHub | None" = None,
+) -> JobManager:
+    """작업 관리자를 만들어 start까지 한다. hub가 없으면 새 FakeHub를 쓴다."""
+    manager = make_manager(settings, hub)
     await manager.start(recover)
     return manager
 
 
 @asynccontextmanager
 async def running_manager(
-    settings: Settings, recover: RecoverFn = no_recover
+    settings: Settings,
+    recover: RecoverFn = no_recover,
+    hub: "FakeHub | SwitchOnlyHub | None" = None,
 ) -> AsyncIterator[JobManager]:
     """start한 작업 관리자를 주고 끝나면 stop(0)으로 백그라운드 작업을 정리한다."""
-    manager = await new_manager(settings, recover)
+    manager = await new_manager(settings, recover, hub)
     try:
         yield manager
     finally:
         await manager.stop(0)
+
+
+@asynccontextmanager
+async def manager_with_hub(
+    settings: Settings,
+    recover: RecoverFn = no_recover,
+    *,
+    timeline: Timeline | None = None,
+    hub: "FakeHub | SwitchOnlyHub | None" = None,
+) -> AsyncIterator[tuple[JobManager, "FakeHub | SwitchOnlyHub"]]:
+    """start한 작업 관리자와 그가 쓰는 hub를 함께 준다. hub의 timeline을 테스트가 읽는다."""
+    used = hub if hub is not None else FakeHub(timeline)
+    manager = await new_manager(settings, recover, used)
+    try:
+        yield manager, used
+    finally:
+        await manager.stop(0)
+
+
+@dataclass
+class CaptionHolder:
+    """caption_slot 안에 머무는 요청이다. release()를 부르면 슬롯을 나온다."""
+
+    task: asyncio.Task[None]
+    inside: asyncio.Event
+    leave: asyncio.Event
+
+    async def release(self) -> None:
+        """슬롯을 나오고 요청이 끝날 때까지 기다린다."""
+        self.leave.set()
+        await asyncio.wait_for(self.task, WAIT_LIMIT)
+
+
+async def hold_caption(manager: JobManager) -> CaptionHolder:
+    """caption_slot에 들어가 머무는 요청을 만들고 들어갈 때까지 기다린다."""
+    inside = asyncio.Event()
+    leave = asyncio.Event()
+
+    async def _hold() -> None:
+        async with manager.caption_slot():
+            inside.set()
+            await leave.wait()
+
+    task = asyncio.create_task(_hold())
+    await wait_event(inside)
+    return CaptionHolder(task, inside, leave)
+
+
+async def finish_batch(clock: IdleClock, timeline: Timeline) -> None:
+    """유휴 타이머를 재깍거려 일괄 색인을 끝내고, load_local_models가 끝날 때까지 기다린다.
+
+    ★ timeline은 작업 큐가 쓰는 FakeHub의 timeline이어야 한다. 이미 끝난 일괄 색인의 기록은 센다.
+    """
+    ended = timeline.count(("load_local", "end"))
+    await until(lambda: clock.pending > 0)
+    clock.tick()
+    await until(lambda: timeline.count(("load_local", "end")) > ended)
+
+
+async def wait_stage(manager: JobManager, job_id: str, stage: JobStage) -> None:
+    """작업의 단계가 그 값이 될 때까지 폴링한다."""
+
+    async def _poll() -> None:
+        while (await manager.get_job(job_id)).stage is not stage:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(_poll(), WAIT_LIMIT)
 
 
 async def wait_state(manager: JobManager, job_id: str, state: Any) -> None:
@@ -382,9 +583,15 @@ async def submit(
 class SpyJobManager(JobManager):
     """진짜 JobManager를 부르며 호출을 timeline에 기록하는 스파이다."""
 
-    def __init__(self, settings: Settings, timeline: Timeline | None = None) -> None:
-        super().__init__(settings)
-        self.timeline: Timeline = timeline if timeline is not None else []
+    def __init__(
+        self,
+        settings: Settings,
+        timeline: Timeline | None = None,
+        hub: "FakeHub | SwitchOnlyHub | None" = None,
+    ) -> None:
+        shared: Timeline = timeline if timeline is not None else []
+        super().__init__(settings, cast(ModelHub, hub if hub is not None else FakeHub(shared)))
+        self.timeline: Timeline = shared
         self.entered_wait = asyncio.Event()
 
     async def start(self, recover: RecoverFn) -> None:
@@ -442,6 +649,27 @@ class SpyJobManager(JobManager):
         """기록하고 부모를 부른다."""
         self.timeline.append(("forget_document", doc_id))
         await super().forget_document(doc_id)
+
+    @asynccontextmanager
+    async def caption_slot(self) -> AsyncIterator[None]:
+        """들어가기 전과 나온 뒤를 기록하고 부모의 슬롯을 쓴다."""
+        self.timeline.append(("jobs.caption_slot",))
+        try:
+            async with super().caption_slot():
+                self.timeline.append(("jobs.caption_enter",))
+                yield
+        finally:
+            self.timeline.append(("jobs.caption_exit",))
+
+    def note_index_request(self) -> None:
+        """기록하고 부모를 부른다."""
+        self.timeline.append(("jobs.note_index_request",))
+        super().note_index_request()
+
+    async def reject_during_batch(self) -> None:
+        """기록하고 부모를 부른다."""
+        self.timeline.append(("jobs.reject_during_batch",))
+        await super().reject_during_batch()
 
 
 async def started_spy(settings: Settings, timeline: Timeline) -> SpyJobManager:
@@ -739,15 +967,18 @@ class FakeIndexer:
         self.write_error: BaseException | None = None
         self.recover_result: bool | BaseException = False
         self.embedded: list[EmbeddedChunks] = []
+        self.chunking_results: list[ChunkingResult] = []  # embed가 받은 청킹 결과
 
     def checksum(self, markdown: str, assets: Mapping[str, str], chunking_mode: str) -> str:
-        """마크다운과 청킹 방식이 같으면 같은 체크섬을 돌려준다."""
+        """마크다운과 청킹 방식이 같으면 같은 체크섬을 돌려준다. 호출을 기록한다."""
+        self.timeline.append(("checksum",))
         digest = hashlib.sha256((markdown + chunking_mode).encode("utf-8")).hexdigest()
         return "sum-" + digest[:16]
 
     async def embed(self, inp: IndexInput, result: ChunkingResult) -> EmbeddedChunks:
         """호출을 기록하고 청크마다 레코드를 만든다."""
         self.timeline.append(("embed", inp))
+        self.chunking_results.append(result)
         if self.embed_error is not None:
             raise self.embed_error
         records = tuple(
@@ -854,6 +1085,13 @@ class FakeEvaluator:
         self.timeline: Timeline = timeline if timeline is not None else []
         self.result = EvaluationResult(n=1, base=default_metrics(), expanded=default_metrics())
         self.error: BaseException | None = None
+        self.validate_error: BaseException | None = None
+
+    def validate(self, case: EvaluationCase) -> None:
+        """호출을 기록한다. 오류가 정해져 있으면 낸다."""
+        self.timeline.append(("validate", case))
+        if self.validate_error is not None:
+            raise self.validate_error
 
     async def evaluate(self, case: EvaluationCase) -> EvaluationResult:
         """호출을 기록하고 정해 둔 결과를 돌려준다."""
@@ -863,11 +1101,66 @@ class FakeEvaluator:
         return self.result
 
 
-class FakeHub:
-    """ModelHub 가짜다. 호출을 기록한다."""
+class _ModelSwitch:
+    """모델 내리기·올리기 세 메서드의 가짜다. 시작과 끝을 timeline에 남긴다.
+
+    errors[이름]에 예외를 넣으면 그 호출이 예외로 끝나고, blocks[이름]에 이벤트를 넣으면 풀릴 때까지
+    멈춘다. 이름은 release_ollama·release_local·load_local이다. 끝 기록은 예외·취소에도 남는다.
+    """
 
     def __init__(self, timeline: Timeline | None = None) -> None:
         self.timeline: Timeline = timeline if timeline is not None else []
+        self.errors: dict[str, BaseException] = {}
+        self.blocks: dict[str, asyncio.Event] = {}
+
+    async def _switch(self, name: str) -> None:
+        """시작을 기록하고, 막혀 있으면 기다리고, 예외가 있으면 낸 뒤, 끝을 기록한다."""
+        self.timeline.append((name,))
+        try:
+            block = self.blocks.get(name)
+            if block is not None:
+                await block.wait()
+            error = self.errors.get(name)
+            if error is not None:
+                raise error
+        finally:
+            self.timeline.append((name, "end"))
+
+    async def release_ollama_models(self) -> None:
+        """Ollama 모델 내리기를 흉내 낸다."""
+        await self._switch("release_ollama")
+
+    async def release_local_models(self) -> None:
+        """임베딩·재정렬 모델 내리기를 흉내 낸다."""
+        await self._switch("release_local")
+
+    async def load_local_models(self) -> None:
+        """임베딩·재정렬 모델 올리기를 흉내 낸다."""
+        await self._switch("load_local")
+
+
+class SwitchOnlyHub(_ModelSwitch):
+    """모델 교체 세 메서드만 있는 엄격한 가짜다. 다른 속성에 접근하면 AssertionError다.
+
+    ★ 작업 큐가 resource에서 이 세 메서드 말고는 쓰지 않는다는 것을 테스트로 본다. 접근한 이름을
+    violations에 남긴다 — AssertionError는 작업 큐의 `except Exception`에 삼켜질 수 있어서, 테스트는
+    예외가 아니라 이 기록을 본다.
+    """
+
+    def __init__(self, timeline: Timeline | None = None) -> None:
+        super().__init__(timeline)
+        self.violations: list[str] = []
+
+    def __getattr__(self, name: str) -> Any:
+        self.__dict__.setdefault("violations", []).append(name)
+        raise AssertionError(f"작업 큐가 ModelHub.{name}을 불렀습니다")
+
+
+class FakeHub(_ModelSwitch):
+    """ModelHub 가짜다. 호출을 기록한다."""
+
+    def __init__(self, timeline: Timeline | None = None) -> None:
+        super().__init__(timeline)
         self.prepare_error: BaseException | None = None
         self.ollama = True
         self.reply = "생성된 문장"
@@ -947,6 +1240,7 @@ class FakeJobQueue:
         self.open_job_id: str | None = None
         self.current: CurrentIndex | None = None
         self.runners: list[IndexRunner] = []
+        self.reject_error: BaseException | None = None  # 지정하면 reject_during_batch가 낸다
 
     async def start(self, recover: RecoverFn) -> None:
         """호출을 기록한다. 막아 두었으면 풀릴 때까지 기다린다."""
@@ -983,6 +1277,25 @@ class FakeJobQueue:
     async def wait_running(self, doc_id: str) -> None:
         """호출을 기록한다."""
         self.timeline.append(("queue.wait_running", doc_id))
+
+    @asynccontextmanager
+    async def caption_slot(self) -> AsyncIterator[None]:
+        """들어감과 나옴을 기록한다. 안에서 예외가 나도 나옴이 남는다."""
+        self.timeline.append(("queue.caption_enter",))
+        try:
+            yield
+        finally:
+            self.timeline.append(("queue.caption_exit",))
+
+    def note_index_request(self) -> None:
+        """호출을 기록한다."""
+        self.timeline.append(("queue.note",))
+
+    async def reject_during_batch(self) -> None:
+        """호출을 기록한다. 거부 오류가 정해져 있으면 낸다."""
+        self.timeline.append(("queue.reject",))
+        if self.reject_error is not None:
+            raise self.reject_error
 
 
 class ReadyStub:
@@ -1124,10 +1437,11 @@ def wire(
 
     def make_jobs(*args: Any, **kwargs: Any) -> JobManager:
         job_settings: Settings = args[0] if args else kwargs["settings"]
+        job_hub: FakeHub = args[1] if len(args) > 1 else kwargs["model_hub"]
         manager = (
-            SpyJobManager(job_settings, parts.timeline)
+            SpyJobManager(job_settings, parts.timeline, job_hub)
             if jobs_cls is SpyJobManager
-            else jobs_cls(job_settings)
+            else jobs_cls(job_settings, cast(ModelHub, job_hub))
         )
         parts.managers.append(manager)
         return manager

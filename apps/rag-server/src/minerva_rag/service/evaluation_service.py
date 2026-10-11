@@ -4,6 +4,7 @@ from minerva_rag.core import get_logger
 from minerva_rag.evaluation import EvaluationCase, EvaluationResult, Evaluator
 
 from ._guard import Readiness, guarded
+from .jobs import JobQueue
 
 log = get_logger(__name__)
 
@@ -11,9 +12,10 @@ log = get_logger(__name__)
 class EvaluationService:
     """평가 요청을 Evaluator에 넘기고 결과를 그대로 돌려준다."""
 
-    def __init__(self, evaluator: Evaluator, readiness: Readiness) -> None:
-        """평가기와 준비 상태를 받는다. I/O는 하지 않는다."""
+    def __init__(self, evaluator: Evaluator, jobs: JobQueue, readiness: Readiness) -> None:
+        """평가기, 작업 큐, 준비 상태를 받는다. I/O는 하지 않는다."""
         self._evaluator = evaluator
+        self._jobs = jobs
         self._readiness = readiness
 
     async def evaluate(self, case: EvaluationCase) -> EvaluationResult:
@@ -27,4 +29,7 @@ class EvaluationService:
             top_n=case.top_n,
         )
         with guarded(log, "evaluation.evaluate", self._readiness):
+            # ★ 순서를 바꾸지 않는다. 일괄 색인 중이라도 공백뿐인 정답 구간은 400이어야 한다
+            self._evaluator.validate(case)
+            await self._jobs.reject_during_batch()
             return await self._evaluator.evaluate(case)

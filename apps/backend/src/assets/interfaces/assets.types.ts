@@ -15,17 +15,22 @@ export interface PreparedVersion {
   assetCount: number;
 }
 
-/** 요약·캡션 생성 결과다. generated는 이번 실행에서 저장한 수(임시 설명 포함), temporary는 그중 임시 설명 수다. */
+/** 요약·캡션을 만들 표·이미지의 종류다. */
+export type HintKind = 'table' | 'image';
+
+/**
+ * 요약·캡션 생성 결과다. generated는 이번 실행에서 저장한 수(임시 설명 포함), temporary는 그중 임시 설명 수,
+ * remaining은 호출이 끝난 때 그 버전에 남은 대기(pending) 수다.
+ */
 export interface HintRunResult {
   generated: number;
   temporary: number;
   stopped: boolean;
+  remaining: number;
 }
 
-/** 요약·캡션 생성 중 진행 여부와 기록에 쓰는 문서 정보다. */
+/** 요약·캡션 생성 중 진행 여부를 묻는다. */
 export interface HintContext {
-  name: string;
-  editionLabel: string | null;
   shouldContinue(): Promise<boolean>;
 }
 
@@ -35,7 +40,9 @@ export interface AssetViewData {
   kind: AssetKind;
   tableMarkdown: string | null;
   imageUrl: string | null;
-  text: string;
+  /** ★ 요약·캡션이 아직 대기(pending)면 null이다 */
+  text: string | null;
+  /** ★ 대기 중이면 false다 */
   isTemporary: boolean;
 }
 

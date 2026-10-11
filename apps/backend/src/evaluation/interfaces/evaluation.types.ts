@@ -135,6 +135,7 @@ export const EVALUATION_MESSAGES = {
   vectorMismatch: '저장된 벡터와 임베딩 모델의 차원이 달라 평가하지 못했습니다',
   ragRejected: 'RAG Server가 평가 요청을 받지 않았습니다',
   ragFailed: 'RAG Server가 평가 중 오류를 냈습니다',
+  batchIndexing: 'RAG Server가 일괄 색인 중이라 평가하지 못했습니다',
   unexpected: '평가 중 예상하지 못한 오류가 발생했습니다',
   restarted: '서버가 다시 시작해 평가하지 못했습니다',
   editionRequired: '판 정보가 없는 문서는 판 지정 골든셋의 정답 문서로 고를 수 없습니다',

@@ -1,6 +1,6 @@
 # Third-Party Notices — minerva-rag
 
-이 앱의 배포물에 들어가는 제3자 패키지(런타임 의존성)의 저작권 표시와 라이선스다. 개발 의존성은 배포물에 들어가지 않아 싣지 않는다.
+이 앱의 배포물에 들어가는 제3자 패키지(런타임 의존성)의 저작권 표시와 라이선스다. 개발 의존성은 배포물에 들어가지 않아 싣지 않는다. GPU 배포용 선택 설치에서만 들어오는 패키지는 맨 끝 「GPU 배포용 선택 설치」 절에 따로 적는다.
 
 이 파일은 `scripts/third_party_notices.py`로 만든다. 직접 고치지 않고 의존성이 바뀌면 다시 만든다.
 
@@ -8583,4 +8583,110 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+```
+
+## GPU 배포용 선택 설치
+
+`uv sync --group gpu --no-group cpu`로 설치할 때만 들어오는 패키지다. 기본 설치(`uv sync`)에는 들어오지 않아 위 절과 요약에 세지 않는다. CUDA 런타임(NVIDIA 독점 라이선스)은 이 선택 설치에만 허용한 사용자 승인 예외다 (저장소 루트 `AGENTS.md` 「라이선스」).
+
+Windows에서는 torch만 CUDA 휠로 바뀌고 CUDA 라이브러리는 휠 안에 담겨 온다. Linux에서는 torch가 아래 cuda-*·nvidia-*·triton 패키지를 끌어온다.
+
+### NVIDIA 라이선스 전문
+
+| 라이선스 | 전문 |
+| :--- | :--- |
+| NVIDIA CUDA Toolkit EULA | https://docs.nvidia.com/cuda/eula/index.html |
+| NVIDIA cuDNN SLA | https://docs.nvidia.com/deeplearning/cudnn/latest/reference/eula.html |
+| NVIDIA cuSPARSELt SLA | https://docs.nvidia.com/cuda/cusparselt/license.html |
+
+### NVIDIA 독점 라이선스 패키지
+
+- `cuda-toolkit@13.0.3.0` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (메타데이터만 있고 라이선스 표기 없음) — Linux 전용. 코드 없이 아래 nvidia-* CUDA 패키지만 끌어오는 메타패키지
+- `nvidia-cublas@13.1.1.3` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cuda-cupti@13.0.85` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cuda-nvrtc@13.0.88` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cuda-runtime@13.0.96` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cudnn-cu13@9.24.0.43` — NVIDIA cuDNN SLA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cufft@12.0.0.61` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cufile@1.15.1.6` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-curand@10.4.0.35` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cusolver@12.0.4.66` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cusparse@12.6.3.3` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-cusparselt-cu13@0.8.1` — NVIDIA cuSPARSELt SLA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-nvjitlink@13.4.92` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+- `nvidia-nvshmem-cu13@3.4.5` — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+
+### 허용 라이선스 패키지
+
+전문을 따로 싣지 않은 패키지는 위 같은 이름의 라이선스 절 전문을 따른다.
+
+- `cuda-bindings@13.4.3` — Apache-2.0 — Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. — Linux 전용
+- `cuda-pathfinder@1.8.3` — Apache-2.0 — Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. — Linux 전용
+- `nvidia-nccl-cu13@2.30.7` — BSD-3-Clause — Copyright (c) 2015-2020, NVIDIA CORPORATION. All rights reserved. — Linux 전용. PyPI 표기는 LicenseRef-NVIDIA-Proprietary이나 휠의 라이선스 파일은 BSD-3-Clause
+- `nvidia-nvtx@13.0.85` — Apache-2.0 — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음) — Linux 전용. PyPI 클래시파이어는 Other/Proprietary이나 휠의 라이선스 파일은 Apache-2.0
+- `torch@2.14.1+cu130` — Apache-2.0 AND Apache-2.0 WITH LLVM-exception AND BSD-2-Clause AND BSD-3-Clause AND BSL-1.0 AND MIT — 기본 설치의 torch와 같은 라이선스 파일·저작권 표시 — Windows 휠은 CUDA 라이브러리를 휠 안에 담는다 (아래 「휠에 포함된 라이브러리」)
+- `triton@3.8.0` — MIT — Copyright 2018-2020 Philippe Tillet / Copyright 2020-2022 OpenAI — Linux 전용. NVIDIA 도구를 휠 안에 담는다 (아래 「휠에 포함된 라이브러리」)
+
+#### `nvidia-nccl-cu13@2.30.7` 라이선스 전문
+
+```text
+Copyright (c) 2015-2020, NVIDIA CORPORATION. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+ * Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+ * Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+ * Neither the name of NVIDIA CORPORATION, Lawrence Berkeley National
+   Laboratory, the U.S. Department of Energy, nor the names of their
+   contributors may be used to endorse or promote products derived
+   from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The U.S. Department of Energy funded the development of this software
+under subcontract 7078610 with Lawrence Berkeley National Laboratory.
+
+This code also includes files from the NVIDIA Tools Extension SDK project.
+See https://github.com/NVIDIA/NVTX for more information and license details.
+```
+
+### 휠에 포함된 라이브러리
+
+- `torch@2.14.1+cu130 (Windows)` — cudart64_13, cublas64_13, cublasLt64_13, cufft64_12, cufftw64_12, curand64_10, cusolver64_12, cusolverMg64_12, cusparse64_12, nvrtc64_130_0, nvrtc-builtins64_130, nvJitLink_130_0, cupti64_2025.3.0, nvperf_host, nvToolsExt64_1 (.dll) — NVIDIA CUDA Toolkit EULA — Copyright © NVIDIA Corporation 1993 - 2025
+- `torch@2.14.1+cu130 (Windows)` — cudnn64_9 외 cudnn_*64_9 (.dll) — NVIDIA cuDNN SLA — Copyright (c) 2014-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+- `torch@2.14.1+cu130 (Windows)` — zlibwapi.dll (zlib 1.2.3) — Zlib — (C) 1995-2003 Jean-loup Gailly & Mark Adler
+- `triton@3.8.0 (Linux)` — triton/backends/nvidia의 ptxas, ptxas-blackwell, cuobjdump, nvdisasm, libdevice.10.bc, cuda.h — NVIDIA CUDA Toolkit EULA — NVIDIA Corporation (라이선스 파일에 저작권 표시 없음)
+
+#### Zlib 전문
+
+```text
+This software is provided 'as-is', without any express or implied
+warranty.  In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
 ```

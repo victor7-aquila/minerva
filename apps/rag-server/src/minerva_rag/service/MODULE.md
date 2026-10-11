@@ -1,6 +1,6 @@
 # service 모듈 명세 (REQ-RAG-10)
 
-api 아래에서 요청마다 처리 순서를 정하고 기능 단위를 엮는 계층이다. 단위를 조립(의존 주입)하고 앱 기동·종료를 맡는 유일한 곳이며, 서비스 하나가 파일 하나다. 서비스 파일들이 쓰는 헬퍼로 색인 작업 관리(`REQ-RAG-10.8`)와 요약·캡션 생성(`REQ-RAG-10.2`)도 맡는다. 작업 관리 헬퍼는 색인 요청을 작업으로 접수해 비동기로 실행하고, 작업 상태와 문서 색인 상태를 SQLite 파일에 보관하며, 상태가 바뀔 때마다 Backend에 알린다. 요약·캡션 생성 헬퍼는 Backend가 보낸 표(Markdown)의 요약과 이미지의 캡션을 resource로 만들어 돌려주며, 결과를 저장하지 않는다. 폴더는 `apps/rag-server/src/minerva_rag/service`다.
+api 아래에서 요청마다 처리 순서를 정하고 기능 단위를 엮는 계층이다. 단위를 조립(의존 주입)하고 앱 기동·종료를 맡는 유일한 곳이며, 서비스 하나가 파일 하나다. 서비스 파일들이 쓰는 헬퍼로 색인 작업 관리(`REQ-RAG-10.8`)와 요약·캡션 생성(`REQ-RAG-10.2`)도 맡는다. 작업 관리 헬퍼는 색인 요청을 작업으로 접수해 비동기로 실행하고, 작업 상태와 문서 색인 상태를 SQLite 파일에 보관하며, 상태가 바뀔 때마다 Backend에 알린다. 또 예약 색인 동안을 일괄 색인으로 다뤄 분할(LLM)과 임베딩을 단계로 나누고, 단계마다 resource로 모델을 GPU 메모리에서 내리고 올리며, 일괄 색인 중 검색·평가를 거부하게 한다. 요약·캡션 생성 헬퍼는 Backend가 보낸 표(Markdown)의 요약과 이미지의 캡션을 resource로 만들어 돌려주며, 결과를 저장하지 않는다. 폴더는 `apps/rag-server/src/minerva_rag/service`다.
 
 ## 요약
 
@@ -14,6 +14,9 @@ api 아래에서 요청마다 처리 순서를 정하고 기능 단위를 엮는
 - 알림 순번은 문서마다 SQLite에 저장해 서버가 다시 시작해도 줄지 않는다. 순번이 다시 1부터 시작하면 Backend가 새 알림을 오래된 것으로 버린다 (`REQ-RAG-10.8.7.4`, 루트 `IF-2`)
 - 문서의 "현재 검색되는 버전"은 그 문서에서 가장 최근에 완료한 작업의 버전이고, 문서가 삭제되면 비운다. 실패한 작업은 이 값을 바꾸지 않는다. 새 버전을 활성화한 뒤 완료를 기록하기 전에 멈춰도, 다시 시작할 때 `recover`로 확인해 완료로 기록하므로 Qdrant와 어긋나지 않는다. 단, 활성화 뒤 이전 레코드 삭제·최신판 재계산이 실패한 작업은 실패로 기록되고, 그 문서의 다음 버전 교체가 끝날 때까지 Qdrant에는 이전·새 버전이 함께 검색된다(`IF-RAG-1` `active`, indexing `MODULE.md` 「실패 모드」) (`REQ-RAG-10.8.6.1`, `REQ-RAG-10.8.5.3`)
 - 만든 요약·캡션을 저장하지 않고, 만들지 못하면 빈 문자열을 돌려주지 않고 실패를 낸다. Backend가 실패를 보고 임시 설명으로 채운다 (`REQ-RAG-10.2.2.2`, `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.2`, `REQ-RAG-10.2.3.3`)
+- 임베딩 단계와 분할·요약·캡션 생성은 겹치지 않고, 단계를 바꾸기 전에 앞 단계의 모델을 GPU 메모리에서 내린다. 어긋나면 분할 LLM과 임베딩 모델이 GPU 메모리를 함께 써 메모리가 모자란다 (`REQ-RAG-10.8.8`, `ARCHITECT.md` 「설계 결정」)
+- 일괄 색인 중 검색·평가는 search·evaluation을 부르지 않고 `BatchIndexingError`(남은 작업 수)를 낸다. 모델을 쓰지 않는 문서 청크 조회, 작업·문서 색인 상태 조회, 문서 삭제, 이름·판 정보 변경은 막지 않는다 (`REQ-RAG-10.4.3`, `REQ-RAG-10.7.2`)
+- 분할을 마치고 임베딩을 기다리는 작업의 청크는 프로세스 메모리에만 둔다. 서버가 다시 시작하면 사라지고 그 작업은 서버 재시작 실패가 된다 (`ARCHITECT.md` 「데이터·상태 소유」, `REQ-RAG-10.8.5.2`)
 
 **기능 그룹**
 
@@ -22,19 +25,21 @@ api 아래에서 요청마다 처리 순서를 정하고 기능 단위를 엮는
 | `REQ-RAG-10.1` | 수명주기 서비스 | 단위를 조립하고, 기동·준비 상태·종료·상태 확인을 맡는다 |
 | `REQ-RAG-10.2` | 요약·캡션 서비스 | 요약·캡션 요청을 작업 없이 바로 처리한다 |
 | `REQ-RAG-10.3` | 색인 서비스 | 색인 요청을 검증하고 중복을 확인한 뒤 작업으로 접수하며, 작업의 처리 순서를 정한다. 작업·문서 색인 상태 조회도 받는다 |
-| `REQ-RAG-10.4` | 검색 서비스 | 검색과 문서 청크 조회를 search에 넘긴다 |
+| `REQ-RAG-10.4` | 검색 서비스 | 검색과 문서 청크 조회를 search에 넘기고, 일괄 색인 중 검색을 거부한다 |
 | `REQ-RAG-10.5` | 문서 삭제 서비스 | 작업과 청크를 정해진 순서로 정리한다 |
 | `REQ-RAG-10.6` | 이름·판 정보 서비스 | 색인 중인 작업이 끝난 뒤 이름·판 정보를 바꾼다 |
-| `REQ-RAG-10.7` | 평가 서비스 | 평가 요청을 작업 없이 바로 처리한다 |
+| `REQ-RAG-10.7` | 평가 서비스 | 평가 요청을 작업 없이 바로 처리하고, 일괄 색인 중 평가를 거부한다 |
 | `REQ-RAG-10.8.1` | 작업 접수 | 작업을 색인 대기로 기록하고 ID를 곧바로 돌려준다 |
 | `REQ-RAG-10.8.2` | 작업 상태 | 작업의 상태·단계·실패 사유·결과를 기록하고 조회하게 한다 |
-| `REQ-RAG-10.8.3` | 처리 순서 | 동시 실행 상한, 접수 순서, 문서별 순차 실행, 대체됨을 지킨다 |
+| `REQ-RAG-10.8.3` | 처리 순서 | 분할과 임베딩·저장 각각의 동시 실행 상한, 접수 순서, 문서별 순차 실행, 대체됨을 지킨다 |
 | `REQ-RAG-10.8.4` | 실패와 재색인 | 실패한 작업을 다시 실행하지 않고, 새 요청은 새 작업으로 받는다 |
 | `REQ-RAG-10.8.5` | 중단과 복구 | 다시 시작해도 작업을 조회하게 하고, 끝나지 않은 작업을 결과가 검색에 쓰이는지에 따라 완료나 실패로 끝맺는다 |
 | `REQ-RAG-10.8.6` | 문서 색인 상태 | 문서마다 현재 검색되는 버전과 최신 작업 상태를 돌려준다 |
 | `REQ-RAG-10.8.7` | 상태 알림 | 상태가 바뀔 때마다 순번을 붙여 Backend에 알리고, 실패하면 다시 보낸다 |
+| `REQ-RAG-10.8.8` | 일괄 처리 단계 | 일괄 색인의 시작·끝과 임베딩 단계를 정하고, 단계마다 resource로 모델을 내리고 올린다 |
 | `REQ-RAG-10.2.2` | 표 요약 | 표 하나의 내용을 요약한 문장을 만든다 |
 | `REQ-RAG-10.2.3` | 이미지 캡션 | 이미지 하나를 설명하는 캡션을 만든다 |
+| `REQ-RAG-10.2.4` | 임베딩 단계 중 요청 | 임베딩 단계 중에 받은 요약·캡션 요청을 그 단계가 끝날 때까지 미룬다 |
 
 **비범위**
 
@@ -58,7 +63,7 @@ src/minerva_rag/service/
 ├── delete_service.py        # REQ-RAG-10.5 문서 삭제
 ├── metadata_service.py      # REQ-RAG-10.6 이름·판 정보
 ├── evaluation_service.py    # REQ-RAG-10.7 평가
-├── jobs.py                  # REQ-RAG-10.8 작업 관리 (헬퍼)
+├── jobs.py                  # REQ-RAG-10.8 작업 관리, 일괄 처리 단계 (헬퍼)
 ├── captioner.py             # REQ-RAG-10.2.2, REQ-RAG-10.2.3 요약·캡션 생성 (헬퍼)
 ├── _guard.py                # 준비 상태 확인과 서비스 메서드 예외 로그 (헬퍼, 내보내지 않음)
 ├── __init__.py              # 공개 표면 내보내기
@@ -81,8 +86,9 @@ flowchart LR
         DB[("작업 목록 SQLite")]
     end
     Services --> Queue
-    Queue -->|IndexRunner 실행| Services
+    Queue -->|IndexRunner·EmbedRunner 실행| Services
     Queue --> DB
+    Queue -->|단계마다 모델 내리기·올리기| Resource
     Services --> Captioner
     Captioner --> Resource["resource"]
     Services -->|조립·기동·상태 확인| Resource
@@ -93,7 +99,7 @@ flowchart LR
     Queue -.->|작업 상태 알림| Backend[/"Backend"/]
 ```
 
-`IndexRunner` 실행은 색인 서비스가 넘긴 콜백을 부르는 것이며 import가 아니다. 점선은 프로세스 밖 HTTP다. core 의존은 생략했다.
+`IndexRunner`·`EmbedRunner` 실행은 색인 서비스가 넘긴 콜백을 부르는 것이며 import가 아니다. 점선은 프로세스 밖 HTTP다. core 의존은 생략했다.
 
 ## 의존성과 공개 표면
 
@@ -104,13 +110,13 @@ flowchart LR
 | chunking | import | `Chunker.split`, `ChunkingMode` | chunking `MODULE.md` | `REQ-RAG-10.3.2` |
 | indexing | import | `Indexer`, `decide_index`, `IndexInput` | indexing `MODULE.md` | `REQ-RAG-10.3`, `REQ-RAG-10.5`, `REQ-RAG-10.6`, `REQ-RAG-10.8.5.3` |
 | search | import | `Searcher.search`, `Searcher.document_chunks`, `Searcher.load_glossary` | search `MODULE.md` | `REQ-RAG-10.4`, `REQ-RAG-10.1.1` |
-| evaluation | import | `Evaluator.evaluate` | evaluation `MODULE.md` | `REQ-RAG-10.7` |
-| resource | import (조립·기동·종료·상태 확인, 요약·캡션 생성만) | `ModelHub.prepare`·`close`·`ollama_available`·`embedding_dimension`·`generate`, `LlmRole`, `ChunkStore.connect`·`close`·`ping` | resource `MODULE.md` | `REQ-RAG-10.1`, `REQ-RAG-10.2.2.1`, `REQ-RAG-10.2.3.1` |
+| evaluation | import | `Evaluator.validate`, `Evaluator.evaluate` | evaluation `MODULE.md` | `REQ-RAG-10.7` |
+| resource | import (조립·기동·종료·상태 확인, 요약·캡션 생성, 모델 내리기·올리기만) | `ModelHub.prepare`·`close`·`ollama_available`·`embedding_dimension`·`generate`·`release_ollama_models`·`release_local_models`·`load_local_models`, `LlmRole`, `ChunkStore.connect`·`close`·`ping` | resource `MODULE.md` | `REQ-RAG-10.1`, `REQ-RAG-10.2.2.1`, `REQ-RAG-10.2.3.1`, `REQ-RAG-10.8.8` |
 | Backend | HTTP `POST` | 작업 상태 알림 | 루트 `IF-2` | `REQ-RAG-10.8.7` |
 | SQLite 파일 | 파일 | 「데이터 계약」 | 이 문서 | `REQ-RAG-10.8.5.1` |
 | core | import | `Settings`, `get_settings`, `get_logger`, 오류 클래스, `JobFailureCode`, `FailureLocation`, `find_placeholders`, `Edition` | core `MODULE.md` | `REQ-RAG-10`, `REQ-RAG-10.8`, `REQ-RAG-10.2` |
 
-**금지 의존** — api를 import하지 않는다. resource는 조립·기동·종료·상태 확인과 요약·캡션 생성 말고 직접 부르지 않는다. Backend에는 작업 상태 알림만 보낸다(`ARCHITECT.md` 「의존 규칙」).
+**금지 의존** — api를 import하지 않는다. resource는 조립·기동·종료·상태 확인, 요약·캡션 생성, 일괄 색인 단계마다 모델 내리기·올리기 말고 직접 부르지 않는다. Backend에는 작업 상태 알림만 보낸다(`ARCHITECT.md` 「의존 규칙」).
 
 ### 공개 표면
 
@@ -154,7 +160,7 @@ api는 service와 core만 import할 수 있으므로(`ARCHITECT.md` 「의존 �
 | `doc_id`, `version`, `checksum` | 문자열 | 필수 | 접수 때 받은 값 그대로 |
 | `accepted_order` | 정수 | 필수 | 접수할 때마다 1씩 커진다. 접수 순서의 기준 |
 | `state` | `JobState` 값 | 필수 | `REQ-RAG-10.8.2.1`의 전이만 따른다 |
-| `stage` | `JobStage` 값 | 조건부 | `RUNNING`일 때만 값이 있다 |
+| `stage` | `JobStage` 값 | 조건부 | `RUNNING`일 때만 값이 있다. `EMBEDDING_PENDING`이어도 그 작업의 청크는 여기에 저장하지 않는다 |
 | `failure_code`, `failure_message` | 문자열 | 조건부 | `FAILED`일 때만 값이 있다 |
 | `failure_heading_path`, `failure_placeholder_id` | 문자열 | 선택 | `FAILED`이고 위치를 알 때만 |
 | `chunk_count`, `fallback_used` | 정수, 불리언 | 조건부 | `SUCCEEDED`일 때만 값이 있다 |
@@ -179,6 +185,7 @@ api는 service와 core만 import할 수 있으므로(`ARCHITECT.md` 「의존 �
 ### 변환·저장 경계
 
 - **색인 요청 → 작업** (`IndexRequest` → `IndexInput`·`IndexRunner`) — 보존: `doc_id`, `version`, `markdown`, `assets`, `name`, `edition`. 파생: 체크섬(indexing), `chunking_mode`는 `ChunkingMode` 값. 실패 시: 검증 실패면 작업을 만들지 않는다
+- **분할 결과 → 임베딩 대기** (`ChunkingResult`·`IndexInput` → `EmbedRunner`) — 보존: 분할 결과와 색인 입력 전부를 `EmbedRunner`가 프로세스 메모리에 쥔다. 제외: SQLite에는 단계(`EMBEDDING_PENDING`)만 기록하고 청크를 쓰지 않는다. 다시 시작하면 사라지며, 그 작업은 레코드를 하나도 저장하지 않았으므로 `recover`가 거짓이 되어 `SERVER_RESTARTED`로 실패한다(`ARCHITECT.md` 「데이터·상태 소유」, `REQ-RAG-10.8.5.2`)
 - **작업 상태 변경 → 알림 본문** (루트 `IF-2`) — 상태를 바꾸는 같은 트랜잭션에서 `last_sequence`를 1 올려 그 알림의 `sequence`로 쓴다. `index_state`는 그 트랜잭션이 끝난 시점의 `IndexStateView`다. 본문의 `index_state`에는 그 값에서 `doc_id`를 뺀 네 필드(`searchable_version`, `latest_job_id`, `latest_job_state`, `latest_job_stage`)만 담고, 본문 최상위에도 루트 `IF-2` 표의 필드만 담는다. 표에 없는 필드가 있으면 Backend가 `400`으로 거부한다. 실패 시: 트랜잭션 전체를 되돌리고 알림을 보내지 않는다
 
 ## 기능 그룹별 요구사항
@@ -197,18 +204,20 @@ class LifecycleService:
     def __init__(self, model_hub: ModelHub, chunk_store: ChunkStore, searcher: Searcher,
                  indexer: Indexer, jobs: JobQueue, settings: Settings) -> None: ...
 class CaptionService:
-    def __init__(self, captioner: Captioner, readiness: Readiness) -> None: ...
+    def __init__(self, captioner: Captioner, jobs: JobQueue, readiness: Readiness) -> None: ...
 class IndexService:
     def __init__(self, chunker: Chunker, indexer: Indexer, jobs: JobManager, readiness: Readiness) -> None: ...
 class SearchService:
-    def __init__(self, searcher: Searcher, readiness: Readiness) -> None: ...
+    def __init__(self, searcher: Searcher, jobs: JobQueue, readiness: Readiness) -> None: ...
 class DeleteService:
     def __init__(self, indexer: Indexer, jobs: JobManager, readiness: Readiness) -> None: ...
 class MetadataService:
     def __init__(self, indexer: Indexer, jobs: JobQueue, readiness: Readiness) -> None: ...
 class EvaluationService:
-    def __init__(self, evaluator: Evaluator, readiness: Readiness) -> None: ...
+    def __init__(self, evaluator: Evaluator, jobs: JobQueue, readiness: Readiness) -> None: ...
 ```
+
+`build_services`는 모든 서비스에 같은 `JobManager`를 넘긴다. 일괄 색인 상태가 그 인스턴스 하나의 메모리에 있기 때문이다(「일괄 처리 단계 — `REQ-RAG-10.8.8`」).
 
 `build_services`는 같은 `LifecycleService`를 모든 서비스의 `readiness`로 넘긴다. `Readiness`는 모듈 밖으로 내보내지 않는다.
 
@@ -264,8 +273,8 @@ class LifecycleService:
 
 **`REQ-RAG-10.1.3`** 종료 때 작업 기다리기
 
-- 처리 계약: `shutdown`은 `JobQueue.stop(RAG_SHUTDOWN_TIMEOUT_SECONDS)`을 부른 뒤 resource의 연결과 모델을 닫는다. `stop(timeout_seconds)`는 새 접수를 막고 `RUNNING` 작업을 `timeout_seconds`까지 기다린다. 그 안에 끝난 작업은 결과를 기록하고, 끝나지 않은 작업은 실행을 취소해 `RUNNING`으로 남긴다. 남긴 작업은 다음 `start`가 끝맺는다(`REQ-RAG-10.8.5.2`, `REQ-RAG-10.8.5.3`). `shutdown`은 `ready`를 바꾸지 않는다. 종료 중 색인 요청이 `ServerNotReadyError`가 아니라 `ShuttingDownError`를 받게 하기 위해서다
-- 충족 기준: `shutdown`이 설정한 시간으로 `stop`을 부르고, 그다음 색인 요청은 `ShuttingDownError`를 낸다. `stop`은 `RUNNING` 작업을 `timeout_seconds`까지 기다려, 그 안에 끝난 작업은 그 결과(`SUCCEEDED`·`FAILED`)로 기록하고, 끝나지 않은 작업은 취소해 `RUNNING`으로 남기며 그 작업은 다음 `start`에서 끝맺어진다
+- 처리 계약: `shutdown`은 `JobQueue.stop(RAG_SHUTDOWN_TIMEOUT_SECONDS)`을 부른 뒤 resource의 연결과 모델을 닫는다. `stop(timeout_seconds)`는 새 접수를 막고 `RUNNING` 작업을 `timeout_seconds`까지 기다린다. `stop` 뒤에는 `QUEUED` 작업의 분할을 시작하지 않는다. `EMBEDDING_PENDING` 작업도 `RUNNING`이므로 기다리는 대상이며, 기다리는 동안 「일괄 처리 단계 — `REQ-RAG-10.8.8`」의 규칙대로 임베딩 단계에서 처리될 수 있다. 그 안에 끝난 작업은 결과를 기록하고, 끝나지 않은 작업은 실행을 취소해 `RUNNING`으로 남긴다. 남긴 작업은 다음 `start`가 끝맺는다(`REQ-RAG-10.8.5.2`, `REQ-RAG-10.8.5.3`). `shutdown`은 `ready`를 바꾸지 않는다. 종료 중 색인 요청이 `ServerNotReadyError`가 아니라 `ShuttingDownError`를 받게 하기 위해서다
+- 충족 기준: `shutdown`이 설정한 시간으로 `stop`을 부르고, 그다음 색인 요청은 `ShuttingDownError`를 낸다. `stop`은 `RUNNING` 작업을 `timeout_seconds`까지 기다려, 그 안에 끝난 작업은 그 결과(`SUCCEEDED`·`FAILED`)로 기록하고, 끝나지 않은 작업은 취소해 `RUNNING`으로 남기며 그 작업은 다음 `start`에서 끝맺어진다. `stop` 뒤 `QUEUED` 작업의 `IndexRunner`는 불리지 않고, 분할 중인 작업이 끝나면 `EMBEDDING_PENDING` 작업의 `EmbedRunner`가 불린다
 
 `health`는 `ChunkStore.ping`과 `ModelHub.ollama_available`의 결과를 돌려주며 오류를 내지 않는다(`REQ-RAG-9.2.1`, api `MODULE.md`).
 
@@ -279,8 +288,15 @@ class CaptionService:
 
 **`REQ-RAG-10.2.1`** 작업 없이 응답으로
 
-- 처리 계약: `Captioner`를 불러 결과를 그대로 돌려준다. 작업 큐를 부르지 않는다
+- 처리 계약: `JobQueue.caption_slot()` 안에서 `Captioner`를 불러 결과를 그대로 돌려준다. 작업을 접수하지 않는다. `caption_slot`의 계약은 「일괄 처리 단계 — `REQ-RAG-10.8.8`」에 있다
 - 충족 기준: 두 메서드가 `Captioner`의 결과를 돌려주고, 작업 목록에 작업이 생기지 않으며 알림이 나가지 않는다
+
+### 임베딩 단계 중 요청 — `REQ-RAG-10.2.4`
+
+**`REQ-RAG-10.2.4.1`** 임베딩 단계가 끝난 뒤 처리
+
+- 처리 계약: `caption_slot()`에 들어갈 때 임베딩 단계 중이면 그 단계가 끝날 때까지 기다린 뒤 들어간다. 그 뒤의 처리와 응답은 `REQ-RAG-10.2.1`과 같다
+- 충족 기준: 임베딩 단계 중에 `summarize_table`·`caption_image`를 부르면, 그 단계의 마지막 `EmbedRunner`가 끝나기 전에는 `Captioner`가 불리지 않고, 끝난 뒤에 불려 결과를 돌려준다
 
 ### 색인 서비스 — `REQ-RAG-10.3`
 
@@ -297,24 +313,24 @@ class IndexService:
 **`REQ-RAG-10.3.1`** 체크섬을 먼저 확인하고 필요할 때만 접수
 
 - 입력·선행 조건: `markdown`의 모든 자리표시 ID가 `assets`의 키에 있어야 한다
-- 처리 계약: 체크섬을 만들고, `find_open`과 `current_index`로 얻은 값으로 `decide_index`를 부른다. `submit`이면 `IndexRunner`를 만들어 `JobQueue.submit`하고 `queued`를, `join`이면 `joined`를, `reuse`면 `reused`를 돌려준다. `joined`·`reused`에서는 작업을 만들지 않는다
+- 처리 계약: 진입하면(준비 상태 확인 뒤) `JobQueue.note_index_request()`를 부른다. 체크섬을 만들고, `find_open`과 `current_index`로 얻은 값으로 `decide_index`를 부른다. `submit`이면 `IndexRunner`를 만들어 `JobQueue.submit`하고 `queued`를, `join`이면 `joined`를, `reuse`면 `reused`를 돌려준다. `joined`·`reused`에서는 작업을 만들지 않는다
 - 실패: 자리표시 ID가 `assets`에 없으면 `InvalidRequestError`를 내고, 메시지에 빠진 ID 개수를 담는다
-- 충족 기준: 세 결정마다 해당 `outcome`과 작업 ID가 나오고 새 작업은 `submit` 결정에서만 생기며, 자리표시 ID가 빠지면 `InvalidRequestError`가 나고 아무 작업도 만들지 않는다
+- 충족 기준: 세 결정마다 해당 `outcome`과 작업 ID가 나오고 새 작업은 `submit` 결정에서만 생기며, 자리표시 ID가 빠지면 `InvalidRequestError`가 나고 아무 작업도 만들지 않는다. 세 결정 모두 `note_index_request`가 한 번 불린다
 
 **`REQ-RAG-10.3.2`** 청킹을 마친 뒤 색인
 
-- 처리 계약: `IndexRunner`는 `CHUNKING` 알림 → `Chunker.split` → `EMBEDDING` 알림 → `Indexer.embed`(`job_id`는 `ProgressReporter.job_id`) → `prepared(IndexOutcome)` → `STORING` 알림 → `Indexer.write` 순으로 하고, 같은 `IndexOutcome(chunk_count, fallback_used)`를 돌려준다. `chunk_count`는 만든 레코드 수, `fallback_used`는 청킹 결과의 값이다(`REQ-RAG-2.3.3`). `prepared`를 `write`보다 먼저 불러야 활성화 뒤에 멈춰도 다시 시작할 때 완료로 기록할 수 있다(`REQ-RAG-10.8.5.3`)
-- 충족 기준: 러너를 실행하면 단계 알림, `prepared`, 호출이 위 순서로 일어나고, `prepared`에 넘긴 결과와 돌려준 결과가 같으며, 레코드의 `job_id`가 `ProgressReporter.job_id`다
+- 처리 계약: 러너는 두 부분이다. `IndexRunner`는 `CHUNKING` 알림 → `Chunker.split`을 하고, 분할 결과를 쥔 `EmbedRunner`를 돌려준다. `IndexRunner`는 indexing을 부르지 않는다. `EmbedRunner`는 `EMBEDDING` 알림 → `Indexer.embed`(`job_id`는 `ProgressReporter.job_id`) → `prepared(IndexOutcome)` → `STORING` 알림 → `Indexer.write` 순으로 하고, 같은 `IndexOutcome(chunk_count, fallback_used)`를 돌려준다. `chunk_count`는 만든 레코드 수, `fallback_used`는 청킹 결과의 값이다(`REQ-RAG-2.3.3`). `prepared`를 `write`보다 먼저 불러야 활성화 뒤에 멈춰도 다시 시작할 때 완료로 기록할 수 있다(`REQ-RAG-10.8.5.3`). 두 부분 사이에 언제 `EmbedRunner`를 부를지는 작업 큐가 정한다(「일괄 처리 단계 — `REQ-RAG-10.8.8`」)
+- 충족 기준: `IndexRunner`를 실행하면 `CHUNKING` 알림과 `split`만 일어나고 `embed`·`write`가 불리지 않는다. 돌려받은 `EmbedRunner`를 실행하면 단계 알림, `prepared`, 호출이 위 순서로 일어나고, `prepared`에 넘긴 결과와 돌려준 결과가 같으며, `embed`에 넘긴 청킹 결과가 `split`의 결과이고, 레코드의 `job_id`가 `ProgressReporter.job_id`다
 
 **`REQ-RAG-10.3.3`** 청킹이 실패하면 색인하지 않음
 
 - 처리 계약: 러너 안의 오류를 「예외」 표의 작업 실패 사유로 바꿔 `JobFailure`로 낸다. `ChunkingFailedError`의 위치는 `FailureLocation`으로 옮긴다
-- 충족 기준: `split`이 `ChunkingFailedError`를 내면 `embed`·`write`가 불리지 않고 `JobFailure`(`CHUNKING_FAILED`, 위치 포함)가 난다
+- 충족 기준: `split`이 `ChunkingFailedError`를 내면 `IndexRunner`가 `EmbedRunner`를 돌려주지 않고 `JobFailure`(`CHUNKING_FAILED`, 위치 포함)를 내며, `embed`·`write`가 불리지 않는다
 
 **`REQ-RAG-10.3.4`** 새 버전 색인 실패 시 이전 버전 유지
 
-- 처리 계약: `embed`·`write`가 실패하면 `JobFailure`로 끝내며, 이전 버전 보존은 indexing의 보장이다(indexing `MODULE.md` 「핵심 흐름」)
-- 충족 기준: `write`가 `StoreUnavailableError`를 내면 `JobFailure`(`STORE_UNAVAILABLE`)가 나고, 이전 버전 레코드를 지우는 호출이 없다
+- 처리 계약: `EmbedRunner` 안에서 `embed`·`write`가 실패하면 `JobFailure`로 끝내며, 이전 버전 보존은 indexing의 보장이다(indexing `MODULE.md` 「핵심 흐름」)
+- 충족 기준: `write`가 `StoreUnavailableError`를 내면 `EmbedRunner`가 `JobFailure`(`STORE_UNAVAILABLE`)를 내고, 이전 버전 레코드를 지우는 호출이 없다
 
 ### 검색 서비스 — `REQ-RAG-10.4`
 
@@ -332,6 +348,12 @@ class SearchService:
 **`REQ-RAG-10.4.2`** 0건은 빈 결과
 
 - 충족 기준: `Searcher.search`가 빈 값을 돌려주면 오류 없이 빈 값을 돌려준다
+
+**`REQ-RAG-10.4.3`** 일괄 색인 중 검색 거부
+
+- 처리 계약: `search`는 준비 상태 확인 뒤 `JobQueue.reject_during_batch()`를 부르고, 그 뒤에만 `Searcher.search`를 부른다. `document_chunks`는 일괄 색인 중에도 거부하지 않는다 — 모델을 쓰지 않는 요청이다
+- 실패: 일괄 색인 중이면 `BatchIndexingError`(남은 작업 수)를 낸다(`reject_during_batch`의 계약은 「일괄 처리 단계 — `REQ-RAG-10.8.8`」)
+- 충족 기준: 작업을 접수하거나 `caption_slot()`에 들어간 뒤부터 `search`를 부르면 `Searcher.search`가 불리지 않고 `BatchIndexingError`가 나며 `remaining_jobs`가 그 시점의 `QUEUED`·`RUNNING` 작업 수다(마지막 작업이 끝난 뒤 기다리는 동안은 0). 같은 때 `document_chunks`는 결과를 돌려준다. `start` 직후와 `note_index_request()`만 불린 뒤, 일괄 색인이 끝난 뒤의 `search`는 `Searcher.search`를 부른다
 
 ### 문서 삭제 서비스 — `REQ-RAG-10.5`
 
@@ -373,12 +395,19 @@ class EvaluationService:
 
 - 충족 기준: `Evaluator.evaluate`의 결과를 그대로 돌려주고, 작업 목록에 작업이 생기지 않으며 알림이 나가지 않는다
 
+**`REQ-RAG-10.7.2`** 일괄 색인 중 평가 거부
+
+- 처리 계약: `evaluate`는 준비 상태 확인 → `Evaluator.validate` → `JobQueue.reject_during_batch()` → `Evaluator.evaluate` 순으로 부른다. 입력 검증이 거부보다 먼저이므로, 일괄 색인 중이라도 공백뿐인 `answer_span`이면 `InvalidRequestError`(`400 INVALID_REQUEST`)가 난다(`API.md` `POST /v1/evaluations`)
+- 실패: 일괄 색인 중이면 `BatchIndexingError`(남은 작업 수)를 낸다
+- 충족 기준: 일괄 색인 중에 `evaluate`를 부르면 `Evaluator.evaluate`가 불리지 않고 `BatchIndexingError`가 나며 `remaining_jobs`가 그 시점의 `QUEUED`·`RUNNING` 작업 수다. 일괄 색인 중이라도 `validate`가 `InvalidRequestError`를 내면 `BatchIndexingError`가 아니라 그 예외가 난다. 일괄 색인이 끝난 뒤에는 `Evaluator.evaluate`를 부른다
+
 ### 작업 관리 헬퍼 — `REQ-RAG-10.8`
 
-작업 큐는 접수·순서·상태를 관리하고, 실제 처리(청킹 → 색인)는 색인 서비스가 만든 `IndexRunner`를 실행할 뿐 내용을 모른다. 그래서 작업 큐는 가짜 `IndexRunner`로, 러너는 가짜 `ProgressReporter`로 따로 검증한다. 아래 타입과 `JobQueue`는 이 모듈 안의 계약이며, 단계·실패를 알리는 방법을 러너와 작업 큐가 같은 뜻으로 써야 작업 상태가 맞게 기록된다.
+작업 큐는 접수·순서·상태와 일괄 색인의 단계를 관리하고, 실제 처리(청킹 → 색인)는 색인 서비스가 만든 `IndexRunner`(분할)와 그것이 돌려준 `EmbedRunner`(임베딩·저장)를 실행할 뿐 내용을 모른다. 그래서 작업 큐는 가짜 러너와 가짜 `ModelHub`로, 러너는 가짜 `ProgressReporter`로 따로 검증한다. 아래 타입과 `JobQueue`는 이 모듈 안의 계약이며, 단계·실패를 알리는 방법을 러너와 작업 큐가 같은 뜻으로 써야 작업 상태가 맞게 기록된다.
 
 ```python
-IndexRunner = Callable[[ProgressReporter], Awaitable[IndexOutcome]]
+EmbedRunner = Callable[[ProgressReporter], Awaitable[IndexOutcome]]  # 임베딩·저장
+IndexRunner = Callable[[ProgressReporter], Awaitable[EmbedRunner]]   # 분할. 분할 결과를 쥔 EmbedRunner를 돌려준다
 RecoverFn = Callable[[str, str], Awaitable[bool]]  # (doc_id, job_id) → 그 작업의 결과가 검색에 쓰이는가
 
 
@@ -391,9 +420,10 @@ class JobState(StrEnum):
 
 
 class JobStage(StrEnum):
-    CHUNKING = "chunking"    # 분할
-    EMBEDDING = "embedding"  # 임베딩
-    STORING = "storing"      # 저장
+    CHUNKING = "chunking"                    # 분할
+    EMBEDDING_PENDING = "embedding_pending"  # 임베딩 대기
+    EMBEDDING = "embedding"                  # 임베딩
+    STORING = "storing"                      # 저장
 
 
 @dataclass(frozen=True)
@@ -424,6 +454,10 @@ class JobQueue(Protocol):
     async def find_open(self, doc_id: str, checksum: str) -> str | None: ...
     async def fail_queued(self, doc_id: str, code: str, message: str) -> None: ...
     async def wait_running(self, doc_id: str) -> None: ...
+    # 일괄 색인 — 「일괄 처리 단계 — REQ-RAG-10.8.8」
+    def caption_slot(self) -> AbstractAsyncContextManager[None]: ...
+    def note_index_request(self) -> None: ...
+    async def reject_during_batch(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -467,7 +501,7 @@ class CurrentIndex:
 class JobManager:  # JobQueue를 구현한다
     """작업을 접수·실행·기록하고 Backend에 알린다."""
 
-    def __init__(self, settings: Settings) -> None: ...
+    def __init__(self, settings: Settings, model_hub: ModelHub) -> None: ...
     async def get_job(self, job_id: str) -> JobView: ...
     async def index_state(self, doc_id: str) -> IndexStateView: ...
     async def index_states(self, doc_ids: Sequence[str]) -> list[IndexStateView]: ...
@@ -482,12 +516,13 @@ class JobManager:  # JobQueue를 구현한다
 | `JobFailure.message` | `str` | 관리자가 읽고 조치할 수 있는 한국어 설명. 스택 트레이스·쿼리·파일 경로를 넣지 않는다 (`REQ-RAG-11.3.2`) |
 | `IndexOutcome.chunk_count` | `int` | 저장한 레코드 수 |
 | `ProgressReporter.job_id` | `str` | 실행 중인 작업의 ID. 러너는 이 값을 레코드의 `job_id`로 쓴다(`IF-RAG-1`) |
-| `prepared`의 `outcome` | `IndexOutcome` | 러너가 돌려줄 결과와 같다. 활성화 전에 기록되며, 다시 시작할 때 완료로 바꾸는 작업의 결과로 쓴다 |
+| `prepared`의 `outcome` | `IndexOutcome` | `EmbedRunner`가 돌려줄 결과와 같다. 활성화 전에 기록되며, 다시 시작할 때 완료로 바꾸는 작업의 결과로 쓴다 |
+| `IndexRunner`의 반환값 | `EmbedRunner` | 그 작업의 분할 결과를 프로세스 메모리에 쥔다. 작업 큐는 한 번만 부른다 |
 
-- **러너를 만드는 색인 서비스** — 보장: 청킹을 마친 뒤 색인하고, 단계마다 시작 전에 알리며, 저장·활성화 전에 `prepared`로 결과를 알린다(`REQ-RAG-10.3.2`, `REQ-RAG-10.8.2.3`, `REQ-RAG-10.8.5.3`). 청킹이 실패하면 색인하지 않고 `JobFailure`를 내며, 실패 위치를 알 수 있으면 `FailureLocation`을 채운다(`REQ-RAG-10.3.3`, `REQ-RAG-10.8.2.5`). `find_open`과 indexing의 체크섬 확인을 거친 뒤에만 `submit`한다(`REQ-RAG-3.5.1`, `REQ-RAG-3.5.3`, `REQ-RAG-10.3.1`)
-- **작업 큐** — 보장: `REQ-RAG-10.8.1`~`REQ-RAG-10.8.7`의 처리 계약. 금지: chunking·indexing과 서비스 파일을 import하지 않는다. `IndexRunner`의 처리 내용을 바꾸거나 다시 실행하지 않는다
+- **러너를 만드는 색인 서비스** — 보장: `IndexRunner`는 분할만 하고, `EmbedRunner`가 색인한다. 단계마다 시작 전에 알리며, 저장·활성화 전에 `prepared`로 결과를 알린다(`REQ-RAG-10.3.2`, `REQ-RAG-10.8.2.3`, `REQ-RAG-10.8.5.3`). 청킹이 실패하면 `EmbedRunner`를 돌려주지 않고 `JobFailure`를 내며, 실패 위치를 알 수 있으면 `FailureLocation`을 채운다(`REQ-RAG-10.3.3`, `REQ-RAG-10.8.2.5`). `find_open`과 indexing의 체크섬 확인을 거친 뒤에만 `submit`한다(`REQ-RAG-3.5.1`, `REQ-RAG-3.5.3`, `REQ-RAG-10.3.1`)
+- **작업 큐** — 보장: `REQ-RAG-10.8.1`~`REQ-RAG-10.8.8`의 처리 계약. 금지: chunking·indexing과 서비스 파일을 import하지 않는다. 러너의 처리 내용을 바꾸거나 다시 실행하지 않는다. resource는 `ModelHub`의 내리기·올리기 세 메서드만 부른다
 
-`start`, `stop`, `submit`, `find_open`, `fail_queued`, `wait_running`은 `JobManager`가 구현한다. `stop`·`fail_queued`·`wait_running`의 처리 계약은 그것을 쓰는 서비스의 REQ(`REQ-RAG-10.1.3`, `REQ-RAG-10.5.1`, `REQ-RAG-10.5.2`)에 있다.
+`start`, `stop`, `submit`, `find_open`, `fail_queued`, `wait_running`, `caption_slot`, `note_index_request`, `reject_during_batch`는 `JobManager`가 구현한다. `stop`·`fail_queued`·`wait_running`의 처리 계약은 그것을 쓰는 서비스의 REQ(`REQ-RAG-10.1.3`, `REQ-RAG-10.5.1`, `REQ-RAG-10.5.2`)에 있다.
 
 `start`가 끝나기 전에 `stop` 말고 다른 메서드를 부르면 `RuntimeError`다(호출 순서 위반 — 수명주기 서비스가 준비 전 요청을 막으므로 운영 중에는 생기지 않는다). `stop`은 `start` 전에도 부를 수 있고, 그 뒤의 `submit`은 `ShuttingDownError`다.
 
@@ -516,12 +551,12 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.2.3`** 색인 중 단계
 
-- 처리 계약: `ProgressReporter.stage`로 받은 단계를 `RUNNING` 작업의 `stage`로 기록한다. `RUNNING`이 아닌 작업의 `stage`는 `None`이다. 작업을 `RUNNING`으로 바꿀 때 같은 트랜잭션에서 `stage`를 `CHUNKING`으로 기록한다. 그래서 `RUNNING` 작업의 `stage`는 항상 값이 있다(`API.md` `IndexJob.stage`)
-- 충족 기준: `IndexRunner`가 `EMBEDDING`을 알린 직후 `get_job`의 `stage`가 `EMBEDDING`이고, 끝난 뒤에는 `None`이다. 러너가 단계를 알리기 전에도 `RUNNING` 작업의 `stage`는 `CHUNKING`이다
+- 처리 계약: `ProgressReporter.stage`로 받은 단계를 `RUNNING` 작업의 `stage`로 기록한다. `RUNNING`이 아닌 작업의 `stage`는 `None`이다. 작업을 `RUNNING`으로 바꿀 때 같은 트랜잭션에서 `stage`를 `CHUNKING`으로 기록한다. 그래서 `RUNNING` 작업의 `stage`는 항상 값이 있다(`API.md` `IndexJob.stage`). `IndexRunner`가 `EmbedRunner`를 돌려주면 작업 큐가 `stage`를 `EMBEDDING_PENDING`으로 기록하고, `EmbedRunner`를 부르기 전까지 그 값을 유지한다
+- 충족 기준: `IndexRunner`가 끝난 뒤 `EmbedRunner`가 불리기 전에는 `get_job`의 `stage`가 `EMBEDDING_PENDING`이고 `index_state`의 `latest_job_stage`도 같다. `EmbedRunner`가 `EMBEDDING`을 알린 직후 `stage`가 `EMBEDDING`이고, 끝난 뒤에는 `None`이다. 러너가 단계를 알리기 전에도 `RUNNING` 작업의 `stage`는 `CHUNKING`이다
 
 **`REQ-RAG-10.8.2.4`** 실패 사유 코드와 한국어 설명
 
-- 처리 계약: `IndexRunner`가 `JobFailure`를 내면 그 `code`·`message`를 기록하고, 다른 예외를 내면 `JobFailureCode.INTERNAL_ERROR`와 내부 정보 없는 한국어 설명을 기록한다
+- 처리 계약: `IndexRunner`나 `EmbedRunner`가 `JobFailure`를 내면 그 `code`·`message`를 기록하고, 다른 예외를 내면 `JobFailureCode.INTERNAL_ERROR`와 내부 정보 없는 한국어 설명을 기록한다
 - 충족 기준: `JobFailure`의 코드·설명이 그대로 조회되고, 다른 예외는 `INTERNAL_ERROR`와 그 예외 문자열이 들지 않은 설명으로 조회된다
 
 **`REQ-RAG-10.8.2.5`** 실패 위치
@@ -531,23 +566,24 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.2.6`** 완료 결과
 
-- 충족 기준: `IndexRunner`가 `IndexOutcome`을 돌려주면 `state`가 `SUCCEEDED`이고 `result`의 청크 수·대체 분할 여부와 `doc_id`·`version`이 조회된다
+- 충족 기준: `EmbedRunner`가 `IndexOutcome`을 돌려주면 `state`가 `SUCCEEDED`이고 `result`의 청크 수·대체 분할 여부와 `doc_id`·`version`이 조회된다
 
 ### 처리 순서 — `REQ-RAG-10.8.3`
 
 **`REQ-RAG-10.8.3.1`** 동시 실행 상한
 
-- 충족 기준: 상한이 2일 때 끝나지 않는 작업 세 개를 다른 문서로 접수하면 `RUNNING`이 두 개를 넘지 않는다
+- 처리 계약: 실행 중인 `IndexRunner` 수와 실행 중인 `EmbedRunner` 수가 각각 `RAG_JOB_CONCURRENCY`를 넘지 않는다. `EMBEDDING_PENDING` 작업은 어느 쪽에도 세지 않는다
+- 충족 기준: 상한이 2일 때 끝나지 않는 `IndexRunner` 세 개를 다른 문서로 접수하면 동시에 실행 중인 `IndexRunner`가 두 개를 넘지 않는다. 임베딩 단계에서 끝나지 않는 `EmbedRunner` 세 개도 동시에 두 개를 넘지 않는다. 상한 1에서 `EMBEDDING_PENDING` 작업이 있어도 다음 작업의 `IndexRunner`가 불린다
 
 **`REQ-RAG-10.8.3.2`** 접수 순서대로 대기
 
-- 처리 계약: 실행할 수 있는 작업 중 `accepted_order`가 가장 작은 것부터 실행한다
-- 충족 기준: 상한 1에서 A·B·C 문서 작업을 차례로 접수하면 A·B·C 순으로 `RUNNING`이 된다
+- 처리 계약: 분할할 수 있는 작업 중 `accepted_order`가 가장 작은 것부터 `IndexRunner`를 부르고, 임베딩 단계에서는 `EMBEDDING_PENDING` 작업 중 `accepted_order`가 가장 작은 것부터 `EmbedRunner`를 부른다
+- 충족 기준: 상한 1에서 A·B·C 문서 작업을 차례로 접수하면 A·B·C 순으로 `RUNNING`이 되고, 임베딩 단계에서 A·B·C 순으로 `EmbedRunner`가 불린다
 
 **`REQ-RAG-10.8.3.3`** 같은 문서는 하나씩
 
-- 처리 계약: 같은 문서의 작업이 `RUNNING`이면 그 문서의 다음 작업은 상한에 여유가 있어도 기다린다
-- 충족 기준: 상한 2에서 같은 문서 작업이 실행 중일 때 접수한 그 문서의 작업이 앞 작업이 끝난 뒤에 `RUNNING`이 된다
+- 처리 계약: 같은 문서의 작업이 `RUNNING`(`EMBEDDING_PENDING` 포함)이면 그 문서의 다음 작업은 상한에 여유가 있어도 앞 작업이 끝날 때까지 기다린다
+- 충족 기준: 상한 2에서 같은 문서 작업이 실행 중일 때 접수한 그 문서의 작업이 앞 작업이 끝난 뒤에 `RUNNING`이 된다. 앞 작업이 `EMBEDDING_PENDING`이어도 같다
 
 **`REQ-RAG-10.8.3.4`** 시작하지 않은 이전 작업은 대체됨
 
@@ -557,7 +593,7 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.4.1`** 다시 시도하지 않음
 
-- 충족 기준: 실패한 `IndexRunner`가 다시 불리지 않는다
+- 충족 기준: 실패한 `IndexRunner`·`EmbedRunner`가 다시 불리지 않는다
 
 **`REQ-RAG-10.8.4.2`** 새 요청 전까지 실패로 남음
 
@@ -577,7 +613,7 @@ class JobManager:  # JobQueue를 구현한다
 **`REQ-RAG-10.8.5.2`** 끝나지 않은 작업은 실패
 
 - 처리 계약: `start(recover)`는 남은 `QUEUED` 작업을, 그리고 `REQ-RAG-10.8.5.3`에 들지 않는 `RUNNING` 작업을 `FAILED`(`JobFailureCode.SERVER_RESTARTED`)로 바꾸고, 바뀐 작업마다 알린다. 이 처리를 마친 뒤에 새 작업을 실행한다
-- 충족 기준: 남은 `QUEUED` 작업과, `recover`가 거짓인 `RUNNING` 작업이 `SERVER_RESTARTED`로 실패하고 작업마다 알림이 나간다
+- 충족 기준: 남은 `QUEUED` 작업과, `recover`가 거짓인 `RUNNING` 작업(`EMBEDDING_PENDING`으로 남은 작업 포함)이 `SERVER_RESTARTED`로 실패하고 작업마다 알림이 나간다
 
 **`REQ-RAG-10.8.5.3`** 결과가 이미 검색에 쓰이면 완료
 
@@ -610,7 +646,7 @@ class JobManager:  # JobQueue를 구현한다
 
 **`REQ-RAG-10.8.7.2`** 단계 변경은 알리지 않음
 
-- 충족 기준: `IndexRunner`가 단계를 세 번 알려도 알림 수가 늘지 않는다
+- 충족 기준: 한 작업의 단계가 분할·임베딩 대기·임베딩·저장으로 바뀌어도 알림 수가 늘지 않는다
 
 **`REQ-RAG-10.8.7.3`** 실패하면 다시 보냄
 
@@ -626,6 +662,51 @@ class JobManager:  # JobQueue를 구현한다
 
 - 처리 계약: 모든 알림(재전송 포함)의 `X-Minerva-Token` 헤더에 `RAG_BACKEND_EVENTS_TOKEN`을 담는다(루트 `IF-2`). Backend가 `401`로 응답해도 다른 실패와 같이 다시 보낸다
 - 충족 기준: 가짜 수신자가 받은 모든 알림의 헤더 값이 설정한 토큰과 같고, `401` 응답에도 다시 보낸다
+
+### 일괄 처리 단계 — `REQ-RAG-10.8.8`
+
+일괄 색인 상태(일괄 색인 여부, 임베딩 단계 여부, 마지막 요청 시각)와 `EMBEDDING_PENDING` 작업의 `EmbedRunner`는 `JobManager` 인스턴스의 메모리에 둔다(`ARCHITECT.md` 「데이터·상태 소유」). 단계 사이의 순서는 「핵심 흐름」의 「일괄 색인 단계」가 소유한다.
+
+- **일괄 색인의 시작** — 일괄 색인이 아닐 때 `caption_slot()`에 들어오거나 `submit`이 작업을 접수하면 시작한다. `start` 직후에는 일괄 색인이 아니다
+- **일괄 색인의 끝** — `QUEUED`·`RUNNING` 작업이 없고 `caption_slot()` 안의 요청이 없으며, 마지막으로 작업이 끝난 상태가 된 때, 마지막으로 `caption_slot()`을 나온 때, 마지막으로 `note_index_request()`가 불린 때 중 가장 늦은 때부터 `RAG_BATCH_IDLE_SECONDS`가 지나면 끝난다(`REQUIREMENTS.md` 「용어」 일괄 색인). `note_index_request()`는 그 시각만 바꾸며 일괄 색인을 시작하지 않는다
+- **분할을 기다리는 작업** — `QUEUED` 작업 중 같은 문서에 `RUNNING` 작업이 없는 것이다. 같은 문서의 앞 작업을 기다리는 작업은 뺀다(`REQ-RAG-10.8.8.1`) — 넣으면 앞 작업이 `EMBEDDING_PENDING`일 때 두 작업이 서로를 기다려 멈춘다(`REQ-RAG-10.8.3.3`). `stop` 뒤에는 분할을 시작하지 않으므로 없는 것으로 본다(`REQ-RAG-10.1.3`)
+- **임베딩 단계** — 일괄 색인 중 분할을 기다리는 작업이 없고, 실행 중인 `IndexRunner`가 없고, `caption_slot()` 안의 요청이 없고, `EMBEDDING_PENDING` 작업이 하나 이상이면 시작한다. 실행 중이거나 남은 `EMBEDDING_PENDING` 작업이 없어지면 끝난다. ★ 분할·요약·캡션 생성 중에는 시작하지 않는다 — 임베딩 단계 동안 그 모델들이 GPU 메모리에 없어야 하기 때문이다(`REQUIREMENTS.md` 「용어」 임베딩 단계)
+- **`caption_slot()`** — 들어갈 때 일괄 색인이 아니면 시작하고, 임베딩 단계 중이면 끝날 때까지 기다리며(`REQ-RAG-10.2.4.1`), 임베딩·재정렬 모델을 내린 뒤(`REQ-RAG-10.8.8.5`) 안으로 들어간다. 안에 요청이 있는 동안 임베딩 단계는 시작하지 않는다. 나올 때 마지막 요청 시각을 바꾼다
+- **`reject_during_batch()`** — 일괄 색인 중이면 `BatchIndexingError`를 낸다. `remaining_jobs`는 그 시점의 `QUEUED`·`RUNNING` 작업 수다(`API.md` 「오류 코드」 `BATCH_INDEXING`). 일괄 색인이 아니면 아무 일 없이 돌아온다
+- 일괄 색인 중에도 작업·문서 색인 상태 조회, 문서 삭제, 이름·판 정보 변경은 막지 않는다. 모델을 쓰지 않는 요청이다
+
+**`REQ-RAG-10.8.8.1`** 분할을 기다리는 작업이 있으면 임베딩하지 않음
+
+- 처리 계약: 임베딩 단계 밖에서는 `EmbedRunner`를 부르지 않는다
+- 충족 기준: A 문서 작업이 `EMBEDDING_PENDING`일 때 B 문서 작업이 분할을 기다리거나 분할 중이면 A의 `EmbedRunner`가 불리지 않고, B의 `IndexRunner`가 끝난 뒤에 불린다. `caption_slot()` 안에 요청이 있는 동안에도 불리지 않는다. A 문서의 다음 작업만 `QUEUED`로 남아 있으면 A의 `EmbedRunner`가 불린다
+
+**`REQ-RAG-10.8.8.2`** 분할을 기다리는 작업이 없으면 모두 임베딩·저장
+
+- 처리 계약: 임베딩 단계가 시작되면 `EMBEDDING_PENDING` 작업의 `EmbedRunner`를 모두 부른다. 상한과 순서는 `REQ-RAG-10.8.3`을 따른다
+- 충족 기준: 세 문서 작업의 분할이 끝나면 세 `EmbedRunner`가 모두 불려 세 작업이 `SUCCEEDED`가 되고, 그 뒤 임베딩 단계가 끝난다
+
+**`REQ-RAG-10.8.8.3`** 임베딩 단계 중 접수한 작업은 단계 뒤에 분할
+
+- 처리 계약: 임베딩 단계 중에는 `IndexRunner`를 부르지 않는다. 그 사이 접수한 작업은 `QUEUED`로 남고, 단계가 끝난 뒤 분할한다
+- 충족 기준: 임베딩 단계 중에 `submit`한 작업의 `IndexRunner`가 그 단계의 마지막 `EmbedRunner`가 끝나기 전에는 불리지 않고, 끝난 뒤 불린다
+
+**`REQ-RAG-10.8.8.4`** 임베딩 단계 전에 분할·요약·캡션 모델 내림
+
+- 처리 계약: 임베딩 단계마다 첫 `EmbedRunner`를 부르기 전에 `ModelHub.release_ollama_models()`를 불러 끝낸다
+- 실패: 내리기·올리기가 예외로 끝나면 `service.batch_model_failed` 경고 로그만 남기고 단계를 그대로 진행한다. 그 뒤 실제 계산이 실패하면 기존 규칙대로 그 작업이나 요청만 실패한다(「예외」의 러너 안 예외, `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.3`, `REQ-RAG-12.1.2`)
+- 충족 기준: 임베딩 단계마다 `release_ollama_models`가 끝난 뒤에 첫 `EmbedRunner`가 불린다
+
+**`REQ-RAG-10.8.8.5`** 요약·캡션·분할 전에 임베딩·재정렬 모델 내림
+
+- 처리 계약: `caption_slot()` 안으로 들어가기 전과 `IndexRunner`를 부르기 전에, 마지막 임베딩 단계나 `load_local_models` 뒤로 `ModelHub.release_local_models()`가 불려 끝나 있게 한다
+- 실패: 내리기·올리기가 예외로 끝나면 `service.batch_model_failed` 경고 로그만 남기고 단계를 그대로 진행한다. 그 뒤 실제 계산이 실패하면 기존 규칙대로 그 작업이나 요청만 실패한다(「예외」의 러너 안 예외, `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.3`, `REQ-RAG-12.1.2`)
+- 충족 기준: 일괄 색인이 시작된 뒤 첫 `Captioner` 호출과 첫 `IndexRunner`보다 `release_local_models`가 먼저 끝난다. 임베딩 단계가 끝난 뒤 다시 요약·캡션이나 분할을 시작할 때도 그 전에 `release_local_models`가 다시 끝나 있다
+
+**`REQ-RAG-10.8.8.6`** 일괄 색인이 끝나면 임베딩·재정렬 모델 올림
+
+- 처리 계약: 일괄 색인이 끝나면 `ModelHub.release_ollama_models()`를 부른 뒤 `load_local_models()`를 부른다. Ollama 모델을 먼저 내리는 것은 일괄 색인 밖에서는 임베딩·재정렬 모델만 GPU에 두기 때문이다(`ARCHITECT.md` 「실행 구조」). 끝난 뒤의 `reject_during_batch()`는 거부하지 않는다
+- 실패: 내리기·올리기가 예외로 끝나면 `service.batch_model_failed` 경고 로그만 남기고 단계를 그대로 진행한다. 그 뒤 실제 계산이 실패하면 기존 규칙대로 그 작업이나 요청만 실패한다(「예외」의 러너 안 예외, `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.3`, `REQ-RAG-12.1.2`)
+- 충족 기준: 마지막 작업이 끝나고 `RAG_BATCH_IDLE_SECONDS` 동안 요약·캡션·색인 요청이 없으면 `release_ollama_models` → `load_local_models`가 한 번씩 이 순서로 불리고 그 뒤 `reject_during_batch()`가 돌아온다. 그 시간 안에 `note_index_request()`나 `caption_slot()`이 오면 그 요청부터 다시 잰다. `QUEUED`·`RUNNING` 작업이 있거나 `caption_slot()` 안에 요청이 있으면 시간이 지나도 끝나지 않는다
 
 ### 요약·캡션 생성 헬퍼 — `REQ-RAG-10.2.2`, `REQ-RAG-10.2.3`
 
@@ -704,7 +785,11 @@ sequenceDiagram
     IS->>Q: submit(doc_id, version, checksum, run)
     Q-->>IS: 작업 ID (QUEUED)
     Q->>IS: run(reporter) — 순서가 오면 RUNNING
-    IS->>Q: reporter.stage(CHUNKING / EMBEDDING)
+    IS->>Q: reporter.stage(CHUNKING)
+    IS-->>Q: EmbedRunner 또는 JobFailure
+    Note over Q: EMBEDDING_PENDING, 임베딩 단계를 기다림
+    Q->>IS: embed_run(reporter) — 임베딩 단계
+    IS->>Q: reporter.stage(EMBEDDING)
     IS->>Q: reporter.prepared(outcome)
     IS->>Q: reporter.stage(STORING)
     IS-->>Q: IndexOutcome 또는 JobFailure
@@ -724,9 +809,31 @@ stateDiagram-v2
 
 1. **기동** — 수명주기 서비스가 `REQ-RAG-10.1.1`의 순서대로 용어집 읽기, 모델 준비, Qdrant 연결을 마친 뒤 `start(recover)`를 부르고, 그다음 요청을 받는다. 작업 큐는 남은 작업을 `recover`로 확인해 완료나 실패로 끝맺은 뒤에 새 작업을 실행한다. (`REQ-RAG-10.1.1`, `REQ-RAG-10.8.5`)
 2. **접수** — 색인 서비스가 `find_open`과 체크섬 확인을 거쳐 `submit`한다. 작업 큐는 같은 문서의 `QUEUED` 작업을 `SUPERSEDED`로 바꾼 뒤 새 작업을 `QUEUED`로 기록한다. 두 변경을 한 트랜잭션에서 하고, 각각 알린다. (`REQ-RAG-3.5`, `REQ-RAG-10.3.1`, `REQ-RAG-10.8.1`, `REQ-RAG-10.8.3.4`)
-3. **실행** — 상한과 문서별 순차 조건을 만족하는 가장 먼저 접수된 작업을 `RUNNING`으로 바꾸고 `IndexRunner`를 부른다. (`REQ-RAG-10.8.3`)
-4. **종료** — `IndexOutcome`이면 `SUCCEEDED`로 기록하고 그 문서의 `searchable_job_id`를 이 작업으로 바꾼다. 예외면 `FAILED`로 기록하며 `searchable_job_id`는 그대로 둔다. (`REQ-RAG-10.8.2`, `REQ-RAG-10.8.6.1`)
-5. **서버 종료** — 수명주기 서비스가 `stop`을 부르면 작업 큐가 새 접수를 멈추고 실행 중인 작업을 기다린다. 끝나지 않은 작업과 남은 `QUEUED` 작업은 다음 기동의 1단계가 끝맺는다. (`REQ-RAG-10.1.3`, `REQ-RAG-10.8.5`)
+3. **분할** — 임베딩 단계가 아니면 상한과 문서별 순차 조건을 만족하는 가장 먼저 접수된 작업을 `RUNNING`으로 바꾸고 `IndexRunner`를 부른다. `EmbedRunner`가 돌아오면 `EMBEDDING_PENDING`으로 둔다. (`REQ-RAG-10.8.3`, `REQ-RAG-10.8.8.3`)
+4. **임베딩·저장** — 임베딩 단계에서 `EMBEDDING_PENDING` 작업의 `EmbedRunner`를 부른다. (`REQ-RAG-10.8.8.1`, `REQ-RAG-10.8.8.2`)
+5. **종료** — `EmbedRunner`가 `IndexOutcome`을 돌려주면 `SUCCEEDED`로 기록하고 그 문서의 `searchable_job_id`를 이 작업으로 바꾼다. 어느 러너든 예외면 `FAILED`로 기록하며 `searchable_job_id`는 그대로 둔다. (`REQ-RAG-10.8.2`, `REQ-RAG-10.8.6.1`)
+6. **서버 종료** — 수명주기 서비스가 `stop`을 부르면 작업 큐가 새 접수를 멈추고 실행 중인 작업을 기다린다. 끝나지 않은 작업(`EMBEDDING_PENDING` 포함)과 남은 `QUEUED` 작업은 다음 기동의 1단계가 끝맺는다. (`REQ-RAG-10.1.3`, `REQ-RAG-10.8.5`)
+
+### 일괄 색인 단계
+
+```mermaid
+stateDiagram-v2
+    [*] --> 일괄색인아님
+    일괄색인아님 --> LLM단계: 요약·캡션 요청, 작업 접수
+    LLM단계 --> 임베딩단계: 분할 대기·분할 중·생성 중 없음, 임베딩 대기 있음
+    임베딩단계 --> LLM단계: 임베딩 대기 모두 끝남
+    LLM단계 --> 일괄색인아님: 작업 없음, 정한 시간 동안 요청 없음
+```
+
+LLM 단계는 일괄 색인 중 임베딩 단계가 아닌 동안이다. 요약·캡션과 분할은 이 동안에만 한다.
+
+1. **일괄 색인 시작과 LLM 단계** — 요약·캡션 요청이나 작업 접수로 일괄 색인이 시작된다. 요약·캡션 생성이나 `IndexRunner`를 시작하기 전에 `release_local_models`를 마친다. (`REQ-RAG-10.8.8.5`)
+2. **임베딩 단계 시작** — 분할을 기다리는 작업, 실행 중인 `IndexRunner`, `caption_slot()` 안의 요청이 모두 없고 `EMBEDDING_PENDING` 작업이 있으면 `release_ollama_models`를 마친 뒤 `EmbedRunner`를 부른다. (`REQ-RAG-10.8.8.1`, `REQ-RAG-10.8.8.2`, `REQ-RAG-10.8.8.4`)
+3. **임베딩 단계 중** — 새로 접수한 작업은 `QUEUED`로, 요약·캡션 요청은 `caption_slot()` 앞에서 기다린다. (`REQ-RAG-10.8.8.3`, `REQ-RAG-10.2.4.1`)
+4. **임베딩 단계 끝** — `EMBEDDING_PENDING` 작업이 모두 끝나면 LLM 단계로 돌아가고, 기다리던 요청과 작업은 1의 규칙대로 시작한다. (`REQ-RAG-10.8.8.3`, `REQ-RAG-10.8.8.5`)
+5. **일괄 색인 끝** — 끝나지 않은 작업과 처리 중인 요약·캡션이 없고 `RAG_BATCH_IDLE_SECONDS` 동안 요청이 없으면 `release_ollama_models` → `load_local_models`를 부른다. 그 뒤 검색·평가를 받는다. (`REQ-RAG-10.8.8.6`, `REQ-RAG-10.4.3`, `REQ-RAG-10.7.2`)
+
+2에서 내리기를 마치기 전에 `EmbedRunner`를 부르거나 1에서 내리기 전에 생성·분할을 시작하면, 두 종류의 모델이 GPU 메모리를 함께 써 메모리가 모자란다(`ARCHITECT.md` 「설계 결정」).
 
 ### 문서 삭제
 
@@ -741,7 +848,7 @@ stateDiagram-v2
 
 ### 설정
 
-정의는 core 「설정」이 소유한다. 이 모듈이 읽는 키: `RAG_SHUTDOWN_TIMEOUT_SECONDS`, `RAG_JOBS_DB_PATH`, `RAG_JOB_CONCURRENCY`, `RAG_NOTIFY_RETRIES`, `RAG_BACKEND_EVENTS_URL`, `RAG_BACKEND_EVENTS_TOKEN`. 나머지 키는 조립할 때 `Settings`를 각 단위에 넘긴다.
+정의는 core 「설정」이 소유한다. 이 모듈이 읽는 키: `RAG_SHUTDOWN_TIMEOUT_SECONDS`, `RAG_JOBS_DB_PATH`, `RAG_JOB_CONCURRENCY`, `RAG_NOTIFY_RETRIES`, `RAG_BACKEND_EVENTS_URL`, `RAG_BACKEND_EVENTS_TOKEN`, `RAG_BATCH_IDLE_SECONDS`. 나머지 키는 조립할 때 `Settings`를 각 단위에 넘긴다.
 
 ### 예외
 
@@ -749,6 +856,7 @@ stateDiagram-v2
 | :--- | :--- | :--- | :--- | :--- |
 | `JobNotFoundError` | 없는 작업 ID로 조회 | `JOB_NOT_FOUND` | 발생: 작업 큐. 변환: api | `REQ-RAG-10.8.2.2` |
 | `ShuttingDownError` | `stop` 뒤 `submit` | `SHUTTING_DOWN` | 발생: 작업 큐. 변환: api | `REQ-RAG-10.1.3` |
+| `BatchIndexingError` | 일괄 색인 중 `reject_during_batch` | `BATCH_INDEXING` | 발생: 작업 큐. 전파: 검색·평가 서비스. 변환: api | `REQ-RAG-10.4.3`, `REQ-RAG-10.7.2` |
 | `CaptionFailedError` | 빈 응답, 생성 오류, `PromptTooLongError` | `CAPTION_FAILED` | 발생: `Captioner`. 변환: api | `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.3` |
 | `ModelUnavailableError` | Ollama 연결 실패 | `MODEL_UNAVAILABLE` | 발생: resource. 전파: `Captioner` | `REQ-RAG-12.1.2` |
 
@@ -779,45 +887,53 @@ stateDiagram-v2
 | `service.failed` | 서비스 메서드가 예외로 끝날 때(`startup` 제외) | `MinervaError`는 warning, 그 밖은 error(스택 포함) | `operation`, `error_type`, `code` | `REQ-RAG-10` |
 | `service.job_error` | 작업 큐의 백그라운드 처리(러너 실행, 결과 기록, 실행 배정, 알림 전송)에서 `JobFailure`가 아닌 예외가 날 때 | error(스택 포함) | `job_id`, `doc_id`, `step`, `error_type` | `REQ-RAG-10.8.2.4` |
 | `service.caption_failed` | `CaptionFailedError`를 낼 때 | warning | `kind`(`table`·`image`), `input_chars` 또는 `image_bytes` | `REQ-RAG-10.2.2.3`, `REQ-RAG-10.2.3.3` |
+| `service.batch_started` | 일괄 색인 시작 | info | `trigger`(`caption`·`job`) | `REQ-RAG-10.8.8` |
+| `service.batch_embedding_started` | 임베딩 단계 시작 (`release_ollama_models` 뒤) | info | `pending_jobs` | `REQ-RAG-10.8.8.2`, `REQ-RAG-10.8.8.4` |
+| `service.batch_embedding_ended` | 임베딩 단계 끝 | info | `jobs`, `elapsed_ms` | `REQ-RAG-10.8.8.3` |
+| `service.batch_ended` | 일괄 색인 끝 (`load_local_models` 뒤) | info | `elapsed_ms` | `REQ-RAG-10.8.8.6` |
+| `service.batch_model_failed` | 모델 내리기·올리기가 예외로 끝나 그대로 진행할 때 | warning | `action`(`release`·`load`), `target`(`ollama`·`local`), `error_type` | `REQ-RAG-10.8.8.4`, `REQ-RAG-10.8.8.5`, `REQ-RAG-10.8.8.6` |
 
 그 밖의 서비스 메서드도 진입 이벤트를 남기며, 질의 원문·문서 본문 대신 글자 수만 남긴다. 표 Markdown과 생성한 요약·캡션은 문서 내용이므로 로그에 넣지 않는다.
 
 ### 런타임·보안
 
-- **실행 형태** — 작업 실행과 알림 전송은 이벤트 루프 위의 백그라운드 작업이다. SQLite 접근은 이벤트 루프를 막지 않는다(`AGENTS.md`)
+- **실행 형태** — 작업 실행, 단계 전환과 일괄 색인 끝 판정, 알림 전송은 이벤트 루프 위의 백그라운드 작업이다. SQLite 접근은 이벤트 루프를 막지 않는다(`AGENTS.md`)
 - **영속화·복구** — 상태 변경과 순번 증가는 한 트랜잭션으로 커밋한 뒤에 알린다. 다시 보내지 못한 알림은 저장하지 않으며, Backend의 상태 맞추기가 메운다(`REQ-BE-3.3.1`)
 
 ## 테스트와 추적성
 
-작업 큐를 쓰는 모든 테스트(`REQ-RAG-10.8` 전체와 작업 큐가 관여하는 `REQ-RAG-10` 행)는 임시 SQLite 파일(`RAG_JOBS_DB_PATH`)과 가짜 Backend 수신자(`RAG_BACKEND_EVENTS_URL`)를 쓴다. 대체 경계 칸에는 그 밖의 대체만 적는다.
+작업 큐를 쓰는 모든 테스트(`REQ-RAG-10.8` 전체와 작업 큐가 관여하는 `REQ-RAG-10` 행)는 임시 SQLite 파일(`RAG_JOBS_DB_PATH`)과 가짜 Backend 수신자(`RAG_BACKEND_EVENTS_URL`), 내리기·올리기 호출을 기록하는 가짜 `ModelHub`를 쓴다. 대체 경계 칸에는 그 밖의 대체만 적고, `IndexRunner` (가짜)는 그것이 돌려주는 `EmbedRunner` (가짜)를 포함한다.
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
 | `REQ-RAG-10.1.1` | unit | 기동 단계 순서, 작업 처리기 시작 때 남은 `RUNNING` 작업에 `Indexer.recover` 호출, 준비 전 `ready` 거짓, 단계 실패 시 중단과 예외 | search, resource, indexing (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.1.2` | unit | 준비 전 서비스 메서드가 `ServerNotReadyError`, `health`는 동작 | 모든 기능 단위 (가짜) | `tests/unit/service/` |
-| `REQ-RAG-10.1.3` | unit | 설정한 시간으로 `stop`, 그 뒤 색인 요청 거절. `stop`이 `RUNNING` 작업을 `timeout_seconds`까지 기다림, 그 안에 끝나면 결과 기록, 아니면 취소하고 `RUNNING`으로 남겨 다음 `start`가 끝맺음 | `IndexRunner` (가짜, 대기), 시계, resource (가짜) | `tests/unit/service/` |
-| `REQ-RAG-10.2.1` | unit | 결과 전달, 작업·알림 없음 | resource (mock) | `tests/unit/service/` |
-| `REQ-RAG-10.3.1` | unit | 결정별 결과와 접수 여부, 자리표시 ID 누락 거절 | indexing (가짜) | `tests/unit/service/` |
-| `REQ-RAG-10.3.2` | unit | 러너의 단계 알림·`prepared`·호출 순서, 결과 값, 레코드의 `job_id` | chunking, indexing, `ProgressReporter` (가짜) | `tests/unit/service/` |
-| `REQ-RAG-10.3.3` | unit | 청킹 실패 시 색인 미호출과 `CHUNKING_FAILED`·위치 | chunking, indexing (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.1.3` | unit | 설정한 시간으로 `stop`, 그 뒤 색인 요청 거절. `stop`이 `RUNNING` 작업을 `timeout_seconds`까지 기다림, 그 안에 끝나면 결과 기록, 아니면 취소하고 `RUNNING`으로 남겨 다음 `start`가 끝맺음. `stop` 뒤 `QUEUED` 작업 미분할, `EMBEDDING_PENDING` 작업의 `EmbedRunner` 호출 | `IndexRunner` (가짜, 대기), 시계, resource (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.2.1` | unit | `caption_slot()` 안에서 `Captioner` 호출, 결과 전달, 작업·알림 없음 | resource (mock), 작업 큐 (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.2.4.1` | unit | 임베딩 단계 중 요청은 단계의 마지막 `EmbedRunner`가 끝난 뒤 `Captioner` 호출 | `IndexRunner` (가짜, 대기), `Captioner` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.3.1` | unit | 결정별 결과와 접수 여부, 자리표시 ID 누락 거절, 결정마다 `note_index_request` 한 번 | indexing (가짜), 작업 큐 (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.3.2` | unit | `IndexRunner`는 분할만 하고 `EmbedRunner`를 돌려줌, `EmbedRunner`의 단계 알림·`prepared`·호출 순서, `embed`에 넘긴 청킹 결과, 결과 값, 레코드의 `job_id` | chunking, indexing, `ProgressReporter` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.3.3` | unit | 청킹 실패 시 `EmbedRunner` 없음, 색인 미호출과 `CHUNKING_FAILED`·위치 | chunking, indexing (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.3.4` | unit | 저장 실패 시 사유 코드, 이전 버전 삭제 미호출 | chunking, indexing (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.4.1` | unit | `Searcher.search` 한 번 | search (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.4.2` | unit | 빈 결과 정상 반환 | search (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.4.3` | unit | 접수·`caption_slot()` 뒤 `BatchIndexingError`와 `remaining_jobs`, `Searcher.search` 미호출, `document_chunks`는 동작, `start` 직후·`note_index_request`만 뒤·일괄 색인 끝 뒤에는 검색 | search (가짜), `IndexRunner` (가짜, 대기), 시계 | `tests/unit/service/` |
 | `REQ-RAG-10.5.1` | unit | `fail_queued`가 맨 먼저, `DOCUMENT_DELETED`. 그 문서의 `QUEUED` 작업만 받은 코드·설명으로 실패, 그 러너 미호출, `RUNNING`·다른 문서 작업 유지, 작업마다 알림 하나 | `IndexRunner` (가짜, 대기), indexing (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.5.2` | unit | 기다림 → 삭제 → 상태 비우기 순서. `wait_running`이 그 문서의 `RUNNING` 작업이 끝난 뒤 돌아옴, 없으면 바로 돌아옴 | `IndexRunner` (가짜, 대기), indexing (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.6.1` | unit | 기다림 뒤 이름·판 변경 | `IndexRunner` (가짜, 대기), indexing (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.7.1` | unit | 결과 전달, 작업·알림 없음 | evaluation (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.7.2` | unit | 일괄 색인 중 `BatchIndexingError`와 `remaining_jobs`, `Evaluator.evaluate` 미호출, 공백뿐인 `answer_span`은 일괄 색인 중에도 `InvalidRequestError`, 끝난 뒤 평가 | evaluation (가짜), `IndexRunner` (가짜, 대기), 시계 | `tests/unit/service/` |
 | `REQ-RAG-10.8.1.1` | unit | 즉시 반환, `stop` 뒤 `ShuttingDownError` | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.1.2` | unit | 접수 직후 `QUEUED` | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.2.1` | unit | 허용된 전이만, 끝난 상태 고정 | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.2.2` | unit | ID 조회, 없는 ID는 `JobNotFoundError` | | `tests/unit/service/` |
-| `REQ-RAG-10.8.2.3` | unit | 단계 기록과 끝난 뒤 `None` | `IndexRunner` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.8.2.3` | unit | 분할 뒤 `EMBEDDING_PENDING`(작업 조회·문서 색인 상태), 단계 기록과 끝난 뒤 `None` | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.2.4` | unit | `JobFailure` 코드·설명, 다른 예외는 `INTERNAL_ERROR`와 내부 정보 없음 | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.2.5` | unit | 실패 위치 유무 | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.2.6` | unit | 완료 결과 | `IndexRunner` (가짜) | `tests/unit/service/` |
-| `REQ-RAG-10.8.3.1` | unit | 동시 실행 상한 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
-| `REQ-RAG-10.8.3.2` | unit | 접수 순서 실행 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
-| `REQ-RAG-10.8.3.3` | unit | 같은 문서 순차 실행 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
+| `REQ-RAG-10.8.3.1` | unit | `IndexRunner`·`EmbedRunner` 각각의 동시 실행 상한, `EMBEDDING_PENDING`은 세지 않음 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
+| `REQ-RAG-10.8.3.2` | unit | 분할과 임베딩 모두 접수 순서 실행 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
+| `REQ-RAG-10.8.3.3` | unit | 같은 문서 순차 실행, 앞 작업이 `EMBEDDING_PENDING`이어도 기다림 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
 | `REQ-RAG-10.8.3.4` | unit | `QUEUED` 대체됨, `RUNNING` 유지, 대체된 러너 미실행 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
 | `REQ-RAG-10.8.4.1` | unit | 실패 러너 재실행 없음 | `IndexRunner` (가짜, 실패) | `tests/unit/service/` |
 | `REQ-RAG-10.8.4.2` | unit | 새 접수 뒤에도 실패 유지 | `IndexRunner` (가짜, 실패) | `tests/unit/service/` |
@@ -829,7 +945,13 @@ stateDiagram-v2
 | `REQ-RAG-10.8.6.2` | unit | 문서 색인 상태 필드, 작업 없는 문서 | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.6.3` | unit | 여러 문서 순서·개수 | `IndexRunner` (가짜) | `tests/unit/service/` |
 | `REQ-RAG-10.8.7.1` | unit | 상태 변경마다 알림(`superseded`·`failed` 포함), 본문의 `index_state`, 알림 직후 `get_job`이 알림과 같거나 더 나중의 상태·결과·실패 사유를 돌려줌(루트 `IF-2`), 느린 수신자가 작업 실행을 막지 않음 | `IndexRunner` (가짜), 가짜 수신자 (응답 지연) | `tests/unit/service/` |
-| `REQ-RAG-10.8.7.2` | unit | 단계 변경 미알림 | `IndexRunner` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.8.7.2` | unit | 네 단계 변경 미알림 | `IndexRunner` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.8.8.1` | unit | 다른 문서의 분할 대기·분할 중·`caption_slot()` 안 요청이 있으면 `EmbedRunner` 미호출, 같은 문서의 다음 작업만 남으면 호출 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
+| `REQ-RAG-10.8.8.2` | unit | 분할이 모두 끝나면 `EMBEDDING_PENDING` 작업 모두 임베딩·완료, 단계 끝 | `IndexRunner` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.8.8.3` | unit | 임베딩 단계 중 접수한 작업의 `IndexRunner`가 단계 끝 뒤에 불림 | `IndexRunner` (가짜, 대기) | `tests/unit/service/` |
+| `REQ-RAG-10.8.8.4` | unit | 임베딩 단계마다 `release_ollama_models`가 끝난 뒤 첫 `EmbedRunner`, 내리기가 예외여도 경고 로그 뒤 `EmbedRunner` 호출 | `IndexRunner` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.8.8.5` | unit | 첫 요약·캡션과 첫 `IndexRunner` 전, 임베딩 단계 뒤 다시 시작할 때 `release_local_models`가 먼저 끝남, 내리기가 예외여도 경고 로그 뒤 생성·분할 진행 | `IndexRunner` (가짜), `Captioner` (가짜) | `tests/unit/service/` |
+| `REQ-RAG-10.8.8.6` | unit | 작업 없음·요청 없음이 정한 시간 이어지면 `release_ollama_models` → `load_local_models` 한 번씩, 그 뒤 거부 없음. 그 사이 요청이 오면 다시 잼, 작업이나 처리 중인 요청이 있으면 끝나지 않음. 내리기·올리기가 예외여도 경고 로그 뒤 일괄 색인이 끝남 | `IndexRunner` (가짜), 시계 | `tests/unit/service/` |
 | `REQ-RAG-10.8.7.3` | unit | 재전송 횟수·간격, 성공 시 중단, 포기 시 경고 | 시계 | `tests/unit/service/` |
 | `REQ-RAG-10.8.7.4` | unit | 순번 증가, 재전송 시 유지, 재시작 뒤 이어짐, 상태 변경 트랜잭션이 실패하면 상태·순번이 그대로이고 알림이 없음 | SQLite 쓰기 실패 주입 | `tests/unit/service/` |
 | `REQ-RAG-10.8.7.5` | unit | 모든 알림·재전송의 토큰 헤더, `401` 응답도 재전송 | | `tests/unit/service/` |

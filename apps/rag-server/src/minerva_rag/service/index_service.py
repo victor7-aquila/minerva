@@ -8,6 +8,7 @@ from typing import Literal
 from minerva_rag.chunking import Chunker, ChunkingMode
 from minerva_rag.core import (
     ChunkingFailedError,
+    ChunkingResult,
     Edition,
     InvalidRequestError,
     JobFailureCode,
@@ -22,6 +23,7 @@ from minerva_rag.indexing import IndexDecision, Indexer, IndexInput, decide_inde
 
 from ._guard import Readiness, guarded
 from .jobs import (
+    EmbedRunner,
     IndexOutcome,
     IndexRunner,
     IndexStateView,
@@ -111,6 +113,8 @@ class IndexService:
             force=req.force,
         )
         with guarded(log, "index.submit", self._readiness):
+            # ★ 준비 확인 바로 뒤, 다른 검사보다 먼저 알린다 — 일괄 색인 끝 시간을 다시 잰다
+            self._jobs.note_index_request()
             missing = await asyncio.to_thread(_missing_placeholder_count, req.markdown, req.assets)
             if missing:
                 raise InvalidRequestError(
@@ -165,14 +169,35 @@ class IndexService:
         return IndexAccepted(outcome, _decided_job_id(decision), req.doc_id, req.version)
 
     def _runner(self, req: IndexRequest) -> IndexRunner:
-        """요청 하나를 처리하는 러너를 만든다. 청킹을 마친 뒤에만 색인한다."""
+        """요청 하나를 처리하는 IndexRunner를 만든다. 분할만 하고 EmbedRunner를 돌려준다."""
         chunker = self._chunker
-        indexer = self._indexer
+        embed_runner = self._embed_runner
 
-        async def run(reporter: ProgressReporter) -> IndexOutcome:
+        async def run(reporter: ProgressReporter) -> EmbedRunner:
             try:
                 reporter.stage(JobStage.CHUNKING)
                 result = await chunker.split(req.markdown, req.chunking)
+            except ChunkingFailedError as exc:
+                raise JobFailure(
+                    JobFailureCode.CHUNKING_FAILED.value, exc.message, exc.location
+                ) from exc
+            except (
+                ModelUnavailableError,
+                StoreUnavailableError,
+                VectorDimensionMismatchError,
+            ) as exc:
+                raise JobFailure(_failure_code(exc), exc.message) from exc
+            # ★ 여기서 indexing을 부르지 않는다. 임베딩·저장은 임베딩 단계에서 EmbedRunner가 한다
+            return embed_runner(req, result)
+
+        return run
+
+    def _embed_runner(self, req: IndexRequest, result: ChunkingResult) -> EmbedRunner:
+        """분할 결과와 요청을 메모리에 쥔 EmbedRunner를 만든다."""
+        indexer = self._indexer
+
+        async def embed_run(reporter: ProgressReporter) -> IndexOutcome:
+            try:
                 reporter.stage(JobStage.EMBEDDING)
                 embedded = await indexer.embed(
                     IndexInput(
@@ -194,10 +219,6 @@ class IndexService:
                 await reporter.prepared(outcome)
                 reporter.stage(JobStage.STORING)
                 await indexer.write(embedded)
-            except ChunkingFailedError as exc:
-                raise JobFailure(
-                    JobFailureCode.CHUNKING_FAILED.value, exc.message, exc.location
-                ) from exc
             except (
                 ModelUnavailableError,
                 StoreUnavailableError,
@@ -206,4 +227,4 @@ class IndexService:
                 raise JobFailure(_failure_code(exc), exc.message) from exc
             return outcome
 
-        return run
+        return embed_run

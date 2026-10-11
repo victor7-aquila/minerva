@@ -9,6 +9,7 @@ RAG Server에 색인·이름·판 정보 변경·청크 삭제를 요청하고, 
 - 알림 토큰이 맞지 않는 알림은 반영하지 않는다. 토큰 검사는 순번 확인·이벤트 발행보다 먼저다 (`REQ-BE-3.2.5`)
 - 문서마다 이미 반영한 순번 이하의 알림은 이벤트로 내지 않는다. 순번은 MongoDB에 남겨 Backend가 다시 시작해도 이어진다 (`REQ-BE-3.2.4`, 루트 `IF-2`)
 - 이 모듈은 문서 컬렉션에 쓰지 않는다. 결과는 반환값이나 `IF-BE-1` 이벤트로만 documents에 간다 (`IF-BE-1`)
+- 색인은 documents가 예약 색인에서 넘긴 문서 버전만 요청한다. 스스로 요청 대상을 고르거나 다시 요청하지 않는다 (`REQ-BE-1.10.1`, 루트 `IF-3`)
 
 **기능 그룹**
 
@@ -127,7 +128,7 @@ export type IndexRequestOutcome =
   | { kind: 'rejected'; code: IndexRejectionCode }
   | { kind: 'unreachable' };
 
-// RagJobState는 rag 공개 타입이다(rag `MODULE.md`). indexing이 그대로 다시 내보낸다
+// RagJobState·RagJobStage는 rag 공개 타입이다(rag `MODULE.md`). indexing이 RagJobState를 그대로 다시 내보낸다
 /** 작업 상태 알림(루트 IF-2)의 값이다. 알림 컨트롤러가 본문을 옮겨 담는다. */
 export interface RagEventNotification {
   docId: string;
@@ -147,7 +148,7 @@ export class IndexingService {
   requestIndex(input: IndexRequestInput): Promise<IndexRequestOutcome>;
   handleNotification(notification: RagEventNotification): Promise<void>;
   reconcile(docIds: readonly string[]): Promise<void>;
-  getStages(docIds: readonly string[]): Promise<ReadonlyMap<string, 'chunking' | 'embedding' | 'storing'>>;
+  getStages(docIds: readonly string[]): Promise<ReadonlyMap<string, RagJobStage>>;
   updateMetadata(
     docId: string,
     name: string,
@@ -177,12 +178,12 @@ export class IndexingService {
 
 ### 상태 알림 받기 — `REQ-BE-3.2`
 
-요청 형식은 루트 `IF-2`, 응답은 `API.md`의 `POST /v1/internal/rag-events`가 소유한다.
+요청 형식은 루트 `IF-2`, 응답은 `API.md`의 `POST /v1/internal/rag-events`가 소유한다. 본문 검사의 허용값도 루트 `IF-2`를 따르며, `index_state.latest_job_stage`에는 `embedding_pending`이 들어 있다.
 
 **`REQ-BE-3.2.1`** 2xx 응답
 
 - 처리 계약: 토큰이 맞으면 순번으로 걸러진 알림이라도 `204`로 응답한다. 이벤트 처리가 실패해도 응답은 `204`이며, 그 문서는 상태 맞추기가 다시 맞춘다
-- 충족 기준: 토큰이 맞는 알림은 새 것이든 오래된 것이든 `204`를 받는다
+- 충족 기준: 토큰이 맞는 알림은 새 것이든 오래된 것이든 `204`를 받고, `index_state.latest_job_stage`가 `embedding_pending`인 알림도 `400` 없이 `204`를 받는다
 
 **`REQ-BE-3.2.2`** 이벤트로 넘기기
 
@@ -211,7 +212,7 @@ export class IndexingService {
 - 처리 계약: `reconcile`은 받은 문서들의 색인 상태를 `getIndexStates`로 조회해 문서마다 최신 작업의 이벤트(`source: 'reconcile'`)를 발행한다. 색인 상태에는 작업 버전이 없으므로 최신 작업이 있는 문서마다 `getIndexJob`으로 버전을 받고, 최신 작업이 `failed`면 실패 사유를, `succeeded`면 결과를 함께 채운다. 이벤트의 `jobState`·`searchableVersion`은 색인 상태 조회 값이다. 최신 작업이 없거나, `getIndexJob`이 실패했거나, 결과·실패 사유가 비어 있는 문서는 이벤트 없이 넘어간다(다음 주기에 다시 맞춘다). 받은 문서 ID의 중복은 빼고, 빈 목록이면 RAG Server를 부르지 않는다. 대상 문서와 주기는 documents가 정한다(`RECONCILE_INTERVAL_MS`). RAG Server에 닿지 않으면 이벤트 없이 끝난다
 - 충족 기준: 처리 중인 문서 둘의 상태가 `succeeded`·`failed`면 결과·실패 사유가 담긴 이벤트가 둘 발행되고, RAG Server가 닿지 않으면 예외 없이 이벤트가 없다
 
-`getStages`는 같은 조회로 `running` 작업의 단계를 문서별로 돌려주며, 실패하면 빈 값을 돌려준다(`REQ-BE-1.3.6`).
+`getStages`는 같은 조회로 `running` 작업의 단계(`embedding_pending` 포함, RAG Server가 준 값 그대로)를 문서별로 돌려주며, 실패하면 빈 값을 돌려준다(`REQ-BE-1.3.6`). documents는 이 값을 그대로 응답에 준다(documents `MODULE.md` `REQ-BE-1.3.6`).
 
 ### 이름·판 정보 전달 — `REQ-BE-3.4`
 
@@ -255,7 +256,7 @@ RAG Server 호출 실패는 예외로 내보내지 않고 결과 값으로 바�
 | `REQ-BE-3.1.1` | unit | 요청 본문, 응답별 결과, 거부(`413`·`400`)는 `rejected`, 그 밖의 실패는 `unreachable` | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.1.2` | unit | 결과의 작업 ID | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.1.3` | unit | 설정한 청킹 방식 | rag (가짜), `ConfigService` | `src/indexing/**/*.spec.ts` |
-| `REQ-BE-3.2.1` | e2e | 토큰이 맞으면 오래된 알림도 `204` | RAG Server (가짜 알림) | `test/` |
+| `REQ-BE-3.2.1` | e2e | 토큰이 맞으면 오래된 알림도 `204`, `latest_job_stage`가 `embedding_pending`인 알림도 `204` | RAG Server (가짜 알림) | `test/` |
 | `REQ-BE-3.2.2` | unit | 이벤트 발행과 결과 채우기 | rag (가짜), 이벤트 수신자 | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.2.3` | unit | 실패 사유 채우기, 조회 실패 시 `RAG_UNREACHABLE` | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.2.4` | unit | 순번 거르기, 동시 중복 한 번 | `MONGO_DB` (가짜) | `src/indexing/**/*.spec.ts` |
@@ -263,5 +264,5 @@ RAG Server 호출 실패는 예외로 내보내지 않고 결과 값으로 바�
 | `REQ-BE-3.3.1` | unit | 상태별 이벤트, 닿지 않으면 이벤트 없음 | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.4.1` | unit | 변경 요청 본문과 참 | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-3.4.2` | unit | 실패 시 예외 없이 거짓, `signal` 전달 | rag (가짜, 실패) | `src/indexing/**/*.spec.ts` |
-| `REQ-BE-1.3.6` | unit | `getStages`가 색인 중 문서의 단계를 한 번에 주고, 받지 못하면 빈 결과 | rag (가짜) | `src/indexing/**/*.spec.ts` |
+| `REQ-BE-1.3.6` | unit | `getStages`가 색인 중 문서의 단계(`embedding_pending` 포함)를 한 번에 주고, 받지 못하면 빈 결과 | rag (가짜) | `src/indexing/**/*.spec.ts` |
 | `REQ-BE-1.8.4` | unit | `deleteChunks`의 요청과 참, 실패 시 예외 없이 거짓 | rag (가짜, 실패) | `src/indexing/**/*.spec.ts` |

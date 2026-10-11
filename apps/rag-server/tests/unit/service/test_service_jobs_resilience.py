@@ -13,7 +13,8 @@ from structlog.testing import capture_logs
 
 from minerva_rag.core import Settings, StoreUnavailableError
 from minerva_rag.service import IndexOutcome, JobState
-from minerva_rag.service.jobs import JobFailure, JobManager
+from minerva_rag.service import jobs as jobs_module
+from minerva_rag.service.jobs import JobFailure
 
 from .fakes import (
     WAIT,
@@ -23,6 +24,7 @@ from .fakes import (
     assert_service_log,
     go,
     install_write_failure,
+    make_manager,
     new_manager,
     notified,
     run_logged,
@@ -74,8 +76,10 @@ def test_record_exhausted(
             next_id = await submit(first, "doc-a", ScriptedRunner(), version="v2")
             await notified(receiver, next_id, "queued")
 
-            # ★ 끝난 결과의 기록 쓰기가 연달아 3번 실패한다
-            failure.arm_transactions(skip=0, limit=3)
+            # ★ 분할이 끝나면 EMBEDDING_PENDING 단계 저장이 쓰기 트랜잭션 하나를 쓴다. 그것은
+            # 통과시키고
+            #   끝난 결과의 기록 쓰기가 연달아 3번 실패한다
+            failure.arm_transactions(skip=1, limit=3)
             with capture_logs() as logs:
                 runner.release.set()
                 await wait_state(first, next_id, JobState.SUCCEEDED)  # 슬롯이 반납됐다
@@ -134,7 +138,8 @@ def test_record_recovers_within_retries(
             runner = ScriptedRunner(WAIT, result=result)
             job_id = await submit(manager, "doc-a", runner, version="v1")
             await wait_event(runner.waiting)
-            failure.arm_transactions(skip=0, limit=2)
+            # ★ EMBEDDING_PENDING 단계 저장(트랜잭션 1)은 통과시키고 결과 기록이 2번 실패한다
+            failure.arm_transactions(skip=1, limit=2)
             runner.release.set()
             await notified(receiver, job_id, final)
             failure.disarm()
@@ -154,6 +159,8 @@ def test_dispatch_failure_keeps_queued(
 ) -> None:
     """[REQ-RAG-10.8.7.4] 배정 쓰기가 실패해도 접수는 정상이고 QUEUED로 남아 나중에 배정된다."""
     failure = install_write_failure(monkeypatch)
+    # ★ 재시도 타이머가 끼어들지 못하게 막는다 — 다른 접수만이 배정 계기다
+    monkeypatch.setattr(jobs_module, "_DISPATCH_RETRY_SECONDS", 3600.0)
 
     async def scenario() -> None:
         async with running_manager(settings) as manager:
@@ -162,6 +169,8 @@ def test_dispatch_failure_keeps_queued(
             failure.arm_transactions(skip=1, limit=1)
             with capture_logs() as logs:
                 first_id = await submit(manager, "doc-a", first)  # 예외 없이 작업 ID를 돌려준다
+                # submit은 배정을 기다리지 않는다 — 실패와 그 로그가 나올 때까지 기다린다
+                await until(lambda: any(e.get("event") == "service.job_error" for e in logs))
                 await settle()
             failure.disarm()
             assert failure.failures == 1
@@ -194,6 +203,7 @@ def test_dispatch_failure_resolved_on_restart(
 ) -> None:
     """[REQ-RAG-10.8.5.2] 배정 실패로 QUEUED인 작업은 재시작에서 SERVER_RESTARTED로 끝맺는다."""
     failure = install_write_failure(monkeypatch)
+    monkeypatch.setattr(jobs_module, "_DISPATCH_RETRY_SECONDS", 3600.0)  # ★ 타이머 배정을 막는다
 
     async def scenario() -> None:
         first = await new_manager(settings)
@@ -201,6 +211,7 @@ def test_dispatch_failure_resolved_on_restart(
         try:
             failure.arm_transactions(skip=1, limit=1)
             job_id = await submit(first, "doc-a", runner)
+            await until(lambda: failure.failures == 1)  # submit은 배정을 기다리지 않는다
             await settle()
             failure.disarm()
             assert (await first.get_job(job_id)).state is JobState.QUEUED
@@ -236,7 +247,7 @@ def test_restart_after_recover_error(settings: Settings, receiver: FakeReceiver)
         finally:
             await seed.stop(0)
 
-        manager = JobManager(settings)
+        manager = make_manager(settings)
         error = StoreUnavailableError()
         failing = RecoverSpy(error)
         with pytest.raises(StoreUnavailableError) as caught:
@@ -274,7 +285,7 @@ def test_restart_after_sqlite_start_error(
         raise sqlite3.OperationalError("injected")
 
     async def scenario() -> None:
-        manager = JobManager(settings)
+        manager = make_manager(settings)
         monkeypatch.setattr(sqlite3, "connect", broken_connect)
         spy = RecoverSpy(False)
         with pytest.raises(sqlite3.OperationalError):
@@ -297,22 +308,20 @@ def test_restart_after_sqlite_start_error(
 
 @pytest.mark.req("REQ-RAG-10.8.7.1")
 @pytest.mark.req("REQ-RAG-10.8.1")
-@pytest.mark.parametrize("skip", [0, 1], ids=["during_accept_write", "during_dispatch_write"])
 def test_caller_cancel_during_submit(
-    monkeypatch: pytest.MonkeyPatch, settings: Settings, receiver: FakeReceiver, skip: int
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, receiver: FakeReceiver
 ) -> None:
     """[REQ-RAG-10.8.1] submit 호출자가 접수 도중 취소돼도 DB·알림·실행이 서로 어긋나지 않는다.
 
-    ★ 접수(skip=0) 또는 배정(skip=1) 쓰기를 작업 스레드에서 멈춘 채 호출자를 취소한다. 쓰기는
-    이미 시작됐으니 접수된 것이고, 그렇다면 작업은 queued·running·succeeded 알림을 순번대로
-    내며 실행되고 열린 작업이 남지 않는다.
+    ★ 접수 쓰기를 작업 스레드에서 멈춘 채 호출자를 취소한다. 쓰기는 이미 시작됐으니 접수된 것이고,
+    그렇다면 작업은 queued·running·succeeded 알림을 순번대로 내며 실행되고 열린 작업이 남지 않는다.
     """
     failure = install_write_failure(monkeypatch)
 
     async def scenario() -> None:
         async with running_manager(settings) as manager:
             runner = ScriptedRunner()
-            pause = failure.pause_transaction(skip=skip)
+            pause = failure.pause_transaction(skip=0)
             caller = asyncio.create_task(submit(manager, "doc-a", runner, version="v1"))
             try:
                 await until(pause.entered.is_set)  # 쓰기가 멈춘 채 호출자는 접수를 기다린다
@@ -340,5 +349,62 @@ def test_caller_cancel_during_submit(
             assert state.searchable_version == "v1"
             assert state.latest_job_id == job_id
             assert state.latest_job_state is JobState.SUCCEEDED
+
+    go(scenario())
+
+
+@pytest.mark.req("REQ-RAG-10.8.1.1")
+def test_submit_returns_while_dispatch_write_blocked(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, receiver: FakeReceiver
+) -> None:
+    """[REQ-RAG-10.8.1.1] 배정 쓰기가 멈춰 있어도 submit은 작업 ID를 돌려주고 풀리면 실행된다.
+
+    ★ submit은 배정을 기다리지 않는다. 배정은 스케줄러가 하므로 호출자가 취소될 일이 없다.
+    """
+    failure = install_write_failure(monkeypatch)
+
+    async def scenario() -> None:
+        async with running_manager(settings) as manager:
+            runner = ScriptedRunner()
+            pause = failure.pause_transaction(skip=1)  # 접수는 통과, 배정 쓰기를 멈춘다
+            try:
+                job_id = await asyncio.wait_for(submit(manager, "doc-a", runner, version="v1"), 5)
+                await until(pause.entered.is_set)
+                assert (await manager.get_job(job_id)).state is JobState.QUEUED
+                assert runner.calls == 0
+            finally:
+                pause.release.set()
+
+            await notified(receiver, job_id, "succeeded")
+            assert receiver.states(job_id) == ["queued", "running", "succeeded"]
+            assert receiver.sequences("doc-a") == [1, 2, 3]
+            assert runner.calls == 1
+            assert (await manager.get_job(job_id)).state is JobState.SUCCEEDED
+
+    go(scenario())
+
+
+@pytest.mark.req("REQ-RAG-10.8.7.4")
+def test_dispatch_failure_retried_by_timer(
+    monkeypatch: pytest.MonkeyPatch, settings: Settings, receiver: FakeReceiver
+) -> None:
+    """[REQ-RAG-10.8.7.4] 배정 쓰기가 한 번 실패해도 다른 접수 없이 재시도 타이머가 작업을
+    실행한다."""
+    failure = install_write_failure(monkeypatch)
+    # ★ 재시도 대기(call_later)를 실제로 기다리지 않는다
+    monkeypatch.setattr(jobs_module, "_DISPATCH_RETRY_SECONDS", 0.0)
+
+    async def scenario() -> None:
+        async with running_manager(settings) as manager:
+            runner = ScriptedRunner()
+            failure.arm_transactions(skip=1, limit=1)  # 접수는 통과, 배정 한 번만 실패
+            job_id = await submit(manager, "doc-a", runner)
+            await wait_state(manager, job_id, JobState.SUCCEEDED)
+            failure.disarm()
+
+            assert failure.failures == 1
+            assert runner.calls == 1
+            assert receiver.states(job_id) == ["queued", "running", "succeeded"]
+            assert receiver.sequences("doc-a") == [1, 2, 3]  # 실패한 시도는 순번을 쓰지 않는다
 
     go(scenario())

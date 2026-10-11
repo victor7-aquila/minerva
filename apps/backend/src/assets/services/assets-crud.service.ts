@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Collection, Db } from 'mongodb';
 import { MONGO_DB } from '../../storage';
 import { ASSETS_COLLECTION } from '../interfaces/assets.types';
-import type { AssetRecord } from '../interfaces/assets.types';
+import type { AssetKind, AssetRecord } from '../interfaces/assets.types';
 
 /** 조회 결과에서 _id를 뺀다. */
 const PROJECTION = { projection: { _id: 0 } } as const;
@@ -38,15 +38,20 @@ export class AssetsCrudService {
     return this.assets.find({ docId, version }, PROJECTION).sort({ order: 1 }).toArray();
   }
 
-  /** 요약·캡션이 대기 중인 레코드를 order 순으로 읽는다. */
-  findPending(docId: string, version: string): Promise<AssetRecord[]> {
+  /** 요약·캡션이 대기 중인 레코드를 종류별로 order 순으로 읽는다. */
+  findPending(docId: string, version: string, kind: AssetKind): Promise<AssetRecord[]> {
     return (
       this.assets
         // ★ tableId: null은 필드가 없는 옛 레코드도 맞춘다. 표 안 이미지는 요약·캡션 대상이 아니다
-        .find({ docId, version, hintStatus: 'pending', tableId: null }, PROJECTION)
+        .find({ docId, version, kind, hintStatus: 'pending', tableId: null }, PROJECTION)
         .sort({ order: 1 })
         .toArray()
     );
+  }
+
+  /** 요약·캡션이 대기 중인 레코드 수를 센다. 표 안 이미지는 세지 않는다. */
+  countPending(docId: string, version: string): Promise<number> {
+    return this.assets.countDocuments({ docId, version, hintStatus: 'pending', tableId: null });
   }
 
   /** 레코드 하나를 읽는다. */

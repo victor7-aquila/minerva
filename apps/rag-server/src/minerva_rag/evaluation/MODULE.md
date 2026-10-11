@@ -53,7 +53,7 @@ tests/unit/evaluation/
 
 | 기능 그룹 | 공개 표면 | 상세 계약 | 관련 REQ |
 | :--- | :--- | :--- | :--- |
-| 평가 요청 | `Evaluator.evaluate`, `EvaluationCase` | 「평가 요청 — REQ-RAG-6.1」 | `REQ-RAG-6.1` |
+| 평가 요청 | `Evaluator.evaluate`, `Evaluator.validate`, `EvaluationCase` | 「평가 요청 — REQ-RAG-6.1」 | `REQ-RAG-6.1` |
 | 측정 | `EvaluationResult`, `EvaluationMetrics` | 「측정 — REQ-RAG-6.2」 | `REQ-RAG-6.2` |
 
 HTTP 형식(`EvaluationResult`, `EvaluationMetrics`)은 `API.md`가 소유하며, 아래 타입은 api가 그 형식으로 옮기는 원천이다.
@@ -72,7 +72,7 @@ HTTP 형식(`EvaluationResult`, `EvaluationMetrics`)은 `API.md`가 소유하며
 | `edition_only` | `bool` | 필수 | 기본 `False` |
 | `top_n` | `int \| None` | 선택 | 1 이상. `None`이면 `RAG_SEARCH_DEFAULT_TOP_N` |
 
-`top_n`이 1 미만이면 만들 때 `ValueError`를 낸다(api가 먼저 거른다). `answer_span`의 "공백을 지운 뒤 비어 있지 않다"는 `evaluate`가 검사한다(`REQ-RAG-6.1.1`).
+`top_n`이 1 미만이면 만들 때 `ValueError`를 낸다(api가 먼저 거른다). `answer_span`의 "공백을 지운 뒤 비어 있지 않다"는 `validate`와 `evaluate`가 검사한다(`REQ-RAG-6.1.1`).
 
 **`EvaluationMetrics`** — 정의: evaluation, 값 생산: evaluation (`REQ-RAG-6.2`)
 
@@ -92,15 +92,18 @@ class Evaluator:
     """골든셋 한 건으로 검색 품질 지표를 계산한다."""
 
     def __init__(self, searcher: Searcher, settings: Settings) -> None: ...
+    def validate(self, case: EvaluationCase) -> None: ...
     async def evaluate(self, case: EvaluationCase) -> EvaluationResult: ...
 ```
+
+`validate`는 search를 부르지 않고 평가 입력만 검사한다. service가 일괄 색인 거부보다 먼저 부른다(service `MODULE.md` `REQ-RAG-10.7.2`).
 
 ### 평가 요청 — `REQ-RAG-6.1`
 
 **`REQ-RAG-6.1.1`** 평가 입력
 
-- 실패: 공백 문자(「측정 — REQ-RAG-6.2」)를 지운 `answer_span`이 비어 있으면 `document_chunks`·`search`를 부르기 전에 `InvalidRequestError`(`INVALID_REQUEST`)를 낸다
-- 충족 기준: 질의, 정답 문서 ID, 정답 원문 구간, 판 지정 여부, N을 담은 `EvaluationCase`로 `evaluate`가 결과를 돌려주고, `n`이 요청한 N(없으면 기본 개수)이다. 공백 문자만 든 `answer_span`이면 `InvalidRequestError`가 나고 search가 불리지 않는다
+- 실패: 공백 문자(「측정 — REQ-RAG-6.2」)를 지운 `answer_span`이 비어 있으면 `validate`가, 그리고 `evaluate`가 `document_chunks`·`search`를 부르기 전에 `InvalidRequestError`(`INVALID_REQUEST`)를 낸다
+- 충족 기준: 질의, 정답 문서 ID, 정답 원문 구간, 판 지정 여부, N을 담은 `EvaluationCase`로 `evaluate`가 결과를 돌려주고, `n`이 요청한 N(없으면 기본 개수)이다. 공백 문자만 든 `answer_span`이면 `validate`와 `evaluate`가 `InvalidRequestError`를 내고 search가 불리지 않으며, 그렇지 않으면 `validate`가 아무 일 없이 돌아온다
 
 **`REQ-RAG-6.1.2`** 저장하지 않음
 
@@ -164,7 +167,7 @@ class Evaluator:
 
 | 예외 | 발생 조건 | 코드·상태 | 처리 책임 | 관련 REQ |
 | :--- | :--- | :--- | :--- | :--- |
-| `InvalidRequestError` | 공백 문자를 지운 정답 구간이 비어 있다 | `INVALID_REQUEST` | 발생: evaluation. 변환: api | `REQ-RAG-6.1.1` |
+| `InvalidRequestError` | 공백 문자를 지운 정답 구간이 비어 있다 | `INVALID_REQUEST` | 발생: evaluation(`validate`, `evaluate`). 변환: api | `REQ-RAG-6.1.1` |
 | `DocumentNotSearchableError` | 정답 문서에 검색되는 버전이 없다 | `DOCUMENT_NOT_SEARCHABLE` | 발생: evaluation. 변환: api | `REQ-RAG-6.3.2` |
 
 search가 내는 resource 예외는 그대로 전파한다.
@@ -183,7 +186,7 @@ pytest는 지표 계산 규칙만 검증하고, 검색 품질 임계값은 검�
 
 | REQ ID | 종류 | 검증 초점 | 대체 경계 | 예상 위치 |
 | :--- | :--- | :--- | :--- | :--- |
-| `REQ-RAG-6.1.1` | unit | 입력 필드 반영, `n` 기본값 | search (가짜) | `tests/unit/evaluation/` |
+| `REQ-RAG-6.1.1` | unit | 입력 필드 반영, `n` 기본값, 공백뿐인 `answer_span`에 `validate`·`evaluate`가 `InvalidRequestError`이고 search 미호출 | search (가짜) | `tests/unit/evaluation/` |
 | `REQ-RAG-6.1.2` | unit | search 외 호출·쓰기 없음 | search (가짜) | `tests/unit/evaluation/` |
 | `REQ-RAG-6.1.3` | unit | 판 지정 여부별 적중 후보, 다른 이름 제외 | search (가짜) | `tests/unit/evaluation/` |
 | `REQ-RAG-6.2.1` | unit | `search` 한 번, 인자 | search (가짜) | `tests/unit/evaluation/` |

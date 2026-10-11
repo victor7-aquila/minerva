@@ -1,4 +1,4 @@
-import { RagUnavailableError } from '../../common';
+import { BatchIndexingError, RagUnavailableError } from '../../common';
 import { RagRequestError } from '../../rag';
 import type { RagEvaluationResult } from '../../rag';
 import { EVALUATION_MESSAGES } from '../interfaces/evaluation.types';
@@ -12,6 +12,8 @@ export function outcomeOf(result: RagEvaluationResult): OutcomeFilter {
 
 /** 평가 실패의 한국어 사유를 정한다. 오류 메시지·코드를 사유에 넣지 않는다. */
 export function failureMessageOf(error: unknown): string {
+  // ★ 일괄 색인 중 거부는 남은 작업 수를 담지 않고 따로 기록한다
+  if (error instanceof BatchIndexingError) return EVALUATION_MESSAGES.batchIndexing;
   if (error instanceof RagUnavailableError) return EVALUATION_MESSAGES.ragUnreachable;
   if (error instanceof RagRequestError) {
     if (error.code === 'DOCUMENT_NOT_SEARCHABLE') return EVALUATION_MESSAGES.notSearchable;

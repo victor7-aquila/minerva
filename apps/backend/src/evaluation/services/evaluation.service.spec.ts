@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { plainToInstance } from 'class-transformer';
 import {
   AnswerSpanNotFoundError,
+  BatchIndexingError,
   DocumentNotFoundError,
   DocumentNotSearchableError,
   EvaluationInProgressError,
@@ -579,6 +580,28 @@ describe('REQ-BE-5.2.3', () => {
       { task: 'fail_records', goldenSetId: view.golden_set_id, errorName: 'Error' },
       { task: 'evaluate', goldenSetId: view.golden_set_id, errorName: 'Error' },
     ]);
+  });
+});
+
+describe('REQ-BE-5.2.9', () => {
+  it('T-EVAL-B1 평가가 일괄 색인 거부를 받으면 그 기록은 error와 전용 사유로 끝나고 다음 건으로 간다', async () => {
+    await seedFinished(['G1', 'G2']);
+    h.rag.evaluate
+      .mockRejectedValueOnce(new BatchIndexingError(7))
+      .mockResolvedValue(ragEvalResult());
+    await h.service.evaluateAll();
+    await h.tasks.drain();
+    expect(h.rag.evaluate).toHaveBeenCalledTimes(2);
+    const fresh = records().filter((r) => r.recordId !== 'r-G1' && r.recordId !== 'r-G2');
+    const g1 = fresh.find((r) => r.goldenSetId === 'G1');
+    const g2 = fresh.find((r) => r.goldenSetId === 'G2');
+    expect(g1?.outcome).toBe('error');
+    expect(g1?.errorMessage).toBe('RAG Server가 일괄 색인 중이라 평가하지 못했습니다');
+    expect(g1?.errorMessage).not.toContain('7');
+    expect(g1?.errorMessage).not.toContain('BATCH_INDEXING');
+    expect(g2?.outcome).toBe('hit');
+    // ★ 예상 밖 실패가 아니므로 task_failed 로그가 없다
+    expect(linesOf('evaluation.task_failed')).toHaveLength(0);
   });
 });
 

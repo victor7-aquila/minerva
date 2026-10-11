@@ -6,7 +6,7 @@ import {
   RagUnavailableError,
   UnsupportedFileError,
 } from '../../common';
-import type { PreparedVersion } from '../../assets';
+import type { HintRunResult, PreparedVersion } from '../../assets';
 import type { ProcessingState, SearchState } from '../../common';
 import type { IndexRequestOutcome } from '../../indexing';
 import { RagRequestError } from '../../rag';
@@ -25,9 +25,11 @@ import {
   MD_SENT,
   NAME_SENT,
   buildDocumentsTestModule,
+  callOrder,
   createFakeClock,
   deferred,
   expectSafeKoreanMessage,
+  fakePending,
   docOf,
   docRecord,
   jobEvent,
@@ -64,6 +66,7 @@ let alive = false;
 
 /** 테스트 모듈을 새로 올린다. 이미 올라 있으면 먼저 닫는다. */
 async function boot(opts: Partial<Omit<DocumentsTestOptions, 'stream'>> = {}): Promise<void> {
+  releaseAllHolds();
   if (alive) await h.close();
   capture.clear();
   h = await buildDocumentsTestModule({ stream: capture.stream, ...opts });
@@ -75,6 +78,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // ★ 닫기(진행 중 작업 대기) 전에 붙잡아 둔 게이트를 먼저 푼다. 중간 단언이 실패해도 훅이 멈추지 않는다
+  releaseAllHolds();
   if (alive) {
     alive = false;
     await h.close();
@@ -228,10 +233,63 @@ function recordCount(docId: string, kind: string): number {
 }
 
 /** 예약 색인을 한 번 돌리고 백그라운드 작업을 기다린다. */
-async function runScheduled(): Promise<{ requested: number; unreachable: number }> {
+async function runScheduled(): Promise<{
+  requeued: number;
+  captioned: number;
+  requested: number;
+  unreachable: number;
+}> {
   const result = await h.lifecycle.runScheduledIndex();
   await h.drain();
   return result;
+}
+
+/** holdQueueing이 붙잡은 게이트를 푸는 함수 모음이다. afterEach가 부른다. */
+const holds: Array<() => void> = [];
+
+/** 붙잡아 둔 게이트를 모두 푼다. */
+function releaseAllHolds(): void {
+  for (const release of holds.splice(0)) release();
+}
+
+/**
+ * 응답 뒤 색인 대기 갱신(markQueued)을 풀어 줄 때까지 붙잡는다.
+ * ★ 업로드·내용 다시 올리기가 반환한 시점의 상태(uploaded)를 결정적으로 보기 위한 것이다. release()로 원래 동작을 이어 간다
+ */
+function holdQueueing(): { release: () => void } {
+  const real = h.lifecycle.markQueued.bind(h.lifecycle);
+  const gate = deferred();
+  holds.push(() => gate.resolve());
+  jest.spyOn(h.lifecycle, 'markQueued').mockImplementation(async (docId, version) => {
+    await gate.promise;
+    return real(docId, version);
+  });
+  return { release: () => gate.resolve() };
+}
+
+/**
+ * documents 컬렉션 갱신 중 처리 상태를 queued로 쓰는 호출을 세는 감시를 건다.
+ * ★ 호출 전에 걸어야 한다. count()는 지금까지의 호출 수, orders()는 그 호출들의 invocationCallOrder다
+ */
+function spyQueuedWrites(): { count: () => number; orders: () => number[] } {
+  const spy = jest.spyOn(h.repo, 'updateDocument');
+  const picks = (): number[] =>
+    spy.mock.calls
+      .map((call, index) => ({ call, order: spy.mock.invocationCallOrder[index] }))
+      .filter(({ call }) => (call[1] as Record<string, unknown>).processingState === 'queued')
+      .map(({ order }) => order);
+  return { count: () => picks().length, orders: picks };
+}
+
+/** 업로드 기록 입력의 invocationCallOrder 목록이다. */
+function uploadRecordOrders(): number[] {
+  return h.logs.record.mock.calls
+    .map((call, index) => ({
+      kind: call[0].kind,
+      order: h.logs.record.mock.invocationCallOrder[index],
+    }))
+    .filter((entry) => entry.kind === 'upload')
+    .map((entry) => entry.order);
 }
 
 /** 그 문서에 대해 불린 색인 요청 입력을 순서대로 모은다. */
@@ -335,22 +393,24 @@ async function removeAndPurge(): Promise<void> {
 }
 
 /**
- * 임시 설명이 있는 재색인에서 새 버전을 쓴 뒤 다시 읽은 결과만 삭제됨·교체됨으로 두고, 기록·처리 시작이 없는지 본다.
- * ★ 문서는 그대로 두어 captioning 조건부 갱신이 성공할 상태다 — 다시 읽은 결과만으로 멈추는지 본다
+ * 임시 설명이 있는 재색인에서 새 버전을 쓴 뒤 다시 읽은 결과만 삭제됨·교체됨으로 두고, 처리 상태 기록(queued)이 없는지 본다.
+ * ★ 문서는 그대로 두므로 기록이 없는 까닭은 다시 읽은 결과뿐이다. 재색인은 captioning 갱신도 startQueueing도 부르지 않는다
  */
 async function expectReindexStopsOn(lost: 'deleted' | 'replaced'): Promise<void> {
   await seedDoc({ docId: DOC_A });
   h.assets.markTemporaryForRegeneration.mockResolvedValue(1);
-  const started = jest.spyOn(h.lifecycle, 'startProcessing');
+  const queuing = jest.spyOn(h.lifecycle, 'startQueueing');
   jest.spyOn(h.lifecycle, 'recheckAfterVersionWrite').mockResolvedValue(lost);
   await h.service.reindex(DOC_A);
   await h.drain();
+  // ★ queued 기록이 없다 — 재색인이 부르는 recordStateChange(queued)가 다시 읽은 결과로 건너뛰어졌다
   expect(transitionsOf(DOC_A)).toEqual([]);
-  expect(started).not.toHaveBeenCalled();
+  expect(queuing).not.toHaveBeenCalled();
   expect(docOf(h.db, DOC_A).processingState).toBe('queued');
-  // ★ captioning 갱신(대기열 비우기 포함)을 하지 않았으므로 선점 때 넣은 대기열이 그대로다
+  // ★ 선점 때 넣은 대기열이 그대로다 (대기열을 비우는 갱신이 없다)
   expect(docOf(h.db, DOC_A).queuedVersion).toBe('2');
   expect(h.assets.generateHints).not.toHaveBeenCalled();
+  expect(h.assets.pendingHints).not.toHaveBeenCalled();
   expect(h.indexing.requestIndex).not.toHaveBeenCalled();
 }
 
@@ -452,9 +512,10 @@ describe('REQ-BE-1.1.1', () => {
       ],
     );
 
-  it('T-PR3-F2-1 문서를 모두 만든 뒤에 업로드 기록을 남기고 그다음 처리를 시작한다', async () => {
+  it('T-PR3-F2-1 문서를 모두 만든 뒤에 업로드 기록을 남기고 그다음 색인 대기 갱신을 한다', async () => {
     const insertDocument = jest.spyOn(h.repo, 'insertDocument');
     const insertVersion = jest.spyOn(h.repo, 'insertVersion');
+    const queuedWrites = spyQueuedWrites();
     const result = await uploadThree();
     await h.drain();
 
@@ -474,19 +535,12 @@ describe('REQ-BE-1.1.1', () => {
     expect(Math.max(...insertDocument.mock.invocationCallOrder)).toBeLessThan(firstRecord);
     expect(Math.max(...insertVersion.mock.invocationCallOrder)).toBeLessThan(firstRecord);
     expect(Math.max(...h.assets.prepareVersion.mock.invocationCallOrder)).toBeLessThan(firstRecord);
-    // 처리 시작은 문서마다 하나다
-    expect(h.assets.generateHints).toHaveBeenCalledTimes(3);
-    // ★ 처리 단계의 기록(요약 등)은 제외하고 업로드 기록만 본다
-    const uploadOrders = h.logs.record.mock.calls
-      .map((call, index) => ({
-        kind: call[0].kind,
-        order: h.logs.record.mock.invocationCallOrder[index],
-      }))
-      .filter((entry) => entry.kind === 'upload')
-      .map((entry) => entry.order);
-    expect(Math.max(...uploadOrders)).toBeLessThan(
-      Math.min(...h.assets.generateHints.mock.invocationCallOrder),
-    );
+    // 색인 대기 갱신은 문서마다 하나다. 요약·캡션은 만들지 않는다
+    expect(queuedWrites.count()).toBe(3);
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    // ★ 첫 queued 갱신이 마지막 업로드 기록보다 뒤다
+    expect(Math.min(...queuedWrites.orders())).toBeGreaterThan(Math.max(...uploadRecordOrders()));
+    expect(h.logs.recordsOf('upload')).toHaveLength(3);
   });
 
   it('T-PR3-F2-2 셋째 문서 쓰기가 실패하면 만든 문서·버전이 하나도 남지 않고 원래 오류로 거부된다', async () => {
@@ -499,6 +553,8 @@ describe('REQ-BE-1.1.1', () => {
         h.db.failNext('insertOne', failure);
         return PREPARED;
       });
+    const queuing = jest.spyOn(h.lifecycle, 'startQueueing');
+    const queuedWrites = spyQueuedWrites();
     await expect(uploadThree()).rejects.toBe(failure);
     await h.drain();
 
@@ -508,7 +564,10 @@ describe('REQ-BE-1.1.1', () => {
     expect(ids).toHaveLength(3);
     for (const docId of ids) expect(h.assets.deleteDocument).toHaveBeenCalledWith(docId);
     expect(h.logs.recordsOf('upload')).toHaveLength(0);
-    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    // ★ 색인 대기 갱신이 없다 (REQ-BE-1.1.1 — 모두 만든 뒤에만 한다)
+    expect(queuing).not.toHaveBeenCalled();
+    expect(queuedWrites.count()).toBe(0);
+    expect(h.logs.recordsOf('processing_state')).toHaveLength(0);
   });
 });
 
@@ -547,28 +606,43 @@ describe('REQ-BE-1.1.7', () => {
 });
 
 describe('REQ-BE-1.1.8', () => {
-  it('T-UP-4 업로드 직후 문서는 업로드됨·검색 안 됨이고 요약·캡션은 아직 시작하지 않았다', async () => {
+  it('T-UP-4 만든 문서는 업로드됨·검색 안 됨이고 응답 뒤 첫 처리 상태 기록이 uploaded → queued다', async () => {
+    // ★ 색인 대기 갱신을 붙잡아 응답 시점의 처리 상태(uploaded)를 결정적으로 본다
+    const held = holdQueueing();
     const result = await h.service.upload(
       [uploadFile('a.md', 'a')],
       [{ file_name: 'a.md', name: 'A' }],
     );
-    const doc = docOf(h.db, result.documents[0].doc_id);
+    const docId = result.documents[0].doc_id;
+    const doc = docOf(h.db, docId);
     expect(doc.processingState).toBe('uploaded');
-    // ★ 처리를 마치기 전에는 색인 대기열 밖이고 버전 레코드의 요청 횟수는 0이다
+    // ★ 색인 대기 갱신 전에는 색인 대기열 밖이고 버전 레코드의 요청 횟수는 0이다
     expect(doc.queuedVersion).toBeNull();
-    expect(versionOf(h.db, result.documents[0].doc_id, '1')?.requestSeq).toBe(0);
+    expect(versionOf(h.db, docId, '1')?.requestSeq).toBe(0);
     expect(doc.searchState).toBe('not_searchable');
     expect(doc.searchableVersion).toBeNull();
     expect(doc.deleted).toBe(false);
     expect(doc.purged).toBe(false);
     expect(doc.pendingRag).toEqual({ deleteChunks: false, metadata: false });
     expect(h.assets.generateHints).not.toHaveBeenCalled();
+    expect(transitionsOf(docId)).toEqual([]);
+
+    held.release();
     await h.drain();
+    // 응답 뒤 남는 첫 처리 상태 기록이 uploaded에서 출발한다
+    expect(transitionsOf(docId)).toEqual([['uploaded', 'queued']]);
   });
 });
 
 describe('REQ-BE-1.1.9', () => {
-  it('T-UP-5 응답 뒤 요약·캡션을 만들고 색인 대기열에 들어가며 색인 요청은 없고 업로드 기록이 문서마다 하나다', async () => {
+  it('T-UP-5 응답 전에 색인용 MD가 있고 응답 뒤 색인 대기열에 들어가며 요약·캡션·색인 요청은 없고 업로드 기록이 문서마다 하나다', async () => {
+    const prepared: PreparedVersion = {
+      indexingMarkdown: 'PREPARED-IDX',
+      unmatchedImages: [],
+      assetCount: 0,
+    };
+    h.assets.prepareVersion.mockResolvedValue(prepared);
+    const held = holdQueueing();
     const result = await h.service.upload(
       [uploadFile('a.md', 'a'), uploadFile('b.md', 'b')],
       [
@@ -576,8 +650,14 @@ describe('REQ-BE-1.1.9', () => {
         { file_name: 'b.md', name: 'B' },
       ],
     );
-    await h.drain();
     const [a, b] = result.documents;
+    // ★ 응답 전(업로드 반환 시점)에 첫 버전의 색인용 MD가 prepareVersion 결과다
+    for (const item of [a, b]) {
+      expect(versionOf(h.db, item.doc_id, '1')?.indexingMarkdown).toBe('PREPARED-IDX');
+      expect(docOf(h.db, item.doc_id).processingState).toBe('uploaded');
+    }
+    held.release();
+    await h.drain();
     const uploads = h.logs.recordsOf('upload');
     expect(uploads).toHaveLength(2);
     expect(uploads.find((u) => u.docId === a.doc_id)).toMatchObject({
@@ -591,21 +671,16 @@ describe('REQ-BE-1.1.9', () => {
       editionLabel: null,
     });
     for (const item of [a, b]) {
-      const hintIndex = h.assets.generateHints.mock.calls.findIndex((c) => c[0] === item.doc_id);
-      expect(hintIndex).toBeGreaterThanOrEqual(0);
-      const call = h.assets.generateHints.mock.calls[hintIndex];
-      expect(call[1]).toBe('1');
-      expect(call[2].name).toBe(item.name);
-      expect(typeof call[2].shouldContinue).toBe('function');
-      // ★ 요약·캡션을 만든 뒤 색인 대기열에 들어간다. 색인 요청은 예약 색인만 한다 (REQ-BE-1.10.1)
+      // ★ 색인용 MD를 만든 뒤 색인 대기열에 들어간다. 요약·캡션은 만들지 않는다(REQ-BE-2.3.7)
       const doc = docOf(h.db, item.doc_id);
       expect(doc.processingState).toBe('queued');
       expect(doc.queuedVersion).toBe('1');
     }
+    // ★ 요약·캡션 생성·pending 조회·재추출·색인 요청이 모두 0번이다. 색인 요청은 예약 색인만 한다 (REQ-BE-1.10.1)
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    expect(h.assets.pendingHints).not.toHaveBeenCalled();
+    expect(h.assets.rebuildVersion).not.toHaveBeenCalled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
-    expect(h.assets.generateHints.mock.calls.find((c) => c[0] === a.doc_id)?.[2].editionLabel).toBe(
-      'v1',
-    );
   });
 
   /** 문서 둘을 올린다. */
@@ -621,6 +696,21 @@ describe('REQ-BE-1.1.9', () => {
   /** 문서 ID가 prepareVersion에 넘어간 차례대로 모은다. */
   const preparedIds = (): string[] => h.assets.prepareVersion.mock.calls.map((call) => call[0]);
 
+  /**
+   * 색인 대기 갱신(startQueueing·queued 쓰기·처리 상태 기록)이 없음을 확인하는 감시를 건다.
+   * ★ 업로드 호출 전에 걸고, 반환한 함수를 끝에서 부른다
+   */
+  const watchQueueing = (): (() => void) => {
+    const queuing = jest.spyOn(h.lifecycle, 'startQueueing');
+    const writes = spyQueuedWrites();
+    return () => {
+      expect(queuing).not.toHaveBeenCalled();
+      expect(writes.count()).toBe(0);
+      expect(h.logs.recordsOf('processing_state')).toHaveLength(0);
+      expect(h.assets.generateHints).not.toHaveBeenCalled();
+    };
+  };
+
   /** 문서·버전 레코드가 모두 없는지 본다. */
   const expectNoRecords = (...docIds: string[]): void => {
     for (const docId of docIds) {
@@ -630,6 +720,7 @@ describe('REQ-BE-1.1.9', () => {
   };
 
   it('T-PR3-UP-1 둘째 준비가 실패하면 요청 전체가 되돌려지고 원래 오류로 거부되며 처리는 시작되지 않는다', async () => {
+    const expectNoQueueing = watchQueueing();
     h.assets.prepareVersion
       .mockResolvedValueOnce(PREPARED)
       .mockRejectedValueOnce(new Error('second boom'));
@@ -642,10 +733,11 @@ describe('REQ-BE-1.1.9', () => {
     expect(h.assets.deleteDocument).toHaveBeenCalledWith(firstId);
     expect(h.assets.deleteDocument).toHaveBeenCalledWith(secondId);
     expect(h.logs.recordsOf('upload')).toHaveLength(0);
-    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    expectNoQueueing();
   });
 
   it('T-PR3-UP-1b 첫째 준비가 실패해도 첫째 문서의 파일이 정리되고 아무것도 남지 않으며 처리는 시작되지 않는다', async () => {
+    const expectNoQueueing = watchQueueing();
     h.assets.prepareVersion.mockRejectedValueOnce(new Error('first boom'));
     await expect(uploadTwo()).rejects.toThrow('first boom');
     await h.drain();
@@ -658,10 +750,11 @@ describe('REQ-BE-1.1.9', () => {
     expect(h.db.dump('documents')).toHaveLength(0);
     expect(h.db.dump('document_versions')).toHaveLength(0);
     expect(h.logs.record).not.toHaveBeenCalled();
-    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    expectNoQueueing();
   });
 
   it('T-PR3-UP-2 모든 문서를 만든 뒤 둘째 업로드 기록이 실패하면 두 문서 모두 지워지고 처리는 시작되지 않는다', async () => {
+    const expectNoQueueing = watchQueueing();
     h.logs.record.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('log boom'));
     await expect(uploadTwo()).rejects.toThrow('log boom');
     await h.drain();
@@ -672,12 +765,13 @@ describe('REQ-BE-1.1.9', () => {
     expect(h.assets.deleteDocument).toHaveBeenCalledWith(secondId);
     // ★ 첫째 업로드 기록 호출은 이미 일어났다 — 남은 기록은 지우지 않는다 (P38⑤)
     expect(h.logs.record).toHaveBeenCalledTimes(2);
-    expect(h.assets.generateHints).not.toHaveBeenCalled();
+    expectNoQueueing();
   });
 
   it.each(['assets.deleteDocument', 'repo.deleteVersions', 'repo.deleteDocumentRecord'] as const)(
     'T-PR3-UP-3 정리 단계 %s가 첫째 문서에서 실패해도 나머지 단계와 다른 문서는 정리되고 원래 오류로 거부된다',
     async (failingStep) => {
+      const expectNoQueueing = watchQueueing();
       h.assets.prepareVersion
         .mockResolvedValueOnce(PREPARED)
         .mockRejectedValueOnce(new Error('primary failure'));
@@ -719,7 +813,7 @@ describe('REQ-BE-1.1.9', () => {
         expect(h.db.dump('documents').some((doc) => doc.docId === firstId)).toBe(false);
       }
       if (failingStep === 'repo.deleteDocumentRecord') expect(versionRows(firstId)).toBe(0);
-      expect(h.assets.generateHints).not.toHaveBeenCalled();
+      expectNoQueueing();
     },
   );
 });
@@ -818,6 +912,20 @@ describe('REQ-BE-1.3.6', () => {
     const none = await h.service.list(listQuery());
     expect(none.items.every((item) => item.stage === null)).toBe(true);
     expect(none.total).toBe(3);
+  });
+
+  it('T-LIST-8 getStages가 embedding_pending을 주면 목록 항목의 stage가 그대로 embedding_pending이다', async () => {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, name: 'a', processingState: 'indexing' })],
+      [versionRecord({ docId: DOC_A })],
+    );
+    // ★ 일괄 색인 대기 단계(embedding_pending)도 다른 값으로 바꾸지 않고 그대로 싣는다
+    h.indexing.getStages.mockResolvedValueOnce(
+      new Map<string, RagJobStage>([[DOC_A, 'embedding_pending']]),
+    );
+    const page = await h.service.list(listQuery());
+    expect(page.items.find((item) => item.doc_id === DOC_A)?.stage).toBe('embedding_pending');
   });
 
   it('T-LIST-1 색인 중인 문서가 없으면 단계를 묻지 않는다', async () => {
@@ -1387,6 +1495,18 @@ describe('REQ-BE-1.4.2', () => {
       placeholder_id: 't1',
     });
   });
+
+  it('T-GET-2 상세의 stage도 embedding_pending 그대로다', async () => {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_A, name: 'a', processingState: 'indexing' })],
+      [versionRecord({ docId: DOC_A })],
+    );
+    h.indexing.getStages.mockResolvedValueOnce(
+      new Map<string, RagJobStage>([[DOC_A, 'embedding_pending']]),
+    );
+    expect((await h.service.getDetail(DOC_A)).stage).toBe('embedding_pending');
+  });
 });
 
 describe('REQ-BE-1.4.4', () => {
@@ -1400,6 +1520,20 @@ describe('REQ-BE-1.4.4', () => {
     const detail = await h.service.getDetail(DOC_A);
     expect(h.assets.listViews).toHaveBeenCalledWith(DOC_A, '3');
     expect(detail.assets.map((asset) => asset.placeholder_id)).toEqual(['t1', 't2']);
+  });
+
+  it('T-GET-3 listViews가 text null·isTemporary false를 주면 상세의 그 항목이 text null·is_fallback false다', async () => {
+    await seed(h.db, [docRecord({ docId: DOC_A })], [versionRecord({ docId: DOC_A })]);
+    // ★ 아직 요약·캡션을 만들지 않은(pending) 항목이다
+    h.assets.listViews.mockResolvedValue([
+      { ...tableView('t1', 'x'), text: null, isTemporary: false },
+      tableView('t2', '나'),
+    ]);
+    const detail = await h.service.getDetail(DOC_A);
+    const pending = detail.assets.find((asset) => asset.placeholder_id === 't1');
+    expect(pending?.text).toBeNull();
+    expect(pending?.is_fallback).toBe(false);
+    expect(detail.assets.find((asset) => asset.placeholder_id === 't2')?.text).toBe('나');
   });
 });
 
@@ -1690,6 +1824,29 @@ describe('REQ-BE-1.5.4', () => {
     await runScheduled();
     expect(requestsOf(DOC_A)[0].name).toBe('새 이름');
     expect(h.logs.recordsOf('edit')[0].detail?.changedFields).toEqual(['name', 'hints']);
+  });
+
+  it('T-EDIT-21 아직 요약·캡션이 없는(text null) 항목에 문장을 보내면 변경으로 보고 새 버전을 만든다', async () => {
+    await seedDoc({ docId: DOC_A, name: '문서' });
+    // ★ pending 항목은 text가 null이다 — null과 보낸 문장이 다르므로 변경이다
+    h.assets.listViews.mockResolvedValue([
+      { ...tableView('t1', 'x'), text: null, isTemporary: false },
+    ]);
+    h.assets.hintsFor.mockResolvedValue([{ placeholderId: 't1', text: HINT_SENT }]);
+    const result = await h.service.edit(
+      DOC_A,
+      editBody({ assets: [{ placeholder_id: 't1', text: HINT_SENT }] }),
+    );
+    await h.drain();
+    expect(result.processing_state).toBe('queued');
+    const doc = docOf(h.db, DOC_A);
+    expect(doc.latestVersion).toBe('2');
+    expect(doc.queuedVersion).toBe('2');
+    expect(versionOf(h.db, DOC_A, '2')?.origin).toBe('hints');
+    const call = h.assets.inheritVersion.mock.calls[0];
+    expect(call.slice(0, 3)).toEqual([DOC_A, '1', '2']);
+    expect(call[3]).toEqual(new Map([['t1', HINT_SENT]]));
+    expect(h.logs.recordsOf('edit')[0].detail?.changedFields).toEqual(['hints']);
   });
 
   it('T-EDIT-13 새 버전 만들기가 실패하면 읽은 값으로 되돌리고(대기열 밖으로) 기록을 남기지 않는다', async () => {
@@ -2024,8 +2181,10 @@ describe('REQ-BE-1.5.3', () => {
 const md = uploadFile('new.md', '# 새 내용');
 
 describe('REQ-BE-1.9.1', () => {
-  it('T-CONT-1 내용 다시 올리기는 새 원본으로 버전 2를 만들고 업로드됨으로 둔다', async () => {
+  it('T-CONT-1 내용 다시 올리기는 새 원본으로 버전 2를 만들고 업로드됨으로 선점하며 뒤이은 기록이 uploaded에서 출발한다', async () => {
     await seedDoc({ docId: DOC_A, name: '문서' });
+    // ★ 색인 대기 갱신을 붙잡아 응답 시점의 선점 결과(uploaded)를 결정적으로 본다
+    const held = holdQueueing();
     const result = await h.service.uploadContents(DOC_A, [md]);
     expect(Object.keys(result).sort()).toEqual(['doc_id', 'file_name', 'name', 'unmatched_images']);
     const v2 = versionOf(h.db, DOC_A, '2');
@@ -2037,24 +2196,113 @@ describe('REQ-BE-1.9.1', () => {
     expect(docOf(h.db, DOC_A).queuedVersion).toBeNull();
     expect(h.logs.recordsOf('content_upload')).toHaveLength(1);
     expect(transitionsOf(DOC_A)).toEqual([['completed', 'uploaded']]);
+    held.release();
     await h.drain();
+    // ★ 뒤이은 기록은 uploaded에서 출발한다 (… → uploaded, uploaded → queued)
+    expect(transitionsOf(DOC_A)).toEqual([
+      ['completed', 'uploaded'],
+      ['uploaded', 'queued'],
+    ]);
   });
 });
 
+describe('REQ-BE-1.9.3', () => {
+  /** 색인용 MD를 만드는 계기(경로)마다 그 뒤의 기대다. */
+  const triggers: Array<[string, () => Promise<void>, string]> = [
+    [
+      '업로드',
+      async () => {
+        await h.service.upload([uploadFile('a.md', 'a')], [{ file_name: 'a.md', name: 'A' }]);
+      },
+      '1',
+    ],
+    [
+      '내용 다시 올리기',
+      async () => {
+        await seedDoc({ docId: DOC_A });
+        await h.service.uploadContents(DOC_A, [md]);
+      },
+      '2',
+    ],
+    [
+      '요약·캡션 변경',
+      async () => {
+        await seedDoc({ docId: DOC_A });
+        h.assets.listViews.mockResolvedValue([tableView('t1', '기존')]);
+        await h.service.edit(
+          DOC_A,
+          editBody({ assets: [{ placeholder_id: 't1', text: HINT_SENT }] }),
+        );
+      },
+      '2',
+    ],
+    [
+      '재색인(임시 설명 없음)',
+      async () => {
+        await seedDoc({ docId: DOC_A });
+        await h.service.reindex(DOC_A);
+      },
+      '2',
+    ],
+    [
+      '재색인(임시 설명 있음)',
+      async () => {
+        await seedDoc({ docId: DOC_A });
+        h.assets.markTemporaryForRegeneration.mockResolvedValue(2);
+        await h.service.reindex(DOC_A);
+      },
+      '2',
+    ],
+  ];
+
+  it.each(triggers)(
+    'T-Q-READY-3 %s 뒤 처리 상태가 queued·queuedVersion이 그 버전이고 그때 요약·캡션·색인 요청이 없다',
+    async (_label, run, version) => {
+      await run();
+      await h.drain();
+      const [doc] = h.db.dump('documents') as unknown as DocumentRecord[];
+      expect(doc.processingState).toBe('queued');
+      expect(doc.queuedVersion).toBe(version);
+      expect(doc.latestVersion).toBe(version);
+      // ★ 색인 대기 갱신은 RAG Server를 부르지 않고 요약·캡션도 만들지 않는다
+      expect(h.assets.generateHints).not.toHaveBeenCalled();
+      expect(h.assets.pendingHints).not.toHaveBeenCalled();
+      expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('REQ-BE-1.6.2', () => {
-  it('T-CONT-2 처리하는 동안에도 이전 버전이 계속 검색된다', async () => {
+  it('T-CONT-2 다시 올린 버전은 이어받지 않고 추출부터 하며 요약·캡션은 다음 예약 색인이 만들고 그동안 이전 버전이 계속 검색된다', async () => {
     await seedDoc({ docId: DOC_A });
+    const held = holdQueueing();
     await h.service.uploadContents(DOC_A, [md]);
+    // ★ 처리 중(선점 직후)에도 검색 상태·검색되는 버전이 그대로다
+    expect(docOf(h.db, DOC_A).searchState).toBe('searchable');
+    expect(docOf(h.db, DOC_A).searchableVersion).toBe('1');
+    held.release();
     await h.drain();
-    const hintIndex = h.assets.generateHints.mock.calls.findIndex((c) => c[1] === '2');
-    expect(hintIndex).toBeGreaterThanOrEqual(0);
-    // ★ 요약·캡션을 만든 뒤 대기열에 들어가고 색인 요청은 예약 색인이 한다
+
+    // 이전 버전을 이어받지 않고 prepareVersion으로 추출한다. 요약·캡션 요청은 없다
+    expect(h.assets.inheritVersion).not.toHaveBeenCalled();
+    expect(h.assets.prepareVersion.mock.calls[0].slice(0, 3)).toEqual([DOC_A, '2', '# 새 내용']);
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
     expect(docOf(h.db, DOC_A).queuedVersion).toBe('2');
+    expect(docOf(h.db, DOC_A).searchState).toBe('searchable');
+    expect(docOf(h.db, DOC_A).searchableVersion).toBe('1');
+
+    // 다음 예약 색인에서 그 버전의 요약·캡션 요청부터 간다 (가짜 pendingHints로 pending ≥ 1)
+    // ★ pendingHints는 종류별 수를 주지 않으므로 표만 남은 문서도 이미지 호출이 한 번 있다
+    fakePending(h, { [DOC_A]: { image: 0, table: 1 } });
     await runScheduled();
+    expect(h.assets.generateHints.mock.calls.map((c) => [c[0], c[1], c[2]])).toEqual([
+      [DOC_A, '2', 'image'],
+      [DOC_A, '2', 'table'],
+    ]);
     expect(requestsOf(DOC_A)).toHaveLength(1);
     expect(requestsOf(DOC_A)[0].version).toBe('2');
-    expect(h.assets.generateHints.mock.invocationCallOrder[hintIndex]).toBeLessThan(
+    expect(h.assets.generateHints.mock.invocationCallOrder[0]).toBeLessThan(
       h.indexing.requestIndex.mock.invocationCallOrder[0],
     );
     const doc = docOf(h.db, DOC_A);
@@ -2120,38 +2368,30 @@ describe('REQ-BE-1.4.1', () => {
 });
 
 describe('REQ-BE-1.7.1', () => {
-  it('T-RIX-1 임시 설명이 있으면 captioning으로 두고(대기열 비움) 요약·캡션 뒤 색인 대기열에 넣으며 예약 색인이 강제 색인을 요청한다', async () => {
+  it('T-RIX-1 임시 설명이 있어도 재색인 응답 뒤 바로 queued·대기열이고 기록은 completed → queued 하나이며 요약·캡션·색인 요청이 없다', async () => {
     await seedDoc({ docId: DOC_A });
     h.assets.markTemporaryForRegeneration.mockResolvedValue(2);
     h.assets.hintsFor.mockResolvedValue([{ placeholderId: 't1', text: HINT_SENT }]);
+    const replaceVersion = jest.spyOn(h.repo, 'replaceVersion');
     await h.service.reindex(DOC_A);
-    // ★ 재색인 응답 때: captioning, 대기열은 비어 있다 (REQ-BE-1.10.7)
-    const during = docOf(h.db, DOC_A);
-    expect(during.processingState).toBe('captioning');
-    expect(during.queuedVersion).toBeNull();
-    expect(during.latestVersion).toBe('2');
-    expect(transitionsOf(DOC_A)).toEqual([['completed', 'captioning']]);
-
     await h.drain();
-    expect(h.assets.generateHints.mock.calls.some((c) => c[1] === '2')).toBe(true);
-    // ★ 표·이미지 처리가 끝나면 색인 대기열에 들어가고, 그때까지 색인 요청은 없다
-    const after = docOf(h.db, DOC_A);
-    expect(after.processingState).toBe('queued');
-    expect(after.queuedVersion).toBe('2');
+    // ★ 재색인은 captioning을 거치지 않는다 (REQ-BE-1.9.2) — 응답 뒤 바로 queued, 새 버전이 대기열에 있다
+    const doc = docOf(h.db, DOC_A);
+    expect(doc.processingState).toBe('queued');
+    expect(doc.queuedVersion).toBe('2');
+    expect(doc.latestVersion).toBe('2');
+    expect(transitionsOf(DOC_A)).toEqual([['completed', 'queued']]);
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
-    expect(transitionsOf(DOC_A)).toEqual([
-      ['completed', 'captioning'],
-      ['captioning', 'queued'],
-    ]);
-
-    await runScheduled();
-    expect(requestsOf(DOC_A)).toHaveLength(1);
-    expect(requestsOf(DOC_A)[0]).toMatchObject({ version: '2', force: true });
-    expect(requestsOf(DOC_A)[0].hints).toEqual([{ placeholderId: 't1', text: HINT_SENT }]);
-    expect(h.assets.hintsFor).toHaveBeenCalledWith(DOC_A, '2');
+    // ★ markTemporaryForRegeneration은 버전 레코드를 쓴 뒤 한 번 부른다
+    expect(h.assets.markTemporaryForRegeneration).toHaveBeenCalledTimes(1);
+    expect(h.assets.markTemporaryForRegeneration).toHaveBeenCalledWith(DOC_A, '2');
+    expect(h.assets.markTemporaryForRegeneration.mock.invocationCallOrder[0]).toBeGreaterThan(
+      replaceVersion.mock.invocationCallOrder[0],
+    );
   });
 
-  it('T-RIX-2 임시 설명이 없으면 바로 색인 대기열에 넣고 요약·캡션 없이 색인 요청도 없으며 예약 색인이 강제 색인을 요청한다', async () => {
+  it('T-RIX-2 임시 설명이 없어도 같은 경로로 바로 색인 대기열에 들어가고 예약 색인이 요약·캡션 없이 강제 색인을 요청한다', async () => {
     await seedDoc({ docId: DOC_A });
     h.assets.markTemporaryForRegeneration.mockResolvedValue(0);
     await h.service.reindex(DOC_A);
@@ -2164,7 +2404,44 @@ describe('REQ-BE-1.7.1', () => {
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
 
     await runScheduled();
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(requestsOf(DOC_A)).toHaveLength(1);
+    expect(requestsOf(DOC_A)[0]).toMatchObject({ version: '2', force: true });
+  });
+
+  it('T-RIX-6 이어서 예약 색인을 돌리면 버전 2의 요약·캡션을 만든 뒤 force: true로 색인을 요청한다', async () => {
+    await seedDoc({ docId: DOC_A });
+    h.assets.markTemporaryForRegeneration.mockResolvedValue(2);
+    h.assets.hintsFor.mockResolvedValue([{ placeholderId: 't1', text: HINT_SENT }]);
+    await h.service.reindex(DOC_A);
+    await h.drain();
+
+    // pendingHints 2 (이미지 1·표 1)
+    fakePending(h, { [DOC_A]: { image: 1, table: 1 } });
+    const result = await runScheduled();
+    expect(result).toEqual({ requeued: 0, captioned: 1, requested: 1, unreachable: 0 });
+    // ★ 요약·캡션(이미지 → 표)을 만든 뒤 색인을 요청한다
+    expect(callOrder(h)).toEqual([
+      ['image', DOC_A],
+      ['table', DOC_A],
+      ['index', DOC_A],
+    ]);
+    expect(h.assets.generateHints.mock.calls.every((c) => c[1] === '2')).toBe(true);
+    expect(requestsOf(DOC_A)).toHaveLength(1);
+    expect(requestsOf(DOC_A)[0]).toMatchObject({ version: '2', force: true });
+    expect(requestsOf(DOC_A)[0].hints).toEqual([{ placeholderId: 't1', text: HINT_SENT }]);
+  });
+
+  it('T-RIX-7 pendingHints가 0이면 요약·캡션 호출 없이 force: true로 색인을 요청한다', async () => {
+    await seedDoc({ docId: DOC_A });
+    h.assets.markTemporaryForRegeneration.mockResolvedValue(0);
+    await h.service.reindex(DOC_A);
+    await h.drain();
+
+    h.assets.pendingHints.mockResolvedValue(0);
+    const result = await runScheduled();
+    expect(result).toEqual({ requeued: 0, captioned: 0, requested: 1, unreachable: 0 });
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(requestsOf(DOC_A)[0]).toMatchObject({ version: '2', force: true });
   });
 
@@ -2182,36 +2459,58 @@ describe('REQ-BE-1.7.1', () => {
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });
 
-  it('T-RIX-5 재색인이 선점 표시를 푸는 시점은 captioning 전환 뒤라 그 전에는 예약 색인이 문서를 요청하지 않는다', async () => {
+  it('T-RIX-8 markTemporaryForRegeneration이 던지면 선점을 되돌린다(상태·마지막 버전·대기열 복원)', async () => {
     await seedDoc({ docId: DOC_A });
-    // 임시 설명 확인(markTemporaryForRegeneration)에서 멈춘다 — 이 순간 문서는 대기열에 들어 있다
+    const before = docOf(h.db, DOC_A);
+    h.assets.markTemporaryForRegeneration.mockRejectedValueOnce(new Error('mark boom'));
+    await expect(h.service.reindex(DOC_A)).rejects.toThrow('mark boom');
+    await h.drain();
+    const doc = docOf(h.db, DOC_A);
+    expect(doc.latestVersion).toBe('1');
+    expect(doc.processingState).toBe('completed');
+    // ★ 선점 때 넣은 대기열(queuedVersion '2')도 되돌린다
+    expect(doc.queuedVersion).toBeNull();
+    expect(doc.updatedAt.getTime()).toBe(before.updatedAt.getTime());
+    expect(transitionsOf(DOC_A)).toEqual([]);
+    await runScheduled();
+    expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+  });
+
+  it('T-RIX-5 재색인이 선점 표시를 푸는 시점은 markTemporaryForRegeneration 뒤라 그 호출을 막아 둔 동안 예약 색인은 그 문서를 다루지 않는다', async () => {
+    await seedDoc({ docId: DOC_A });
+    fakePending(h, { [DOC_A]: { image: 0, table: 1 } });
+    // markTemporaryForRegeneration에서 멈춘다 — 이 순간 문서는 대기열에 들어 있다
     const markGate = deferred<number>();
     h.assets.markTemporaryForRegeneration.mockImplementationOnce(() => markGate.promise);
-    const hintsGate = deferred<{ generated: number; temporary: number; stopped: boolean }>();
-    h.assets.generateHints.mockImplementationOnce(() => hintsGate.promise);
     const outcome = h.service.reindex(DOC_A);
     await waitUntil(() => h.assets.markTemporaryForRegeneration.mock.calls.length > 0);
     expect(docOf(h.db, DOC_A).queuedVersion).toBe('2');
 
-    // ★ 선점 표시가 남아 있어 건너뛴다 (대기열에는 그대로 남는다). 처리 작업이 멈춰 있으므로 drain하지 않는다
-    expect(await h.lifecycle.runScheduledIndex()).toEqual({ requested: 0, unreachable: 0 });
+    // ★ 선점 표시가 남아 있어 대상에서 빠진다 — 요약·캡션·색인 요청이 없고 대기열은 그대로다
+    expect(await h.lifecycle.runScheduledIndex()).toEqual({
+      requeued: 0,
+      captioned: 0,
+      requested: 0,
+      unreachable: 0,
+    });
+    expect(h.assets.pendingHints).not.toHaveBeenCalled();
+    expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
+    expect(docOf(h.db, DOC_A).processingState).toBe('queued');
     expect(docOf(h.db, DOC_A).queuedVersion).toBe('2');
 
     markGate.resolve(1);
     await outcome;
-    // captioning으로 바뀌었고 대기열이 비었다. 표·이미지 처리가 도는 동안 예약 색인은 요청하지 않는다
-    await waitUntil(() => h.assets.generateHints.mock.calls.length > 0);
-    const captioning = docOf(h.db, DOC_A);
-    expect(captioning.processingState).toBe('captioning');
-    expect(captioning.queuedVersion).toBeNull();
-    await h.lifecycle.runScheduledIndex();
-    expect(h.indexing.requestIndex).not.toHaveBeenCalled();
-
-    hintsGate.resolve({ generated: 1, temporary: 0, stopped: false });
     await h.drain();
     expect(docOf(h.db, DOC_A).queuedVersion).toBe('2');
-    await runScheduled();
+    expect(transitionsOf(DOC_A)).toEqual([['completed', 'queued']]);
+    // 선점 표시가 풀린 뒤의 예약 색인은 요약·캡션을 만들고 강제 색인을 요청한다
+    expect(await runScheduled()).toEqual({
+      requeued: 0,
+      captioned: 1,
+      requested: 1,
+      unreachable: 0,
+    });
     expect(requestsOf(DOC_A)).toHaveLength(1);
     expect(requestsOf(DOC_A)[0]).toMatchObject({ version: '2', force: true });
   });
@@ -2427,10 +2726,10 @@ describe('REQ-BE-1.2.8', () => {
     ['요약·캡션 편집', 'edit', 'edit'],
     ['임시 설명 없는 재색인', 'reindex', null],
   ] as const)(
-    'T-FU-ORDER-1 %s 선점 직후 교체되면 처리 상태 기록과 처리 시작 없이 요청은 성공하고 요청 기록은 남는다',
+    'T-FU-ORDER-1 %s 선점 직후 교체되면 처리 상태 기록과 색인 대기 갱신(startQueueing) 없이 요청은 성공하고 요청 기록은 남는다',
     async (_label, path, requestKind) => {
       await seedDoc({ docId: DOC_A });
-      const started = jest.spyOn(h.lifecycle, 'startProcessing');
+      const started = jest.spyOn(h.lifecycle, 'startQueueing');
       const held = await holdClaimPath(path);
       // ★ 선점 직후 같은 판 문서가 검색 가능해져 교체된 순간이다. 교체는 같은 갱신에서 대기열도 비운다
       await h.db.collection('documents').updateOne(
@@ -2454,10 +2753,10 @@ describe('REQ-BE-1.2.8', () => {
     },
   );
 
-  it('T-FU-ORDER-2 임시 설명이 있는 재색인도 선점 직후 교체되면 captioning 기록과 처리 시작이 없다', async () => {
+  it('T-FU-ORDER-2 임시 설명이 있는 재색인도 선점 직후 교체되면 queued 기록이 없고 요약·캡션 확인·색인 요청도 없다', async () => {
     await seedDoc({ docId: DOC_A });
     h.assets.markTemporaryForRegeneration.mockResolvedValue(1);
-    const started = jest.spyOn(h.lifecycle, 'startProcessing');
+    const started = jest.spyOn(h.lifecycle, 'startQueueing');
     const held = await holdClaimPath('reindex');
     await h.db.collection('documents').updateOne(
       { docId: DOC_A },
@@ -2472,13 +2771,14 @@ describe('REQ-BE-1.2.8', () => {
     expect(started).not.toHaveBeenCalled();
     expect(h.assets.generateHints).not.toHaveBeenCalled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
-    // ★ 교체된 문서의 대기열을 captioning 갱신이나 되살리기가 건드리지 않는다
+    expect(h.assets.pendingHints).not.toHaveBeenCalled();
+    // ★ 교체된 문서의 대기열을 서비스가 되살리지 않는다
     expect(docOf(h.db, DOC_A).queuedVersion).toBeNull();
     await runScheduled();
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });
 
-  it('T-FU-ORDER-5 재색인은 다시 읽어 교체됨이면 captioning 조건부 갱신이 성공할 상태여도 기록·처리 시작이 없다', async () => {
+  it('T-FU-ORDER-5 재색인은 다시 읽어 교체됨이면 queued 기록이 없다', async () => {
     await expectReindexStopsOn('replaced');
   });
 });
@@ -2489,10 +2789,10 @@ describe('REQ-BE-1.8.3', () => {
     ['요약·캡션 편집', 'edit'],
     ['재색인', 'reindex'],
   ] as const)(
-    'T-FU-ORDER-3 %s 선점 직후 삭제되면 처리 상태 기록과 처리 시작이 없다',
+    'T-FU-ORDER-3 %s 선점 직후 삭제되면 처리 상태 기록과 색인 대기 갱신(startQueueing)이 없다',
     async (_label, path) => {
       await seedDoc({ docId: DOC_A });
-      const started = jest.spyOn(h.lifecycle, 'startProcessing');
+      const started = jest.spyOn(h.lifecycle, 'startQueueing');
       const held = await holdClaimPath(path);
       await h.service.remove(DOC_A);
       held.release();
@@ -2513,7 +2813,7 @@ describe('REQ-BE-1.8.3', () => {
     },
   );
 
-  it('T-FU-ORDER-6 재색인은 다시 읽어 삭제됨이면 captioning 조건부 갱신이 성공할 상태여도 기록·처리 시작이 없다', async () => {
+  it('T-FU-ORDER-6 재색인은 다시 읽어 삭제됨이면 queued 기록이 없다', async () => {
     await expectReindexStopsOn('deleted');
   });
 });
@@ -3104,16 +3404,21 @@ async function runLogFlow(): Promise<FlowIds> {
   await h.service.remove(second);
   await h.drain();
   // 6. 거부되는 요청(기록이 없어야 한다)
-  // ★ 대기열에 든 queued 문서는 편집을 받으므로(REQ-BE-1.5.5) 셋째 문서는 표·이미지 처리(captioning)에서 멈춰 둔 채 잠긴 상태를 확정한다
-  const hintsGate = deferred<{ generated: number; temporary: number; stopped: boolean }>();
-  const hintCalls = h.assets.generateHints.mock.calls.length;
-  h.assets.generateHints.mockImplementationOnce(() => hintsGate.promise);
+  // ★ 대기열에 든 queued 문서는 편집을 받으므로(REQ-BE-1.5.5) 셋째 문서는 예약 색인의 요약·캡션 생성(captioning)에서
+  //   가짜 generateHints를 게이트로 막아 둔 채 잠긴 상태를 확정한다
+  const pending = fakePending(h, {});
   const third = (
     await h.service.upload(
       [uploadFile('third.md', MD_SENT)],
       [{ file_name: 'third.md', name: `${NAME_SENT}-c` }],
     )
   ).documents[0].doc_id;
+  await h.drain();
+  pending[third] = { image: 1, table: 0 };
+  const hintsGate = deferred<HintRunResult>();
+  const hintCalls = h.assets.generateHints.mock.calls.length;
+  h.assets.generateHints.mockImplementationOnce(() => hintsGate.promise);
+  const running = h.scheduler.runScheduledIndex();
   await waitUntil(() => h.assets.generateHints.mock.calls.length > hintCalls);
   await expect(
     h.service.upload([uploadFile('bad.pdf', 'x')], [{ file_name: 'bad.pdf', name: 'x' }]),
@@ -3121,7 +3426,10 @@ async function runLogFlow(): Promise<FlowIds> {
   await expect(h.service.edit(third, editBody({ name: '잠김' }))).rejects.toBeInstanceOf(
     DocumentLockedError,
   );
-  hintsGate.resolve({ generated: 0, temporary: 0, stopped: false });
+  // 이미지 캡션 하나를 만들고 마친다 — 문서가 queued로 돌아오고 captioning 기록이 남는다
+  pending[third] = { image: 0, table: 0 };
+  hintsGate.resolve({ generated: 1, temporary: 0, stopped: false, remaining: 0 });
+  await running;
   await h.drain();
   // 7. 실패 이벤트
   const fourth = (
@@ -3171,18 +3479,18 @@ describe('REQ-BE-6.1.1', () => {
       recordsFor(docId).filter((record) => record.kind === kind);
     // ★ 색인 요청은 예약 색인이 한다. 접수(accepted)는 처리 상태를 바꾸지 않으므로 기록이 없고,
     //   queued → completed 기록은 예약 색인 실행 뒤에 오는 성공 알림이 남긴다 (runLogFlow의 done)
+    // ★ 업로드 흐름의 기록은 uploaded → queued다. captioning과 queued → captioning·captioning → queued는 예약 색인 단계에서만 남는다
     expect(ofKind(ids.first, 'upload')).toEqual([rec('upload', NAME_SENT, null)]);
     expect(ofKind(ids.first, 'processing_state')).toEqual([
-      rec('processing_state', NAME_SENT, state('uploaded', 'captioning')),
-      rec('processing_state', NAME_SENT, state('captioning', 'queued')),
+      rec('processing_state', NAME_SENT, state('uploaded', 'queued')),
       rec('processing_state', NAME_SENT, state('queued', 'completed')),
       rec('processing_state', renamed, state('completed', 'queued')),
       rec('processing_state', renamed, state('queued', 'completed')),
       rec('processing_state', renamed, state('completed', 'uploaded')),
-      rec('processing_state', renamed, state('uploaded', 'captioning')),
-      rec('processing_state', renamed, state('captioning', 'queued')),
+      rec('processing_state', renamed, state('uploaded', 'queued')),
       rec('processing_state', renamed, state('queued', 'completed')),
     ]);
+    expect(ofKind(ids.first, 'captioning')).toEqual([]);
     expect(ofKind(ids.first, 'edit')).toEqual([
       rec('edit', renamed, { changedFields: ['name'] }),
       rec('edit', renamed, { changedFields: ['hints'] }),
@@ -3191,13 +3499,13 @@ describe('REQ-BE-6.1.1', () => {
     expect(ofKind(ids.first, 'replace')).toEqual([
       rec('replace', renamed, { replacedByDocId: ids.second }),
     ]);
-    expect(recordsFor(ids.first)).toHaveLength(14);
+    expect(recordsFor(ids.first)).toHaveLength(12);
     const secondKinds = recordsFor(ids.second).map((r) => r.kind);
     expect(secondKinds.filter((kind) => kind === 'upload')).toHaveLength(1);
-    expect(secondKinds.filter((kind) => kind === 'processing_state')).toHaveLength(3);
+    expect(secondKinds.filter((kind) => kind === 'processing_state')).toHaveLength(2);
     expect(secondKinds.filter((kind) => kind === 'delete')).toHaveLength(1);
-    expect(secondKinds).toHaveLength(5);
-    // 거부된 요청(형식 오류·잠금)은 기록이 없다. 셋째 문서는 업로드 기록뿐이다
+    expect(secondKinds).toHaveLength(4);
+    // 거부된 요청(형식 오류·잠금)은 기록이 없다. 셋째 문서는 업로드 기록과 예약 색인의 captioning 기록뿐이다
     expect(recordsFor(ids.third).filter((r) => r.kind !== 'processing_state')).toEqual([
       {
         kind: 'upload',
@@ -3206,6 +3514,30 @@ describe('REQ-BE-6.1.1', () => {
         outcome: success,
         detail: null,
       },
+      {
+        kind: 'captioning',
+        name: `${NAME_SENT}-c`,
+        editionLabel: null,
+        outcome: success,
+        detail: { count: 1, failedCount: 0 },
+      },
+    ]);
+    // ★ 셋째 문서의 처리 상태 기록: uploaded → queued, 예약 색인의 queued → captioning → queued 순서(captioning 기록이 captioning → queued 앞)
+    const thirdStates = ofKind(ids.third, 'processing_state').map((r) => r.detail);
+    expect(thirdStates).toEqual([
+      state('uploaded', 'queued'),
+      state('queued', 'captioning'),
+      state('captioning', 'queued'),
+    ]);
+    const thirdOrder = recordsFor(ids.third).map((r) =>
+      r.kind === 'processing_state' ? `${r.detail?.fromState}>${r.detail?.toState}` : r.kind,
+    );
+    expect(thirdOrder).toEqual([
+      'upload',
+      'uploaded>queued',
+      'queued>captioning',
+      'captioning',
+      'captioning>queued',
     ]);
     expect(h.logs.recordsOf('edit').filter((r) => r.docId === ids.third)).toHaveLength(0);
     // 실패 이벤트는 실패 기록과 사유 코드를 남긴다
@@ -3226,9 +3558,11 @@ describe('REQ-BE-8.2.1', () => {
     'documents.state_changed': ['docId', 'version', 'from', 'to', 'searchState'],
     'documents.replaced': ['docId', 'replacedBy'],
     'documents.processing_stopped': ['docId', 'version', 'reason'],
-    'documents.resume': ['captioning', 'reconciled', 'recovered'],
+    'documents.resume': ['captioning', 'reconciled', 'recovered', 'uploaded'],
     'documents.task_failed': ['task', 'docId', 'errorName'],
-    'documents.index_scheduled': ['requested', 'unreachable'],
+    'documents.index_scheduled': ['requeued', 'captioned', 'requested', 'unreachable'],
+    // ★ 앞 실행이 끝나지 않아 건너뛴 일정의 경고는 두 개수만 담는다
+    'documents.index_schedule_skipped': ['queued', 'captioning'],
     // ★ 오지 않는 일정의 경고는 키 이름만 담는다 — 표현식 값은 넣지 않는다 (P-3)
     'documents.index_schedule_unavailable': ['key'],
   };
@@ -3279,17 +3613,27 @@ describe('REQ-BE-8.2.1', () => {
   });
 
   it('T-LOGH-2 기동 처리·처리 중단·작업 실패 줄도 허용 필드만 담고 센티널이 없다', async () => {
-    // 기동 처리: 표·이미지 처리를 이을 문서가 있는 경우
+    // 기동 처리: 업로드됨 문서의 재추출이 센티널 문장의 오류로 실패하고, 요약·캡션 생성 중이던 문서는 대기열로 돌아간다
     await seed(
       h.db,
-      [docRecord({ docId: DOC_B, name: NAME_SENT, processingState: 'captioning' })],
-      [versionRecord({ docId: DOC_B, jobId: null })],
+      [
+        docRecord({
+          docId: DOC_A,
+          name: NAME_SENT,
+          processingState: 'uploaded',
+          searchState: 'not_searchable',
+          searchableVersion: null,
+        }),
+        docRecord({ docId: DOC_B, name: NAME_SENT, processingState: 'captioning' }),
+      ],
+      [versionRecord({ docId: DOC_A, jobId: null }), versionRecord({ docId: DOC_B, jobId: null })],
     );
+    h.assets.rebuildVersion.mockRejectedValueOnce(new Error(FAILMSG_SENT));
     await h.scheduler.resume();
     await h.drain();
-    // 작업 실패: 요약·캡션 만들기가 센티널 문장의 오류로 실패한다
-    h.assets.generateHints.mockRejectedValueOnce(new Error(FAILMSG_SENT));
-    await h.service.upload(
+    // 작업 실패: 예약 색인의 요약·캡션 만들기가 센티널 문장의 오류로 실패한다
+    const pending = fakePending(h, {});
+    const failing = await h.service.upload(
       [uploadFile(FILE_SENT, MD_SENT)],
       [
         {
@@ -3300,17 +3644,28 @@ describe('REQ-BE-8.2.1', () => {
       ],
     );
     await h.drain();
+    const failingId = failing.documents[0].doc_id;
+    pending[failingId] = { image: 1, table: 0 };
+    h.assets.generateHints.mockRejectedValueOnce(new Error(FAILMSG_SENT));
+    await h.scheduler.runScheduledIndex();
+    await h.drain();
     // 처리 중단: 요약·캡션을 만드는 동안 삭제한다
-    const gate = deferred<{ generated: number; temporary: number; stopped: boolean }>();
+    pending[failingId] = { image: 0, table: 0 };
+    const gate = deferred<HintRunResult>();
     const calls = h.assets.generateHints.mock.calls.length;
-    h.assets.generateHints.mockImplementationOnce(() => gate.promise);
     const second = await h.service.upload(
       [uploadFile('stop.md', MD_SENT)],
       [{ file_name: 'stop.md', name: `${NAME_SENT}-s` }],
     );
+    await h.drain();
+    const stopId = second.documents[0].doc_id;
+    pending[stopId] = { image: 1, table: 0 };
+    h.assets.generateHints.mockImplementationOnce(() => gate.promise);
+    const running = h.scheduler.runScheduledIndex();
     await waitUntil(() => h.assets.generateHints.mock.calls.length > calls);
-    await h.service.remove(second.documents[0].doc_id);
-    gate.resolve({ generated: 0, temporary: 0, stopped: false });
+    await h.service.remove(stopId);
+    gate.resolve({ generated: 0, temporary: 0, stopped: true, remaining: 1 });
+    await running;
     await h.drain();
 
     for (const sentinel of SENTINELS) expect(capture.lines.join('\n')).not.toContain(sentinel);
@@ -3323,6 +3678,9 @@ describe('REQ-BE-8.2.1', () => {
       expect(TASKS).toContain(line.task);
       expect(line.errorName).toBe('Error');
     }
+    expect(of('documents.task_failed').map((line) => line.task)).toEqual(
+      expect.arrayContaining(['resume', 'scheduled_index']),
+    );
     expect(of('documents.processing_stopped').length).toBeGreaterThan(0);
     for (const line of of('documents.processing_stopped')) {
       expect(STOP_REASONS).toContain(line.reason);
@@ -3348,12 +3706,38 @@ describe('REQ-BE-8.2.1', () => {
     for (const line of lines) expectAllowedKeys(line);
     const scheduled = lines.filter((line) => line.msg === 'documents.index_scheduled');
     expect(scheduled).toHaveLength(1);
+    expect(typeof scheduled[0].captioned).toBe('number');
     expect(typeof scheduled[0].requested).toBe('number');
     expect(typeof scheduled[0].unreachable).toBe('number');
     const failed = lines.filter((line) => line.msg === 'documents.task_failed');
     expect(failed).toHaveLength(1);
     expect(failed[0]).toMatchObject({ task: 'scheduled_index', errorName: 'Error' });
     expect([DOC_C, DOC_D]).toContain(failed[0].docId);
+  });
+
+  it('T-LOGH-2 앞 실행이 끝나지 않아 건너뛴 줄(index_schedule_skipped)은 queued·captioning 개수만 담고 센티널이 없다', async () => {
+    await seed(
+      h.db,
+      [docRecord({ docId: DOC_C, name: NAME_SENT, processingState: 'queued', queuedVersion: '1' })],
+      [versionRecord({ docId: DOC_C, jobId: null })],
+    );
+    const gate = deferred<IndexRequestOutcome>();
+    h.indexing.requestIndex.mockImplementationOnce(() => gate.promise);
+    const first = h.scheduler.runScheduledIndex();
+    await waitUntil(() => h.indexing.requestIndex.mock.calls.length > 0);
+    // ★ 앞 실행이 막혀 있는 동안 다시 부르면 건너뛰고 경고 한 줄만 남긴다
+    await h.scheduler.runScheduledIndex();
+    gate.resolve({ kind: 'accepted', jobId: 'job-skip' });
+    await first;
+    await h.drain();
+
+    for (const sentinel of SENTINELS) expect(capture.lines.join('\n')).not.toContain(sentinel);
+    const lines = documentLines();
+    for (const line of lines) expectAllowedKeys(line);
+    const skipped = lines.filter((line) => line.msg === 'documents.index_schedule_skipped');
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0].level).toBe(40);
+    expect(skipped[0]).toMatchObject({ queued: 1, captioning: 0 });
   });
 
   it('T-LOGH-2 오지 않는 일정의 경고(index_schedule_unavailable)는 key만 담고 표현식 값이 없다', async () => {
@@ -3388,6 +3772,11 @@ describe('REQ-BE-8.2.1', () => {
     expect(resumed).toHaveLength(1);
     expectAllowedKeys(resumed[0]);
     expect(Object.keys(resumed[0])).not.toContain('requeued');
+    // ★ 기동 처리 줄의 필드: 재추출한 업로드됨·대기열로 돌린 요약·캡션 생성 중·상태 맞추기·복구
+    expect(resumed[0]).toMatchObject({ uploaded: 0, captioning: 1 });
+    expect(Object.keys(resumed[0])).toEqual(
+      expect.arrayContaining(['uploaded', 'captioning', 'reconciled', 'recovered']),
+    );
     // ★ 기동 처리는 색인을 요청하지 않는다 (REQ-BE-1.10.8)
     expect(h.indexing.requestIndex).not.toHaveBeenCalled();
   });

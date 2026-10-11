@@ -1,6 +1,6 @@
 import type { ConfigService } from '@nestjs/config';
 import type { PinoLogger } from 'nestjs-pino';
-import { RagUnavailableError } from '../../common';
+import { BatchIndexingError, RagUnavailableError } from '../../common';
 import type { AppConfig } from '../../common';
 import { RagClient, RagRequestError } from '../index';
 import type { RagIndexRequest } from '../index';
@@ -1401,4 +1401,85 @@ describe('REQ-BE-10.1.4', () => {
       }
     },
   );
+});
+
+describe('REQ-BE-10.1.5', () => {
+  /** 일괄 색인 거부 본문이다. */
+  const batchBody = (details?: unknown) => ({
+    error: {
+      code: 'BATCH_INDEXING',
+      message: 'm',
+      ...(details === undefined ? {} : { details }),
+    },
+  });
+
+  const BATCH_OPS = CALLS.filter(([name]) => name === 'search' || name === 'evaluate');
+
+  it.each(BATCH_OPS)(
+    'T-ERR-9 %s는 503 BATCH_INDEXING을 BatchIndexingError로 바꾼다',
+    async (_name, call) => {
+      server.setHandler(() => ({ status: 503, json: batchBody({ remaining_jobs: 7 }) }));
+      const err = await caught(call(client));
+      expect(err).toBeInstanceOf(BatchIndexingError);
+      expect((err as BatchIndexingError).remainingJobs).toBe(7);
+      expect((err as BatchIndexingError).details).toEqual({ remaining_jobs: 7 });
+      expect(err).not.toBeInstanceOf(RagUnavailableError);
+      expect(err).not.toBeInstanceOf(RagRequestError);
+    },
+  );
+
+  it.each(BATCH_OPS)(
+    'T-ERR-10 %s의 remaining_jobs 0도 BatchIndexingError(0)이다',
+    async (_n, call) => {
+      server.setHandler(() => ({ status: 503, json: batchBody({ remaining_jobs: 0 }) }));
+      const err = await caught(call(client));
+      expect(err).toBeInstanceOf(BatchIndexingError);
+      expect((err as BatchIndexingError).remainingJobs).toBe(0);
+    },
+  );
+
+  it('T-ERR-11 SERVER_NOT_READY 503은 여전히 RagUnavailableError다', async () => {
+    server.setHandler(() => ({
+      status: 503,
+      json: { error: { code: 'SERVER_NOT_READY', message: 'm', details: { remaining_jobs: 7 } } },
+    }));
+    const err = await caught(client.search({ query: 'q' }));
+    expect(err).toBeInstanceOf(RagUnavailableError);
+    expect(err).not.toBeInstanceOf(BatchIndexingError);
+  });
+
+  // ★ IMPL_PLAN G-2: remaining_jobs를 믿을 수 없으면 일반 연결 불가로 본다
+  it.each([
+    ['details 없음', undefined],
+    ['details가 null', null],
+    ['remaining_jobs 없음', {}],
+    ['음수', { remaining_jobs: -1 }],
+    ['소수', { remaining_jobs: 1.5 }],
+    ['문자열', { remaining_jobs: '7' }],
+  ])('T-ERR-12 BATCH_INDEXING이어도 %s이면 RagUnavailableError다', async (_label, details) => {
+    server.setHandler(() => ({ status: 503, json: batchBody(details) }));
+    const err = await caught(client.search({ query: 'q' }));
+    expect(err).toBeInstanceOf(RagUnavailableError);
+    expect(err).not.toBeInstanceOf(BatchIndexingError);
+  });
+
+  it('T-ERR-13 rag.call_failed 로그는 필드 넷뿐이고 응답 메시지가 없다', async () => {
+    server.setHandler(() => ({
+      status: 503,
+      json: {
+        error: {
+          code: 'BATCH_INDEXING',
+          message: 'SECRET-MSG-7f3a',
+          details: { remaining_jobs: 7 },
+        },
+      },
+    }));
+    await caught(client.search({ query: 'q' }));
+    const warns = logCalls.filter((c) => c.args.includes('rag.call_failed'));
+    expect(warns).toHaveLength(1);
+    const fields = warns[0]?.args[0] as Record<string, unknown>;
+    expect(Object.keys(fields).sort()).toEqual(['code', 'elapsedMs', 'operation', 'status']);
+    expect(fields).toMatchObject({ operation: 'search', status: 503, code: 'BATCH_INDEXING' });
+    expect(JSON.stringify(logCalls.map((c) => c.args))).not.toContain('SECRET-MSG-7f3a');
+  });
 });

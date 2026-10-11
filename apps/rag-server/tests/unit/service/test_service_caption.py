@@ -13,9 +13,18 @@ from minerva_rag.core import (
     Settings,
 )
 from minerva_rag.resource import LlmRole, ModelHub
+from minerva_rag.service import CaptionService
 from minerva_rag.service.captioner import Captioner
 
-from .fakes import FakeHub, FakeReceiver, go, wire
+from .fakes import (
+    FakeHub,
+    FakeJobQueue,
+    FakeReceiver,
+    ReadyStub,
+    Timeline,
+    go,
+    wire,
+)
 
 _TABLE = "| 항목 | 값 |\n| --- | --- |\n| 갱신 | 30일 전 |"
 _PNG = b"\x89PNG\r\n\x1a\n\x00\x01\x02binary"
@@ -149,7 +158,8 @@ def test_image_caption_failures(
 def test_caption_service_passes_result(
     monkeypatch: pytest.MonkeyPatch, settings: Settings, receiver: FakeReceiver
 ) -> None:
-    """[REQ-RAG-10.2.1] 서비스는 Captioner 결과를 돌려주고 작업 큐를 부르지 않으며 알림도 없다."""
+    """[REQ-RAG-10.2.1] 서비스는 Captioner 결과를 돌려주고 슬롯 안에서 처리하며 작업·알림을
+    만들지 않는다."""
     services, parts = wire(monkeypatch, settings)
     parts.hub.reply = "  가짜 응답  "
 
@@ -159,10 +169,45 @@ def test_caption_service_passes_result(
             parts.timeline.clear()
             assert await services.caption.summarize_table(_TABLE) == "가짜 응답"
             assert await services.caption.caption_image(_PNG) == "가짜 응답"
-            # 모델 호출만 있고 작업 큐(스파이)에는 아무 호출도 없다
-            assert [e[0] for e in parts.timeline] == ["generate", "generate"]
         finally:
             await services.lifecycle.shutdown()
 
     go(scenario())
+
+    names = [e[0] for e in parts.timeline]
+    assert names.count("generate") == 2
+    # 슬롯에 들어가 처리한다 — 들어가기 전에 임베딩·재정렬 모델을 내린다(REQ-RAG-10.8.8.5)
+    assert names.count("jobs.caption_enter") == 2
+    assert names.count("jobs.caption_exit") == 2
+    assert names.index("jobs.caption_enter") < names.index("generate")
+    assert ("release_local", "end") in parts.timeline
+    # 작업은 만들지 않는다
+    assert "jobs.submit" not in names
     assert receiver.requests == []
+
+
+@pytest.mark.req("REQ-RAG-10.2.1")
+@pytest.mark.parametrize("kind", ["table", "image"])
+def test_caption_inside_slot(kind: str) -> None:
+    """[REQ-RAG-10.2.1] 요약·캡션은 caption_slot 안에서 생성하고, 생성이 실패해도 슬롯을 나온다."""
+    timeline: Timeline = []
+    hub = FakeHub(timeline)
+    queue = FakeJobQueue(timeline)
+    service = CaptionService(_captioner(hub), queue, ReadyStub(True))
+
+    async def call() -> str:
+        if kind == "table":
+            return await service.summarize_table(_TABLE)
+        return await service.caption_image(_PNG)
+
+    assert go(call()) == "생성된 문장"
+    names = [entry[0] for entry in timeline]
+    assert names == ["queue.caption_enter", "generate", "queue.caption_exit"]
+
+    # 생성이 실패해도 슬롯을 나온다
+    timeline.clear()
+    hub.generate_error = RuntimeError("boom")
+    with pytest.raises(CaptionFailedError):
+        go(call())
+    names = [entry[0] for entry in timeline]
+    assert names == ["queue.caption_enter", "generate", "queue.caption_exit"]

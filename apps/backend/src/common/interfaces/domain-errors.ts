@@ -11,11 +11,14 @@ export type ErrorCode =
   | 'DOCUMENT_NOT_SEARCHABLE'
   | 'EVALUATION_IN_PROGRESS'
   | 'PAYLOAD_TOO_LARGE'
-  | 'RAG_UNAVAILABLE';
+  | 'RAG_UNAVAILABLE'
+  | 'BATCH_INDEXING';
 
 /** 경계 밖으로 나가는 오류의 기반이다. */
 export abstract class DomainError extends Error {
   abstract readonly code: ErrorCode;
+  /** 오류 응답의 details다. API.md 「오류 코드」가 정하지 않은 코드는 null이다. */
+  readonly details: Readonly<Record<string, unknown>> | null = null;
 
   constructor(message?: string) {
     super(message);
@@ -129,5 +132,24 @@ export class RagUnavailableError extends DomainError {
 
   constructor(message = 'RAG Server가 응답하지 않거나 준비 중입니다') {
     super(message);
+  }
+}
+
+/** RAG Server가 일괄 색인 중이라 요청을 거부했을 때 던진다. */
+export class BatchIndexingError extends DomainError {
+  readonly code = 'BATCH_INDEXING' as const;
+  /** 일괄 색인에 남은 작업 수다. */
+  readonly remainingJobs: number;
+  // ★ target ES2023은 useDefineForClassFields라 초기값 없이 다시 선언하면 TS2612다. declare로 타입만 좁힌다
+  declare readonly details: Readonly<{ remaining_jobs: number }>;
+
+  constructor(
+    remainingJobs: number,
+    message = 'RAG Server가 일괄 색인 중이라 요청을 처리하지 않았습니다',
+  ) {
+    super(message);
+    this.remainingJobs = remainingJobs;
+    // ★ super 뒤에 써야 base의 null 초기값을 덮는다
+    (this as { details: unknown }).details = Object.freeze({ remaining_jobs: remainingJobs });
   }
 }

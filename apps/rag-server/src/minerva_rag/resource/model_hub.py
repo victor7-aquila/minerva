@@ -10,7 +10,7 @@ import unicodedata
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import httpx
 import ollama
@@ -31,6 +31,9 @@ log = get_logger(__name__)
 
 _OLLAMA_CONNECT_TIMEOUT_SECONDS = 5.0
 _HEALTH_TIMEOUT_SECONDS = 5.0
+# ★ Ollama가 모델을 실제로 내릴 때까지 기다리는 상한과 확인 간격 (테스트가 바꿔 끼운다)
+_UNLOAD_WAIT_SECONDS = 30.0
+_UNLOAD_POLL_SECONDS = 0.2
 _THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 
 # 키워드 토큰화: 문자·숫자의 연속 구간이 단어다 (공백·구두점·기호·밑줄에서 나뉜다)
@@ -60,19 +63,58 @@ def _create_ollama_client(settings: Settings) -> ollama.AsyncClient:
     )
 
 
-def _load_embedding_model(settings: Settings) -> "SentenceTransformer":
-    """RAG_MODELS_DIR에서 임베딩 모델을 불러온다. 없으면 그 위치로 내려받는다."""
+def _loaded_names(response: Any) -> set[str]:
+    """ps 응답에서 올라간 모델 이름을 모은다. ':latest'를 뗀 이름도 함께 담는다."""
+    names = {name for entry in response.models for name in (entry.model, entry.name) if name}
+    return names | {name.removesuffix(":latest") for name in names}
+
+
+def _cuda_available() -> bool:
+    """GPU(CUDA)를 쓸 수 있는지 돌려준다."""
     # ★ torch import가 무거워 호출 시점에 늦게 한다
+    import torch
+
+    return bool(torch.cuda.is_available())
+
+
+def _empty_cuda_cache() -> None:
+    """GPU 캐시 메모리를 비운다."""
+    import torch
+
+    torch.cuda.empty_cache()
+
+
+def _load_embedding_model(settings: Settings, device: str, half: bool) -> "SentenceTransformer":
+    """RAG_MODELS_DIR에서 임베딩 모델을 지정한 장치로 불러온다. 없으면 그 위치로 내려받는다.
+
+    ★ half이면 처음부터 fp16으로 불러온다. fp32로 GPU에 올린 뒤 줄이면 GPU 메모리를 넘는다.
+    """
+    import torch
     from sentence_transformers import SentenceTransformer
 
-    return SentenceTransformer(settings.embedding_model, cache_folder=str(settings.models_dir))
+    return SentenceTransformer(
+        settings.embedding_model,
+        cache_folder=str(settings.models_dir),
+        device=device,
+        model_kwargs={"torch_dtype": torch.float16} if half else None,
+    )
 
 
-def _load_reranker_model(settings: Settings) -> "CrossEncoder":
-    """RAG_MODELS_DIR에서 재정렬 모델을 불러온다. 없으면 그 위치로 내려받는다."""
+def _load_reranker_model(settings: Settings, device: str) -> "CrossEncoder":
+    """RAG_MODELS_DIR에서 재정렬 모델을 지정한 장치로 불러온다. 없으면 그 위치로 내려받는다."""
     from sentence_transformers import CrossEncoder
 
-    return CrossEncoder(settings.reranker_model, cache_folder=str(settings.models_dir))
+    return CrossEncoder(
+        settings.reranker_model, cache_folder=str(settings.models_dir), device=device
+    )
+
+
+def _dtype_name(model: object) -> str:
+    """모델의 dtype 이름을 `torch.` 접두사 없이 돌려준다. 알 수 없으면 unknown이다."""
+    dtype = getattr(model, "dtype", None)
+    if dtype is None:
+        return "unknown"
+    return str(dtype).removeprefix("torch.")
 
 
 # ── 키워드 토큰화 (모델이 필요 없다) ─────────────────────────────────
@@ -148,6 +190,10 @@ class ModelHub:
         self._reranker: CrossEncoder | None = None
         self._dimension: int | None = None
         self._closed = False
+        # prepare가 정하는 실행 장치("cuda"·"cpu")와, 각 모델이 지금 그 장치에 있는지
+        self._device: str | None = None
+        self._embed_on_device = False
+        self._rerank_on_device = False
         # ★ HF 빠른 토크나이저는 동시에 쓰면 "Already borrowed"로 실패한다 — 모델마다 잠근다.
         # 잠금은 워커 스레드 안에서만 잡아 이벤트 루프가 추론을 기다리지 않는다
         self._embed_lock = threading.Lock()
@@ -168,7 +214,16 @@ class ModelHub:
         for model in wanted:
             await self._check_ollama_model(model)
 
-        embedder = await self._load_embedder()
+        try:
+            device = "cuda" if await asyncio.to_thread(_cuda_available) else "cpu"
+        except Exception as exc:
+            raise self._prepare_failure(
+                settings.embedding_model,
+                "device_detect_failed",
+                f"임베딩 모델을 불러오지 못했습니다: {settings.embedding_model}",
+            ) from exc
+        half = device == "cuda"
+        embedder = await self._load_embedder(device, half)
         try:
             dimension = embedder.get_embedding_dimension()
         except Exception as exc:
@@ -192,7 +247,17 @@ class ModelHub:
                 f"임베딩 모델을 불러오지 못했습니다: {settings.embedding_model}",
             )
         try:
-            reranker = await asyncio.to_thread(_load_reranker_model, settings)
+            # ★ 로더가 fp16을 지키지 못했어도 GPU의 임베딩 모델은 fp16이어야 한다
+            if half and _dtype_name(embedder) != "float16":
+                await asyncio.to_thread(embedder.half)
+        except Exception as exc:
+            raise self._prepare_failure(
+                settings.embedding_model,
+                "half_failed",
+                f"임베딩 모델을 불러오지 못했습니다: {settings.embedding_model}",
+            ) from exc
+        try:
+            reranker = await asyncio.to_thread(_load_reranker_model, settings, device)
         except Exception as exc:
             raise self._prepare_failure(
                 settings.reranker_model,
@@ -204,6 +269,10 @@ class ModelHub:
         self._reranker = reranker
         self._dimension = dimension
         self._counter_tokenizer = counter
+        self._device = device
+        self._embed_on_device = True
+        self._rerank_on_device = True
+        log.info("resource.models_ready", device=device, embedding_dtype=_dtype_name(embedder))
 
     async def _check_ollama_model(self, model: str) -> None:
         """Ollama에 모델이 있는지 확인한다. 없거나 확인하지 못하면 ModelLoadError를 낸다."""
@@ -228,12 +297,12 @@ class ModelHub:
                 model, "ollama_check_failed", f"Ollama에서 모델을 확인하지 못했습니다: {model}"
             ) from exc
 
-    async def _load_embedder(self) -> "SentenceTransformer":
-        """모델 폴더를 만들고 임베딩 모델을 불러온다."""
+    async def _load_embedder(self, device: str, half: bool) -> "SentenceTransformer":
+        """모델 폴더를 만들고 임베딩 모델을 지정한 장치로 불러온다."""
         settings = self._settings
         try:
             await asyncio.to_thread(settings.models_dir.mkdir, parents=True, exist_ok=True)
-            return await asyncio.to_thread(_load_embedding_model, settings)
+            return await asyncio.to_thread(_load_embedding_model, settings, device, half)
         except Exception as exc:
             raise self._prepare_failure(
                 settings.embedding_model,
@@ -369,12 +438,156 @@ class ModelHub:
     def _encode_locked(self, encode: Any, inputs: Any) -> Any:
         """임베딩 모델 추론을 잠금 아래에서 한 번에 하나씩 실행한다. 워커 스레드에서만 부른다."""
         with self._embed_lock:
+            self._ensure_embedder_on_device()
             return encode(inputs, normalize_embeddings=True, convert_to_numpy=True)
 
     def _predict_locked(self, reranker: "CrossEncoder", pairs: list[tuple[str, str]]) -> Any:
         """재정렬 추론을 잠금 아래에서 한 번에 하나씩 실행한다. 워커 스레드에서만 부른다."""
         with self._rerank_lock:
+            self._ensure_reranker_on_device()
             return reranker.predict(pairs, convert_to_numpy=True)
+
+    def _ensure_embedder_on_device(self) -> None:
+        """내려 둔 임베딩 모델을 다시 GPU에 올린다. ★ 임베딩 잠금 안에서만 부른다."""
+        if self._device != "cuda" or self._embed_on_device or self._embedder is None:
+            return
+        started = time.perf_counter()
+        self._embedder.to("cuda")
+        self._embed_on_device = True
+        self._log_loaded(["embedding"], started)
+
+    def _ensure_reranker_on_device(self) -> None:
+        """내려 둔 재정렬 모델을 다시 GPU에 올린다. ★ 재정렬 잠금 안에서만 부른다."""
+        if self._device != "cuda" or self._rerank_on_device or self._reranker is None:
+            return
+        started = time.perf_counter()
+        self._reranker.to("cuda")
+        self._rerank_on_device = True
+        self._log_loaded(["reranker"], started)
+
+    @staticmethod
+    def _log_loaded(models: list[str], started: float) -> None:
+        """GPU에 올린 모델과 걸린 시간을 남긴다."""
+        log.info(
+            "resource.models_loaded",
+            models=models,
+            device="cuda",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+    # ── 모델 내리기·올리기 (일괄 색인 단계 전환) ─────────────────
+
+    async def release_local_models(self) -> None:
+        """임베딩·재정렬 모델을 GPU 메모리에서 내린다. 진행 중인 계산이 끝난 뒤 내린다."""
+        embedder, reranker = self._require_embedder(), self._require_reranker()
+        if self._device != "cuda":
+            return  # CPU에서는 하는 일이 없다
+        started = time.perf_counter()
+        await asyncio.to_thread(self._offload, embedder, reranker)
+        log.info(
+            "resource.models_released",
+            target="local",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+    def _offload(self, embedder: "SentenceTransformer", reranker: "CrossEncoder") -> None:
+        """두 모델을 CPU로 옮기고 GPU 캐시를 비운다. 워커 스레드에서만 부른다."""
+        # ★ 잠금은 하나씩만 잡는다 — 진행 중인 계산이 끝날 때까지 기다린 뒤 옮긴다
+        with self._embed_lock:
+            if self._embed_on_device:
+                embedder.to("cpu")
+                self._embed_on_device = False
+        with self._rerank_lock:
+            if self._rerank_on_device:
+                reranker.to("cpu")
+                self._rerank_on_device = False
+        _empty_cuda_cache()
+
+    async def load_local_models(self) -> None:
+        """내려 둔 임베딩·재정렬 모델을 GPU에 다시 올린다. 이미 올라가 있으면 하는 일이 없다."""
+        embedder, reranker = self._require_embedder(), self._require_reranker()
+        if self._device != "cuda":
+            return
+        started = time.perf_counter()
+        loaded = await asyncio.to_thread(self._onload, embedder, reranker)
+        if loaded:
+            self._log_loaded(loaded, started)
+
+    def _onload(self, embedder: "SentenceTransformer", reranker: "CrossEncoder") -> list[str]:
+        """장치에 없는 모델을 GPU로 올리고 올린 이름을 돌려준다. 워커 스레드에서만 부른다."""
+        loaded: list[str] = []
+        with self._embed_lock:
+            if not self._embed_on_device:
+                embedder.to("cuda")
+                self._embed_on_device = True
+                loaded.append("embedding")
+        with self._rerank_lock:
+            if not self._rerank_on_device:
+                reranker.to("cuda")
+                self._rerank_on_device = True
+                loaded.append("reranker")
+        return loaded
+
+    async def release_ollama_models(self) -> None:
+        """설정한 Ollama 모델을 메모리에서 내리고, 실제로 내려간 것을 확인한 뒤 돌아온다."""
+        settings = self._settings
+        wanted = list(
+            dict.fromkeys([settings.chunking_llm, settings.table_llm, settings.caption_vlm])
+        )
+        started = time.perf_counter()
+        # ★ 한 모델이 실패해도 나머지는 모두 시도하고, 끝에 첫 예외를 낸다
+        first_error: Exception | None = None
+        for name in wanted:
+            try:
+                await self._unload_one(name)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+        await self._wait_unloaded(wanted)
+        log.info(
+            "resource.models_released",
+            target="ollama",
+            elapsed_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+    async def _unload_one(self, model: str) -> None:
+        """모델 하나를 내리는 요청을 보낸다. ★ 빈 프롬프트와 keep_alive 0이면 내리기만 한다."""
+        try:
+            await self._ollama.generate(model=model, prompt="", keep_alive=0, stream=False)
+        except (ConnectionError, httpx.ConnectTimeout) as exc:
+            self._raise_unavailable(exc, self._role_of(model), model)
+
+    async def _wait_unloaded(self, wanted: list[str]) -> None:
+        """대상이 모두 사라질 때까지 올라간 모델 목록을 본다. 상한을 넘기면 TimeoutError다."""
+        deadline = time.monotonic() + _UNLOAD_WAIT_SECONDS
+        targets = set(wanted)
+        while True:
+            try:
+                response = await self._ollama.ps()
+            except (ConnectionError, httpx.ConnectTimeout) as exc:
+                self._raise_unavailable(exc, self._role_of(wanted[0]), wanted[0])
+            if not targets & _loaded_names(response):
+                return
+            if time.monotonic() >= deadline:
+                raise TimeoutError("Ollama 모델이 내려가지 않았습니다")
+            await asyncio.sleep(_UNLOAD_POLL_SECONDS)
+
+    def _role_of(self, model: str) -> LlmRole:
+        """그 모델을 쓰는 첫 역할을 돌려준다."""
+        for role in LlmRole:
+            if self._model_for(role) == model:
+                return role
+        return LlmRole.CHUNKING
+
+    @staticmethod
+    def _raise_unavailable(exc: Exception, role: LlmRole, model: str) -> NoReturn:
+        """연결 불가를 ModelUnavailableError로 바꿔 낸다. 연결된 뒤 끊긴 경우는 그대로 낸다."""
+        if isinstance(exc, ConnectionResetError | ConnectionAbortedError | BrokenPipeError):
+            raise exc
+        log.warning("resource.model_unavailable", role=role.value, model=model)
+        raise ModelUnavailableError() from exc
 
     def count_tokens(self, text: str) -> int:
         """임베딩 모델의 토크나이저로 센다. 토크나이저가 붙이는 특수 토큰은 세지 않는다."""

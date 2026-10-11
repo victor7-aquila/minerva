@@ -263,7 +263,7 @@ export class DocumentsService implements OnModuleInit {
     }
     // ★ 모두 성공한 뒤에만 처리를 시작한다. 응답 뒤에 돈다 (REQ-BE-1.1.9)
     for (const docId of docIds) {
-      this.lifecycle.startProcessing(docId, '1');
+      this.lifecycle.startQueueing(docId, '1');
     }
     return { documents: created.map((c) => c.view) };
   }
@@ -693,7 +693,7 @@ export class DocumentsService implements OnModuleInit {
     if (lost === null) {
       await this.lifecycle.recordStateChange(doc, 'uploaded');
       // ★ 검색 상태·searchableVersion은 건드리지 않는다 — 이전 버전이 계속 검색된다 (REQ-BE-1.6.2)
-      this.lifecycle.startProcessing(docId, next);
+      this.lifecycle.startQueueing(docId, next);
     }
     return {
       doc_id: docId,
@@ -740,7 +740,6 @@ export class DocumentsService implements OnModuleInit {
     // ★ updatedAt을 바꾸지 않는다 — 내용 변경·편집이 아니다
     const next = await this.claimNewVersion(doc, 'reindex', 'queued', true, {});
     try {
-      let count: number;
       try {
         const prev = await this.repo.findVersion(docId, doc.latestVersion);
         if (prev === null) throw new Error('version record missing');
@@ -757,34 +756,17 @@ export class DocumentsService implements OnModuleInit {
           result: null,
           failure: null,
         });
-        count = await this.assets.markTemporaryForRegeneration(docId, next);
+        // ★ 임시 설명은 다시 만들도록 pending으로 돌린다. 만드는 일은 예약 색인이 한다
+        await this.assets.markTemporaryForRegeneration(docId, next);
       } catch (error) {
         await this.rollbackClaim(doc, next, 'queued');
         await this.lifecycle.recheckAfterVersionWrite(docId);
         throw error;
       }
-      // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록·처리 시작을 건너뛴다
+      // ★ 새 버전을 쓰는 사이 삭제·교체됐으면 맞춘다. 그랬으면 상태 기록을 건너뛴다
       const lost = await this.lifecycle.recheckAfterVersionWrite(docId);
       if (lost !== null) return;
 
-      if (count > 0) {
-        // ★ 임시 설명이 있으면 다시 만든다. 대기열에서 빼고 captioning으로 바꾼다. 기록에는 최종 상태만 남긴다 (D6)
-        const ok = await this.repo.updateDocument(
-          {
-            docId,
-            deleted: false,
-            searchState: { $ne: 'replaced' },
-            latestVersion: next,
-            processingState: 'queued',
-            queuedVersion: next,
-          },
-          { processingState: 'captioning', queuedVersion: null },
-        );
-        if (!ok) return;
-        await this.lifecycle.recordStateChange(doc, 'captioning');
-        this.lifecycle.startProcessing(docId, next);
-        return;
-      }
       // 대기열에는 선점 때 이미 들어 있다. 색인 요청은 예약 색인이 force로 한다
       await this.lifecycle.recordStateChange(doc, 'queued');
     } finally {

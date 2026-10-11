@@ -5,7 +5,7 @@ export type RagChunking = 'semantic' | 'rule';
 export type RagJobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'superseded';
 
 /** 색인 중 단계다. */
-export type RagJobStage = 'chunking' | 'embedding' | 'storing';
+export type RagJobStage = 'chunking' | 'embedding_pending' | 'embedding' | 'storing';
 
 /** 색인 요청 접수 결과다. */
 export type RagIndexOutcome = 'queued' | 'joined' | 'reused';

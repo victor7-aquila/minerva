@@ -24,7 +24,7 @@ _JOBS_DEFAULT = APP_DIR / "../../data/rag-server/jobs.sqlite3"
 _MODELS_DEFAULT = APP_DIR / "../../data/rag-server/models"
 _GLOSSARY_DEFAULT = APP_DIR / "config/glossary.yaml"
 
-# 기본값이 있는 21개 키: (키, 필드, 기본값)
+# 기본값이 있는 22개 키: (키, 필드, 기본값)
 DEFAULT_CASES: list[tuple[str, str, Any]] = [
     ("RAG_MAX_MARKDOWN_BYTES", "max_markdown_bytes", 10485760),
     ("RAG_MAX_IMAGE_BYTES", "max_image_bytes", 20971520),
@@ -34,7 +34,7 @@ DEFAULT_CASES: list[tuple[str, str, Any]] = [
     ("RAG_CHUNKING_LLM", "chunking_llm", "qwen3:14b"),
     ("RAG_TABLE_LLM", "table_llm", "qwen3:14b"),
     ("RAG_CAPTION_VLM", "caption_vlm", "qwen3-vl:8b"),
-    ("RAG_EMBEDDING_MODEL", "embedding_model", "Qwen/Qwen3-Embedding-4B"),
+    ("RAG_EMBEDDING_MODEL", "embedding_model", "Qwen/Qwen3-Embedding-0.6B"),
     ("RAG_RERANKER_MODEL", "reranker_model", "BAAI/bge-reranker-v2-m3"),
     ("RAG_CHUNK_MAX_TOKENS", "chunk_max_tokens", 512),
     ("RAG_CHUNKING_LLM_MAX_INPUT_TOKENS", "chunking_llm_max_input_tokens", 8000),
@@ -45,11 +45,12 @@ DEFAULT_CASES: list[tuple[str, str, Any]] = [
     ("RAG_NEIGHBOR_MAX_TOKENS", "neighbor_max_tokens", 1024),
     ("RAG_LATEST_EDITION_WEIGHT", "latest_edition_weight", 0.0),
     ("RAG_JOB_CONCURRENCY", "job_concurrency", 1),
+    ("RAG_BATCH_IDLE_SECONDS", "batch_idle_seconds", 300.0),
     ("RAG_NOTIFY_RETRIES", "notify_retries", 5),
     ("RAG_SHUTDOWN_TIMEOUT_SECONDS", "shutdown_timeout_seconds", 30.0),
 ]
 
-# 전체 26개 키: (키, 필드, 입력, 기대, 기대 타입)
+# 전체 27개 키: (키, 필드, 입력, 기대, 기대 타입)
 ENV_CASES: list[tuple[str, str, str, Any, type]] = [
     ("RAG_QDRANT_URL", "qdrant_url", "http://qdrant:6333", "http://qdrant:6333", str),
     ("RAG_OLLAMA_URL", "ollama_url", "http://ollama:11434", "http://ollama:11434", str),
@@ -99,6 +100,7 @@ ENV_CASES: list[tuple[str, str, str, Any, type]] = [
     ("RAG_NEIGHBOR_MAX_TOKENS", "neighbor_max_tokens", "0", 0, int),
     ("RAG_LATEST_EDITION_WEIGHT", "latest_edition_weight", "0.25", 0.25, float),
     ("RAG_JOB_CONCURRENCY", "job_concurrency", "2", 2, int),
+    ("RAG_BATCH_IDLE_SECONDS", "batch_idle_seconds", "12.5", 12.5, float),
     ("RAG_NOTIFY_RETRIES", "notify_retries", "0", 0, int),
     ("RAG_SHUTDOWN_TIMEOUT_SECONDS", "shutdown_timeout_seconds", "12.5", 12.5, float),
 ]
@@ -124,7 +126,7 @@ def _load_error() -> RuntimeError:
 
 @pytest.mark.req("REQ-RAG-11.1.1")
 def test_settings_fields_match_keys() -> None:
-    """[REQ-RAG-11.1.1] Settings 필드는 「설정」 표의 26개 키와 하나씩 대응한다."""
+    """[REQ-RAG-11.1.1] Settings 필드는 「설정」 표의 27개 키와 하나씩 대응한다."""
     keys = {"RAG_" + name.upper() for name in Settings.model_fields}
     assert keys - ALL_KEYS == set()  # 여분 키 없음
     assert ALL_KEYS - keys == set()  # 빠진 키 없음
@@ -257,6 +259,7 @@ def test_failure_hides_values(
         ("RAG_SEARCH_DEFAULT_TOP_N", "0"),
         ("RAG_NEIGHBOR_MAX_TOKENS", "-1"),
         ("RAG_JOB_CONCURRENCY", "0"),
+        ("RAG_BATCH_IDLE_SECONDS", "-1"),
         ("RAG_NOTIFY_RETRIES", "-1"),
         ("RAG_SHUTDOWN_TIMEOUT_SECONDS", "-0.5"),
     ],
@@ -278,6 +281,7 @@ def test_range_violation_fails(
         ("RAG_JOB_CONCURRENCY", "job_concurrency", "1", 1),
         ("RAG_CHUNKING_RETRIES", "chunking_retries", "0", 0),
         ("RAG_NEIGHBOR_MAX_TOKENS", "neighbor_max_tokens", "0", 0),
+        ("RAG_BATCH_IDLE_SECONDS", "batch_idle_seconds", "0", 0.0),
         ("RAG_NOTIFY_RETRIES", "notify_retries", "0", 0),
         ("RAG_SHUTDOWN_TIMEOUT_SECONDS", "shutdown_timeout_seconds", "0", 0.0),
     ],
