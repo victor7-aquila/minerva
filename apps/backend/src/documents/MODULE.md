@@ -507,7 +507,7 @@ classDiagram
 
 **`REQ-BE-1.9.14`** 예약 색인에서 요약·캡션을 다 마치지 못하면 → 그 실행이 끝날 때 색인 대기
 
-- 처리 계약: 예약 색인이 `captioning`으로 바꾼 문서 중 그 실행에서 `REQ-BE-1.9.13`으로 되돌리지 못한 문서(저장 오류 등으로 요약·캡션 생성이 중간에 멈췄거나, 표 요약 뒤에도 `remaining`이 0이 아닌 문서 등)를, 그 실행의 색인 요청(「예약 색인 실행」)을 마친 뒤 삭제됨·교체됨이 아니고 처리 상태가 `captioning`이며 `latestVersion`이 이번 실행이 읽은 버전일 때만 조건부 갱신 하나로 `queued`로 바꾸고 `queuedVersion`을 그 버전으로 둔다(`REQ-BE-1.10.2`). 그 실행에서는 그 문서의 색인을 요청하지 않는다. 이미 저장한 요약·캡션은 남고, 다음 예약 색인이 남은 `pending`부터 만든다(`REQ-BE-2.3.6`). 바꾼 뒤 `outcome: 'failure'`인 `captioning` 기록을 남기며, 상세에는 그 문서의 이번 실행 `generated` 합(`count`)과 `temporary` 합(`failedCount`)만 담는다(`REQ-BE-6.1.1`, logs `MODULE.md`의 `LogDetail`). 종료로 실행이 끊기면 되돌리지 않고 다음 기동이 `REQ-BE-1.9.12`로 되돌린다. 조건이 어긋나면 바꾸지 않고 기록도 남기지 않는다
+- 처리 계약: 예약 색인이 `captioning`으로 바꾼 문서 중 그 실행에서 `REQ-BE-1.9.13`으로 되돌리지 못한 문서(저장 오류 등으로 요약·캡션 생성이 중간에 멈췄거나, 표 요약 뒤에도 `remaining`이 0이 아닌 문서 등)를, 그 실행의 색인 요청(「예약 색인 실행」)을 마친 뒤 삭제됨·교체됨이 아니고 처리 상태가 `captioning`이며 `latestVersion`이 이번 실행이 읽은 버전일 때만 조건부 갱신 하나로 `queued`로 바꾸고 `queuedVersion`을 그 버전으로 둔다(`REQ-BE-1.10.2`). 그 실행에서는 그 문서의 색인을 요청하지 않는다. 이미 저장한 요약·캡션은 남고, 다음 예약 색인이 남은 `pending`부터 만든다(`REQ-BE-2.3.6`). 바꾼 뒤 `outcome: 'failure'`인 `captioning` 기록을 남기며, 상세에는 그 문서의 이번 실행 `generated` 합(`count`)과 `temporary` 합(`failedCount`)만 담는다(`REQ-BE-6.1.1`, logs `MODULE.md`의 `LogDetail`). 종료로 실행이 끊기면 되돌리지 않고 다음 기동이 `REQ-BE-1.9.12`로 되돌린다. 이 갱신이 저장 오류로 실패한 문서는 `captioning`으로 남고 다음 예약 색인이 시작할 때 `REQ-BE-1.10.10`으로 되돌린다. 조건이 어긋나면 바꾸지 않고 기록도 남기지 않는다
 - 충족 기준: 요약·캡션 생성이 중간에 멈춘 문서와 표 요약 뒤에도 `pending`이 남은 문서는 그 실행이 끝나면 처리 상태가 `queued`이고 `queuedVersion`이 그 버전이며, 결과가 실패이고 그 실행에서 만든 수를 담은 `captioning` 기록이 하나 생기고, 그 실행에서 그 문서의 색인 요청이 가지 않고, 다음 예약 색인에서 남은 `pending`만 요청된다. 그사이 삭제·교체된 문서와 종료로 끊긴 실행의 문서는 `queued`로 돌아가지 않고 기록도 생기지 않는다
 
 ### 예약 색인 — `REQ-BE-1.10`
@@ -521,8 +521,8 @@ classDiagram
 
 **`REQ-BE-1.10.2`** 색인 대기로 바꾸는 갱신과 함께 대기열에 넣기
 
-- 처리 계약: `REQ-BE-1.9.3`, `REQ-BE-1.9.13`, `REQ-BE-1.9.14`, `REQ-BE-1.9.12`, `REQ-BE-1.10.5`가 처리 상태를 `queued`로 바꾸는 조건부 갱신 하나에서 `queuedVersion`을 `latestVersion`으로 둔다. 둘 중 하나만 쓰는 갱신은 없다
-- 충족 기준: 다섯 계기 뒤 처리 상태가 `queued`이면 `queuedVersion`이 마지막 버전이고, 그 갱신이 조건이 어긋나 실패하면 처리 상태도 `queuedVersion`도 그대로다
+- 처리 계약: `REQ-BE-1.9.3`, `REQ-BE-1.9.13`, `REQ-BE-1.9.14`, `REQ-BE-1.9.12`, `REQ-BE-1.10.10`, `REQ-BE-1.10.5`가 처리 상태를 `queued`로 바꾸는 조건부 갱신 하나에서 `queuedVersion`을 `latestVersion`으로 둔다. 둘 중 하나만 쓰는 갱신은 없다
+- 충족 기준: 여섯 계기 뒤 처리 상태가 `queued`이면 `queuedVersion`이 마지막 버전이고, 그 갱신이 조건이 어긋나 실패하면 처리 상태도 `queuedVersion`도 그대로다
 
 **`REQ-BE-1.10.3`** 응답을 받으면 대기열에서 빼고, 연결 실패면 남김
 
@@ -563,6 +563,11 @@ classDiagram
 
 - 처리 계약: 한 실행에서 어느 문서의 표 요약도 `captioning`으로 바꾼 모든 문서의 이미지 캡션(`generateHints`의 `image`)보다 먼저 요청하지 않고, 색인 요청을 그 문서들의 요약·캡션 요청보다 먼저 보내지 않는다. 단계는 「예약 색인 실행」이 정한다. `shouldContinue`는 문서가 삭제됨·교체됨이 아니고, 처리 상태가 `captioning`이며 마지막 버전이 이번 실행이 읽은 버전인지를 본다(`REQ-BE-1.8.3`, `REQ-BE-1.2.8`). `stopped`인 문서는 남은 단계를 건너뛰고, 대기열로 되돌리는 일은 `REQ-BE-1.9.14`가 정한다. 요청 순서의 앱 사이 계약은 루트 `IF-3`이 소유한다
 - 충족 기준: 이미지와 표가 함께 있는 문서 둘이 대기열에 있으면 RAG Server 가짜가 받는 요청이 두 문서의 이미지 캡션, 두 문서의 표 요약, 색인 요청 순이고, 표만 있는 문서도 다른 문서의 이미지 캡션이 모두 끝난 뒤 표 요약을 받는다
+
+**`REQ-BE-1.10.10`** 예약 색인 시작 때 요약·캡션 생성 중에 남은 문서를 색인 대기로 되돌림
+
+- 처리 계약: 예약 색인은 대상을 읽기 전에(「예약 색인 실행」 0단계) 처리 상태가 `captioning`인 문서(교체됨·삭제됨 제외, `REQ-BE-1.9.11`)를, 처리 상태가 `captioning`이고 `latestVersion`이 읽은 값일 때만 조건부 갱신 하나로 `queued`로 바꾸며 `queuedVersion`을 `latestVersion`으로 둔다(`REQ-BE-1.10.2`). 예약 색인은 겹쳐 돌지 않으므로 이때 `captioning`인 문서는 앞 실행이 `REQ-BE-1.9.14`의 갱신에 실패해 남긴 문서다. 되돌린 문서는 이어서 읽는 대상에 들어가, 그 실행이 남은 `pending`부터 요약·캡션을 만들고 색인을 요청한다(`REQ-BE-2.3.6`). 조건이 어긋나면 바꾸지 않는다. 되돌린 문서 수는 `documents.index_scheduled`의 `requeued`로 남긴다
+- 충족 기준: 앞 실행이 끝난 뒤 `captioning`으로 남은 문서가 있으면 다음 예약 색인에서 그 문서가 `queued`와 대기열을 거쳐 남은 `pending`인 표·이미지만 요청받고 그 실행에서 색인 요청까지 가며, 삭제됨·교체됨인 `captioning` 문서는 되돌리지 않는다
 
 ## 다른 모듈용 조회
 
@@ -625,7 +630,7 @@ stateDiagram-v2
     failed --> uploaded: 내용 다시 올리기
 ```
 
-- `queued`는 그림에서 둘로 나뉜다. `queued (대기열)`(`queuedVersion` 값 있음)은 예약 색인을 기다리고, `queued (RAG 접수)`(대기열 밖)는 RAG Server가 접수한 작업이 시작을 기다린다(`REQ-BE-1.9.5`의 `queued` 이벤트도 이쪽이다). 대기열에 들어가는 계기는 색인용 MD 완성(`REQ-BE-1.9.3`), 예약 색인의 요약·캡션 완료(`REQ-BE-1.9.13`)와 미완료 되돌리기(`REQ-BE-1.9.14`), 기동 때 요약·캡션 생성 중 되돌리기(`REQ-BE-1.9.12`), 실패 되돌리기(`REQ-BE-1.10.5`)뿐이다(`REQ-BE-1.10.2`). 다만 선점을 되돌리면 선점 전의 대기열이 되살아난다(`REQ-BE-1.10.4`, 「기동 때 선점 되돌리기」)
+- `queued`는 그림에서 둘로 나뉜다. `queued (대기열)`(`queuedVersion` 값 있음)은 예약 색인을 기다리고, `queued (RAG 접수)`(대기열 밖)는 RAG Server가 접수한 작업이 시작을 기다린다(`REQ-BE-1.9.5`의 `queued` 이벤트도 이쪽이다). 대기열에 들어가는 계기는 색인용 MD 완성(`REQ-BE-1.9.3`), 예약 색인의 요약·캡션 완료(`REQ-BE-1.9.13`)와 미완료 되돌리기(`REQ-BE-1.9.14`), 기동 때 요약·캡션 생성 중 되돌리기(`REQ-BE-1.9.12`), 예약 색인 시작 때 요약·캡션 생성 중 되돌리기(`REQ-BE-1.10.10`), 실패 되돌리기(`REQ-BE-1.10.5`)뿐이다(`REQ-BE-1.10.2`). 다만 선점을 되돌리면 선점 전의 대기열이 되살아난다(`REQ-BE-1.10.4`, 「기동 때 선점 되돌리기」)
 - `captioning`은 예약 색인 안에서만 생긴다(`REQ-BE-1.9.2`). 재색인은 임시 설명이 있어도 바로 대기열로 가고, 다음 예약 색인이 `captioning`을 거치게 한다(`REQ-BE-1.7.1`)
 - `queued (대기열)`에서 다른 상태로 가는 전이는 모두 같은 갱신에서 대기열에서 뺀다(`REQ-BE-1.10.3`, `REQ-BE-1.10.7`). `unreachable`은 상태도 대기열도 바꾸지 않는다
 - 교체됨이 되면 `uploaded`·`captioning`·`queued`·`indexing`에서 `failed`(`REPLACED`)로 간다(`REQ-BE-1.2.8`)
@@ -658,7 +663,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TB
-    S["대상 읽기: 대기열 문서와 버전"] --> C["만들 요약·캡션이 있는 문서를 captioning으로"]
+    Z["남은 captioning 문서를 queued로"] --> S["대상 읽기: 대기열 문서와 버전"] --> C["만들 요약·캡션이 있는 문서를 captioning으로"]
     C --> I["모든 captioning 문서의 이미지 캡션"]
     I --> T["마치지 않은 문서의 표 요약"]
     T --> X["대상 문서의 색인 요청"]
@@ -668,7 +673,8 @@ flowchart TB
     R -.-> Q
 ```
 
-1. **대상 읽기** — 실행을 시작할 때 대기열의 문서와 버전을 읽는다. 선점 중인 문서, 삭제됨·교체됨은 뺀다. 이 뒤에 대기열에 들어온 문서·버전은 다음 실행에 맡긴다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.11`)
+0. **남은 요약·캡션 생성 중 되돌리기** — `captioning`으로 남은 문서(앞 실행이 되돌리지 못한 문서)를 `queued`로 되돌리며 대기열에 넣는다. 삭제됨·교체됨은 뺀다. (`REQ-BE-1.10.10`, `REQ-BE-1.9.11`)
+1. **대상 읽기** — 0을 마친 뒤 대기열의 문서와 버전을 읽는다. 선점 중인 문서, 삭제됨·교체됨은 뺀다. 이 뒤에 대기열에 들어온 문서·버전은 다음 실행에 맡긴다. (`REQ-BE-1.10.1`, `REQ-BE-1.9.11`)
 2. **요약·캡션 생성 중** — 대상 중 `pendingHints`가 1 이상인 문서를 `captioning`으로 바꾸며 대기열에서 뺀다. 만들 것이 없는 문서는 `queued` 그대로 둔다. 모든 문서를 바꾼 뒤에 이미지 캡션을 시작한다. (`REQ-BE-1.9.2`, `REQ-BE-1.10.7`)
 3. **이미지 캡션** — `captioning`으로 바꾼 모든 문서에 `image`로 `generateHints`를 부른다. `remaining`이 0이 된 문서는 바로 `queued`로 되돌리며 대기열에 넣는다. (`REQ-BE-1.10.9`, `REQ-BE-1.9.13`)
 4. **표 요약** — 3에서 되돌리지 않은 문서(멈춘 문서 제외)에 `table`로 `generateHints`를 부르고, 마친 문서를 `queued`로 되돌리며 대기열에 넣는다. (`REQ-BE-1.10.9`, `REQ-BE-1.9.13`)
@@ -721,7 +727,7 @@ flowchart TB
 | `documents.replaced` | 교체 | info | `docId`, `replacedBy` | `REQ-BE-1.2.5` |
 | `documents.processing_stopped` | 삭제·교체·새 버전·종료·상태 변경으로 처리를 멈춤 | info | `docId`, `version`, `reason`(`deleted`·`replaced`·`superseded`·`shutdown`·`state_changed`) | `REQ-BE-1.8.3` |
 | `documents.resume` | 기동 처리 | info | `uploaded`(표·이미지 추출을 다시 한 문서 수), `captioning`(색인 대기로 되돌린 문서 수), `reconciled`, `recovered`(「기동 때 선점 되돌리기」로 직전 버전으로 되돌린 문서 수) | `REQ-BE-1.9.9`, `REQ-BE-1.9.12` |
-| `documents.index_scheduled` | 예약 색인 한 번이 끝남 | info | `captioned`(요약·캡션 생성 중으로 바꾼 문서 수), `requested`(색인을 요청한 문서 수), `unreachable`(연결 실패로 대기열에 남긴 문서 수) | `REQ-BE-1.10.1`, `REQ-BE-1.10.3` |
+| `documents.index_scheduled` | 예약 색인 한 번이 끝남 | info | `requeued`(시작 때 요약·캡션 생성 중에서 색인 대기로 되돌린 문서 수), `captioned`(요약·캡션 생성 중으로 바꾼 문서 수), `requested`(색인을 요청한 문서 수), `unreachable`(연결 실패로 대기열에 남긴 문서 수) | `REQ-BE-1.10.1`, `REQ-BE-1.10.3`, `REQ-BE-1.10.10` |
 | `documents.index_schedule_skipped` | 앞 예약 색인이 끝나지 않아 그 일정 시각의 실행을 건너뜀 | warning | `queued`(그때 대기열에 있는 문서 수), `captioning`(그때 요약·캡션 생성 중인 문서 수) | `REQ-BE-1.10.1` |
 | `documents.task_failed` | 백그라운드 작업 실패 | warning | `task`(`process`·`scheduled_index`·`delete_chunks`·`metadata`·`resume`·`reconcile`·`rag_retry`), `docId`(문서와 무관하면 `null`), `errorName` | `REQ-BE-1.1.9` |
 | `documents.event_dropped` | 작업 상태 이벤트를 3번 시도해도 조건이 어긋나 반영하지 못함 | warning | `docId`, `version`, `jobState` | `REQ-BE-1.9.5` |
@@ -802,7 +808,7 @@ flowchart TB
 | `REQ-BE-1.9.14` | unit | 요약·캡션 생성 예외·표 요약 뒤 `pending` 남음 문서가 실행 끝에 `queued`와 대기열, 실패 결과의 `captioning` 기록과 그 실행의 개수, 그 실행에서 색인 요청 없음, 다음 실행에서 남은 것만, 삭제·교체·종료로 끊긴 문서는 되돌리지 않고 기록 없음 | assets·indexing·logs (가짜, 예외) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-3.3.1` | unit | (documents 쪽, 대기열 제외) 기동 처리·상태 맞추기에서 대기열 문서 제외, 대기열 밖 `queued`·`indexing`만 `reconcile`에 넘김 | indexing (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.1` | unit | 일정 시각에만 요약·캡션을 만든 뒤 대상 문서마다 요청, 재색인 버전만 `force`, 선점 중 문서 건너뜀, 실행 중 대기열에 들어온 문서는 요청하지 않음, 앞 실행 중의 일정 시각은 건너뛰고 `documents.index_schedule_skipped`를 남기며 다음 일정에 처리 | assets·indexing (가짜), 일정 (가짜) | `src/documents/**/*.spec.ts` |
-| `REQ-BE-1.10.2` | unit | 다섯 계기마다 색인 대기 전환과 대기열 넣기가 한 갱신, 조건이 어긋나면 둘 다 그대로 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.10.2` | unit | 여섯 계기마다 색인 대기 전환과 대기열 넣기가 한 갱신, 조건이 어긋나면 둘 다 그대로 | `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.3` | unit | 응답 결과별 대기열에서 빼기, 연결 실패면 남고 다음 일정에 다시 요청, `requestSeq`가 바뀌어 버린 결과는 대기열을 건드리지 않음 | indexing (가짜, 실패) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.4` | unit | 대기열 문서의 편집·다시 올리기가 이전 버전을 빼기, 새 버전 실패 시 대기열 복원, 「기동 때 선점 되돌리기」 표의 네 경우 | assets (가짜, 실패), `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.5` | unit | 실패 문서를 색인 대기로 바꾸기와 대기열, `jobId` 비우기·`requestSeq` 늘리기 → 상태 갱신 → 같은 값의 `failure`만 비우기 순서, 단계 사이에서 멈춘 경우, 늦게 온 지난 `accepted`가 `jobId`를 못 씀, 2·3단계 사이의 새 실패 사유가 남음 | `MONGO_DB` (가짜, 단계 사이 실패), indexing·logs (가짜) | `src/documents/**/*.spec.ts` |
@@ -811,3 +817,4 @@ flowchart TB
 | `REQ-BE-1.10.7` | unit | 삭제·교체·작업 상태 이벤트·`captioning` 전환으로 대기열에서 빠짐 | `MONGO_DB` (가짜), 이벤트 (가짜) | `src/documents/**/*.spec.ts` |
 | `REQ-BE-1.10.8` | e2e | 앱을 다시 띄워도 대기열이 남고 다음 일정에 요청 | RAG Server (가짜) | `test/` |
 | `REQ-BE-1.10.9` | unit | 모든 문서의 이미지 캡션 → 표 요약 → 색인 요청 순서, 멈춘 문서는 남은 단계 건너뜀 | assets·indexing (가짜) | `src/documents/**/*.spec.ts` |
+| `REQ-BE-1.10.10` | unit | 시작 때 남은 `captioning` 문서가 `queued`와 대기열로 돌아와 그 실행 대상이 되고 남은 `pending`만 요청·색인 요청까지, 삭제됨·교체됨·조건 어긋남은 그대로, `requeued` 개수 | assets·indexing (가짜), `MONGO_DB` (가짜) | `src/documents/**/*.spec.ts` |
